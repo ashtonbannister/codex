@@ -16,8 +16,10 @@ import test from "node:test";
 import type { VerificationProfile } from "../src/shared/types";
 import { captureRevisionSnapshot } from "../src/main/services/revision";
 import {
+  CleanupFailure,
   classifyWindowsInventoryFailure,
   parseWindowsProcessTable,
+  readWindowsInventory,
   runProvider,
   selectWindowsDescendants,
   windowsInventoryTimeout,
@@ -361,6 +363,109 @@ test("cold Windows inventory gets up to five seconds without extending the total
   assert.equal(windowsInventoryTimeout(deadline, 7_999), 1);
   assert.equal(windowsInventoryTimeout(deadline, 8_000), 0);
   assert.equal(windowsInventoryTimeout(deadline, 9_000), 0);
+});
+
+test("a timed-out Windows inventory retries once inside the original deadline", async () => {
+  let now = 0;
+  const budgets: number[] = [];
+  const rows = [{ pid: 42, parent: 7, started: 1000 }];
+  const result = await readWindowsInventory(
+    8000,
+    async (timeout) => {
+      budgets.push(timeout);
+      if (budgets.length === 1) {
+        now += timeout;
+        throw new CleanupFailure("windows-inventory-timeout");
+      }
+      now += 700;
+      return rows;
+    },
+    () => now,
+  );
+  assert.deepEqual(result, rows);
+  assert.deepEqual(budgets, [5000, 3000]);
+  assert.equal(now, 5700);
+
+  now = 0;
+  budgets.length = 0;
+  await assert.rejects(
+    readWindowsInventory(
+      8000,
+      async (timeout) => {
+        budgets.push(timeout);
+        now += timeout;
+        throw new CleanupFailure("windows-inventory-timeout");
+      },
+      () => now,
+    ),
+    /windows-inventory-timeout/,
+  );
+  assert.deepEqual(budgets, [5000, 3000]);
+  assert.equal(now, 8000);
+});
+
+test("Windows inventory retry never extends an expired deadline or retries non-timeout failures", async () => {
+  for (const code of [
+    "windows-inventory-unavailable",
+    "windows-inventory-invalid",
+    "windows-inventory-output-limit",
+    "windows-identity-ambiguous",
+  ] as const) {
+    let calls = 0;
+    await assert.rejects(
+      readWindowsInventory(
+        8000,
+        async () => {
+          calls += 1;
+          throw new CleanupFailure(code);
+        },
+        () => 0,
+      ),
+      new RegExp(code),
+    );
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  await assert.rejects(
+    readWindowsInventory(
+      8000,
+      async () => {
+        calls += 1;
+        return [];
+      },
+      () => 8000,
+    ),
+    /windows-cleanup-deadline/,
+  );
+  assert.equal(calls, 0);
+
+  let now = 0;
+  await assert.rejects(
+    readWindowsInventory(
+      8000,
+      async () => {
+        calls += 1;
+        now = 8000;
+        throw new CleanupFailure("windows-inventory-timeout");
+      },
+      () => now,
+    ),
+    /windows-cleanup-deadline/,
+  );
+  assert.equal(calls, 1);
+
+  now = 0;
+  await assert.rejects(
+    readWindowsInventory(
+      8000,
+      async () => {
+        now = 8000;
+        return [{ pid: 42, parent: 7, started: 1000 }];
+      },
+      () => now,
+    ),
+    /windows-cleanup-deadline/,
+  );
 });
 
 for (const runner of ["verification", "provider"] as const) {

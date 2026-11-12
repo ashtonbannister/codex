@@ -527,11 +527,25 @@ export class WorkspaceService {
   }
 
   private async refreshProviders(): Promise<void> {
-    this.providers = await Promise.all(
-      (["codex", "claude", "ollama"] as const).map((provider) =>
+    // Ollama uses the same Codex executable/capabilities. Share that result
+    // instead of launching duplicate metadata processes and cleanup queries.
+    const [codex, claude] = await Promise.all(
+      (["codex", "claude"] as const).map((provider) =>
         probeProvider(provider, this.state.settings, this.dataDir),
       ),
     );
+    const ollama: ProviderStatus = {
+      ...codex,
+      id: "ollama",
+      name: "Local · Ollama",
+    };
+    if (codex.available) {
+      ollama.available = Boolean(this.state.settings.localModel);
+      ollama.detail = this.state.settings.localModel
+        ? "Codex bridge ready; local Ollama server/model availability is checked only when you run."
+        : "Set the name of an already-installed Ollama model in Settings. No model is downloaded automatically.";
+    }
+    this.providers = [codex, claude, ollama];
   }
 
   async snapshot(): Promise<WorkspaceSnapshot> {

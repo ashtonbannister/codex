@@ -123,7 +123,7 @@ type TerminationFailureCode =
   | "output-pipes-still-open";
 const terminationFailures = new WeakMap<ChildProcess, TerminationFailureCode>();
 
-class CleanupFailure extends Error {
+export class CleanupFailure extends Error {
   constructor(
     readonly code: TerminationFailureCode,
     message: string = code,
@@ -341,7 +341,7 @@ async function windowsProcessTable(timeout: number): Promise<WindowsProcess[]> {
   // Fixed OS command, no profile scripts and no model/repository text. Only
   // process identity metadata is inspected, never command lines or env vars.
   const command =
-    "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; parent=$_.ParentProcessId; started=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }) } }) | ConvertTo-Json -Compress";
+    "$ErrorActionPreference='Stop'; @(Get-CimInstance -Query 'SELECT ProcessId, ParentProcessId, CreationDate FROM Win32_Process' | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; parent=$_.ParentProcessId; started=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }) } }) | ConvertTo-Json -Compress";
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync(
@@ -365,6 +365,36 @@ async function windowsProcessTable(timeout: number): Promise<WindowsProcess[]> {
     throw new CleanupFailure(classifyWindowsInventoryFailure(error));
   }
   return parseWindowsProcessTable(stdout);
+}
+
+/**
+ * A cold/concurrent CIM query can time out once even when the next succeeds.
+ * Retry only that transient category, once, inside the original deadline.
+ * Reader/clock injection keeps the timing contract deterministic in tests.
+ */
+export async function readWindowsInventory(
+  deadline: number,
+  read: (timeout: number) => Promise<WindowsProcess[]> = windowsProcessTable,
+  now: () => number = Date.now,
+): Promise<WindowsProcess[]> {
+  for (let attempt = 0; ; attempt += 1) {
+    const timeout = windowsInventoryTimeout(deadline, now());
+    if (!timeout) throw new CleanupFailure("windows-cleanup-deadline");
+    try {
+      const rows = await read(timeout);
+      if (now() >= deadline)
+        throw new CleanupFailure("windows-cleanup-deadline");
+      return rows;
+    } catch (error) {
+      if (
+        attempt === 0 &&
+        error instanceof CleanupFailure &&
+        error.code === "windows-inventory-timeout"
+      )
+        continue;
+      throw error;
+    }
+  }
 }
 
 export function parseWindowsProcessTable(stdout: string): WindowsProcess[] {
@@ -431,7 +461,7 @@ async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
   if (child.exitCode === null && child.signalCode === null) await kill(pid);
   const known = new Map<number, number>([[pid, lifetime.startedAt]]);
   while (Date.now() < deadline) {
-    const rows = await windowsProcessTable(timeLeft());
+    const rows = await readWindowsInventory(deadline);
     if (Date.now() >= deadline)
       throw new CleanupFailure("windows-cleanup-deadline");
     const discovered = selectWindowsDescendants(

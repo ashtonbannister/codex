@@ -4,6 +4,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
@@ -730,8 +731,60 @@ test("failed initial persistence leaves no active worker and preserves its workt
   assert.equal((await terminal(service, next.id)).status, "completed");
 });
 
-test("explicit provider refresh detects installation changes without making a model call", async (t) => {
-  const { service, executable } = await fixture(t);
+test("provider refresh shares Codex capability checks with Ollama and detects installation changes", async (t) => {
+  const { service, executable, root } = await fixture(t);
+  const probesDirectory = path.join(root, "metadata-probes");
+  await mkdir(probesDirectory);
+  // Each invocation writes its own file, so parallel metadata probes cannot
+  // race a shared log write or rely on a PID remaining unique across refreshes.
+  await writeFile(
+    executable,
+    `import { randomUUID as probeId } from 'node:crypto';
+import { writeFileSync as recordProbe } from 'node:fs';
+recordProbe(${JSON.stringify(probesDirectory)} + '/' + probeId() + '.json', JSON.stringify(process.argv.slice(2)));
+${fakeCli}`,
+  );
+  const probeArguments = async () =>
+    Promise.all(
+      (await readdir(probesDirectory)).map(async (file) =>
+        JSON.parse(await readFile(path.join(probesDirectory, file), "utf8")),
+      ),
+    );
+  const refreshed = await service.refreshProviderStatus();
+  const codex = refreshed.providers.find(
+    (provider) => provider.id === "codex",
+  )!;
+  const local = refreshed.providers.find(
+    (provider) => provider.id === "ollama",
+  )!;
+  assert.equal(codex.available, true);
+  assert.equal(local.available, false);
+  assert.equal(local.version, codex.version);
+  assert.match(
+    local.detail,
+    /Set the name of an already-installed Ollama model/,
+  );
+  assert.deepEqual(
+    (await probeArguments()).map((args) => args.join(" ")).sort(),
+    ["--help", "--version", "--version", "exec --help"],
+  );
+  await service.snapshot();
+  assert.equal((await probeArguments()).length, 4, "snapshots stay cached");
+  await service.updateSettings({
+    ...refreshed.state.settings,
+    localModel: "fixture-local:latest",
+  });
+  const configured = (await service.snapshot()).providers.find(
+    (provider) => provider.id === "ollama",
+  )!;
+  assert.equal(configured.available, true);
+  assert.equal(configured.version, codex.version);
+  assert.match(configured.detail, /availability is checked only when you run/);
+  assert.equal(
+    (await probeArguments()).length,
+    8,
+    "each refresh probes each distinct CLI twice, with no model call",
+  );
   assert.equal(
     (await service.snapshot()).providers.find(
       (provider) => provider.id === "codex",
@@ -746,12 +799,15 @@ test("explicit provider refresh detects installation changes without making a mo
     true,
     "normal snapshots use cached metadata",
   );
-  assert.equal(
-    (await service.refreshProviderStatus()).providers.find(
-      (provider) => provider.id === "codex",
-    )?.available,
-    false,
-  );
+  const unavailable = (await service.refreshProviderStatus()).providers;
+  const missingCodex = unavailable.find((provider) => provider.id === "codex")!;
+  const missingLocal = unavailable.find(
+    (provider) => provider.id === "ollama",
+  )!;
+  assert.equal(missingCodex.available, false);
+  assert.equal(missingLocal.available, false);
+  assert.equal(missingLocal.detail, missingCodex.detail);
+  assert.equal((await probeArguments()).length, 8);
 });
 
 test("a disk failure during streaming stops the worker without an unhandled rejection", async (t) => {
