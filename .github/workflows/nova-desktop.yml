@@ -70,7 +70,8 @@ jobs:
           retention-days: 14
       - name: Package unsigned Windows installers
         if: runner.os == 'Windows'
-        run: npm run pack:win
+        # The check step already built this exact revision. Package those assets.
+        run: npx --no-install electron-builder --win --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
       - name: Upload Windows test builds

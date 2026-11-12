@@ -1,6 +1,6 @@
 # Existing Codex integration
 
-Version 0.3 connects Nova Workbench to a separately installed Codex engine and selected local reference files. It does not replace Codex's private desktop databases or promise that all desktop features can be used by other providers.
+Version 0.4.0 retains the separately installed Codex engine and selected local-reference integration introduced in 0.3, while adding configurable local providers, reviewed Git actions, explicit recovery, and export. It remains a development alpha. It does not replace Codex's private desktop databases or promise that all desktop features can be used by other providers.
 
 ## Folder ownership
 
@@ -36,6 +36,14 @@ The Context inspector shows Nova's selected reference prompt and omissions. A na
 
 Source files can change outside Nova, and another official Codex client may also use the original conversation. Stop competing writers before continuing important work. Nova's own project/run serialization does not lock every external application.
 
+## Local handoff, Git actions, and export
+
+The Local option still runs the Codex agent harness, but Settings can select Ollama, LM Studio, or a compatible custom loopback server and discover its model catalog. Responses-native servers connect directly; Chat Completions servers use a bounded, per-run text/tool translation bridge. Streaming tool support is required. Images, audio, attachments, encrypted/nonportable reasoning state, provider-native response IDs, hosted tools, and structured response formats are not part of that bridge. Model discovery is metadata-only, has no inference/download fallback, and is not proof of model capability or that an LM Studio/custom model is loaded. Authenticated or non-loopback local endpoints are not supported. See [local setup](../README.md#connect-a-local-model) for limits; actual installed servers, including any Strata endpoint, still need live compatibility checks.
+
+Reviewed commit and integration actions operate only on Nova-owned Build worktrees. They do not adopt `.codex\worktrees`, rewrite native session records, or add Claude/local turns directly to Codex's private history. Commit affects the reviewed thread branch only. Bringing it into the original checkout requires a separate native confirmation, clean source and target, exact reviewed branch/HEAD/fingerprint checks, and a fast-forward ancestor relation. Divergence or changed inputs fail without a forced reset, stash, merge commit, conflict resolution, remote push, or worktree deletion.
+
+Markdown export contains the visible transcript already retained by Nova plus active project memory, not an unlimited native-history archive. Raw configuration, credentials, tool/error logs, private reasoning, and provider state are not added. Active memory may include stale/unverified notes. Common secret patterns are redacted, but private details or unrecognized secrets in visible text can remain: review before sharing. The user selects the destination in a native Save dialog; the 8 MiB export limit fails explicitly rather than truncating silently. Device-local composer drafts are not part of the export or the native Codex store.
+
 ## Bounded references and history
 
 - Resource sections are `memories`, `memories_v2`, `instructions`, `skills`, and `plans`.
@@ -60,10 +68,12 @@ Requests have deadlines, bounded JSON/stdout/stderr, cancellation handling, and 
 
 The fork identity is saved before `turn/start`. If that save fails or cancellation wins, no model turn should be issued. A failed/aborted run is not imported as a successful conversation turn.
 
-If termination of a metadata app-server cannot be confirmed, Nova persists the canonical home in `codexRecoveryHomes` and blocks subsequent history operations/native continuation for that home, including after restart. Reference-only filesystem browsing remains available. If a native model worker cannot be confirmed stopped, existing run/project recovery locks also apply. This version has no automatic recovery/unlock UI. Confirm the owned process tree has stopped, close Nova, back up its `workspace.json`, and deliberately clear only the relevant recovery entry/flag; never clear it while an old worker could still be running. Do not modify Codex's databases to recover Nova.
+If termination of a metadata app-server cannot be confirmed, Nova persists the canonical home in `codexRecoveryHomes` and blocks subsequent history operations/native continuation for that home, including after restart. Reference-only filesystem browsing remains available. If a native model worker cannot be confirmed stopped, existing run/project recovery locks also apply.
+
+After independently inspecting and stopping the affected workers and children, open **Settings → Recovery**, review the project or Codex-home entry, and explicitly acknowledge cleanup in the native dialog. Acknowledgement is refused while any Nova agent/check/history operation is active or if the listed recovery state changes. It records the user's confirmation, **not** a new successful operating-system process inspection. Run/check uncertainty remains in history with acknowledgement timestamps; home acknowledgements are retained separately. Only the selected entry is acknowledged, so another listed project/home lock may still need attention. New unconfirmed interruptions lock again. Do not acknowledge while an old worker could still be running, edit `workspace.json` to bypass the workflow, or modify Codex's databases to recover Nova.
 
 ## Validation and remaining real-machine checks
 
 Automated coverage uses temporary Codex homes, fake stdio app-servers, disposable Git repositories, synthetic renderer bridges, and a native Electron smoke test. It performs no paid inference, user-account sign-in, or live Codex migration. Test results for a particular commit are in its GitHub Actions run.
 
-Before using important projects on Windows, confirm the actual installed executable's protocol, E: junction/redirect resolution, native active/archived history, source-directory preservation, native fork persistence, and one explicit handoff with each intended provider. Packaging success does not substitute for these live compatibility checks. Keep ordinary backups of the original installation independently of Nova.
+Live Windows use and actual Codex/Claude/local provider compatibility remain untested for this commit. Before using important projects on Windows, confirm the installed executable's protocol, E: junction/redirect resolution, native active/archived history, source-directory preservation, native fork persistence, and one explicit handoff with each intended provider. Exercise the selected local protocol with real tool calls, and the commit/fast-forward, recovery, and export workflows against a disposable project. Packaging success does not substitute for these live compatibility checks. Keep ordinary backups of the original installation independently of Nova.

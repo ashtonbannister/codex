@@ -6,7 +6,7 @@ import type { ProviderId, Run } from "../../shared/types";
 export const providerNames: Record<ProviderId, string> = {
   codex: "Codex",
   claude: "Claude Code",
-  ollama: "Local · Ollama",
+  ollama: "Local model",
 };
 export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

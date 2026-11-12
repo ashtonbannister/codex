@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -46,6 +46,15 @@ import type {
   CodexThreadQuery,
   ImportedMessage,
 } from "../../shared/compatibility";
+import type {
+  CommitWorktreeRequest,
+  ConversationExport,
+  IntegrateWorktreeRequest,
+  RecoveryItem,
+  RecoveryRequest,
+  WorktreeActionResult,
+  WorktreeReview,
+} from "../../shared/workspace-actions";
 import { APP_VERSION, emptyWorkspace } from "../../shared/types";
 import { buildRunContext } from "./context";
 import { captureMemoryFingerprint } from "./memory-source";
@@ -67,14 +76,23 @@ import {
   createIsolatedWorktree,
   getWorkspaceDiff,
   inspectRepository,
+  assertOrdinaryGitState,
+  commitReviewedWorktree,
+  fastForwardReviewedWorktree,
+  isGitAncestor,
+  sameGitRepository,
+  runGit,
+  parsePorcelain,
 } from "./git";
 import {
   assertLocalModelAvailable,
+  prepareLocalProvider,
   probeProvider,
   providerArguments,
   resolveExecutable,
   runProvider,
 } from "./providers";
+import { connectionFromSettings } from "./local-models";
 import type { NormalizedEvent } from "./provider-events";
 import {
   absoluteDirectory,
@@ -399,6 +417,7 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       terminationUnconfirmed: item.terminationUnconfirmed as
         | boolean
         | undefined,
+      recoveryAcknowledgedAt: optionalText(item.recoveryAcknowledgedAt, "Recovery acknowledgement", 80),
     };
   });
   if (new Set(runs.map((run) => run.id)).size !== runs.length)
@@ -517,6 +536,7 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
           item.terminationUnconfirmed,
           "Verification termination",
         ),
+        recoveryAcknowledgedAt: optionalText(item.recoveryAcknowledgedAt, "Recovery acknowledgement", 80),
       };
     },
   );
@@ -555,6 +575,16 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
             ),
           ),
         ];
+  if (state.codexRecoveryAcknowledgements !== undefined &&
+      (!Array.isArray(state.codexRecoveryAcknowledgements) || state.codexRecoveryAcknowledgements.length > 20_000))
+    throw new Error("Invalid saved Codex recovery acknowledgements.");
+  const codexRecoveryAcknowledgements = (state.codexRecoveryAcknowledgements as unknown[] | undefined)?.map((entry) => {
+    const item = record(entry, "Codex recovery acknowledgement");
+    return {
+      home: absoluteDirectory(item.home, "Codex recovery home"),
+      acknowledgedAt: text(item.acknowledgedAt, "Recovery acknowledgement", 80),
+    };
+  });
   return {
     schemaVersion: 1,
     projects,
@@ -565,6 +595,7 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
     verificationProfiles,
     verifications,
     codexRecoveryHomes,
+    codexRecoveryAcknowledgements,
   };
 }
 
@@ -650,6 +681,7 @@ export class WorkspaceService {
       }
       for (const run of this.state.runs) {
         if (ACTIVE.has(run.status)) {
+          delete run.recoveryAcknowledgedAt;
           if (run.status === "running") run.terminationUnconfirmed = true;
           run.status = "interrupted";
           run.finishedAt = now();
@@ -662,7 +694,7 @@ export class WorkspaceService {
             text: run.error,
           });
         }
-        if (run.terminationUnconfirmed && run.provider === "codex") {
+        if (run.terminationUnconfirmed && !run.recoveryAcknowledgedAt && run.provider === "codex") {
           const home = this.state.threads.find(
             (thread) => thread.id === run.threadId,
           )?.codex?.home;
@@ -671,6 +703,7 @@ export class WorkspaceService {
       }
       for (const check of this.state.verifications) {
         if (check.status === "running") {
+          delete check.recoveryAcknowledgedAt;
           check.status = "interrupted";
           check.finishedAt = now();
           check.terminationUnconfirmed = true;
@@ -695,13 +728,13 @@ export class WorkspaceService {
     const ollama: ProviderStatus = {
       ...codex,
       id: "ollama",
-      name: "Local · Ollama",
+      name: `Local · ${connectionFromSettings(this.state.settings).kind === "lmstudio" ? "LM Studio" : connectionFromSettings(this.state.settings).kind === "custom" ? "Custom" : "Ollama"}`,
     };
     if (codex.available) {
       ollama.available = Boolean(this.state.settings.localModel);
       ollama.detail = this.state.settings.localModel
-        ? "Codex bridge ready; local Ollama server/model availability is checked only when you run."
-        : "Set the name of an already-installed Ollama model in Settings. No model is downloaded automatically.";
+        ? "Codex bridge ready; the selected local server and exact model are checked before running."
+        : "Select an installed model from your local server in Settings. No model is downloaded automatically.";
     }
     this.providers = [codex, claude, ollama];
   }
@@ -1180,11 +1213,11 @@ export class WorkspaceService {
   private hasTerminationIssue(projectId: string): boolean {
     return (
       this.state.runs.some(
-        (run) => run.projectId === projectId && run.terminationUnconfirmed,
+        (run) => run.projectId === projectId && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt,
       ) ||
       this.state.verifications.some(
         (check) =>
-          check.projectId === projectId && check.terminationUnconfirmed,
+          check.projectId === projectId && check.terminationUnconfirmed && !check.recoveryAcknowledgedAt,
       )
     );
   }
@@ -1351,6 +1384,244 @@ export class WorkspaceService {
     return this.validateWorktree(thread);
   }
 
+  private assertActionsIdle(projectId: string): void {
+    this.ready();
+    if (this.compatibilityControllers.size || this.projectHasCheck(projectId) ||
+        this.state.runs.some((run) => run.projectId === projectId && ACTIVE.has(run.status)))
+      throw new Error("Wait for active agents, checks, and Codex history operations to finish before changing Git state or acknowledging recovery.");
+  }
+
+  private async worktreeReview(runId: string): Promise<WorktreeReview> {
+    const run = this.getRun(runId);
+    const thread = this.getThread(run.threadId);
+    const project = this.getProject(run.projectId);
+    const worktree = await this.validateWorktree(thread);
+    const original = await this.getProjectPath(project.id);
+    if (!(await sameGitRepository(worktree, original)))
+      throw new Error("The managed worktree no longer belongs to the original repository.");
+    const [source, target, status] = await Promise.all([
+      inspectRepository(worktree), inspectRepository(original),
+      runGit(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    ]);
+    const changes = parsePorcelain(status);
+    let blocked: string | undefined;
+    try { this.assertActionsIdle(project.id); }
+    catch (error) { blocked = error instanceof Error ? error.message : "The project is busy."; }
+    if (this.hasTerminationIssue(project.id)) blocked = "A previous worker needs cleanup acknowledgement in Settings → Recovery.";
+    for (const root of [worktree, original]) {
+      try { await assertOrdinaryGitState(root); }
+      catch (error) { blocked ??= error instanceof Error ? error.message : "Git is not ready for this operation."; }
+    }
+    const unavailable = { head: "", fingerprint: "", complete: false, reason: blocked };
+    const [sourceRevision, targetRevision] = blocked
+      ? [unavailable, unavailable]
+      : await Promise.all([captureRevisionSnapshot(worktree), captureRevisionSnapshot(original)]);
+    if (!sourceRevision.complete || sourceRevision.head !== source.head)
+      blocked ??= sourceRevision.reason || "Worktree changed while preparing review. Refresh it before proceeding.";
+    let integrationReason = blocked;
+    if (!source.clean) integrationReason ??= "Commit all worktree changes before integration.";
+    if (!target.clean) integrationReason ??= "The original checkout has local changes. Commit or stash them yourself before integration.";
+    if (!targetRevision.complete || targetRevision.head !== target.head)
+      integrationReason ??= targetRevision.reason || "The original checkout changed during review. Refresh before proceeding.";
+    if (target.branch === "(detached HEAD)") integrationReason ??= "Check out an integration branch in the original repository first.";
+    if (source.head === target.head) integrationReason ??= "The original checkout already contains this commit.";
+    if (!integrationReason && !(await isGitAncestor(original, target.head, source.head)))
+      integrationReason = "Branches have diverged. Integrate manually in Git; Nova only performs fast-forwards.";
+    const sensitive = changes.some((change) => change.status === "??" &&
+      change.path.split(/[\\/]/).some((part) => /^\.env(?:\.|$)|^(?:credentials|secrets|auth)(?:\.|$)|^id_(?:rsa|ed25519|ecdsa)(?:\.|$)|\.(?:pem|key|p12|pfx)$/i.test(part)));
+    const commitReason = blocked || (source.clean ? "There are no uncommitted changes." : sensitive
+      ? "Potential credential files are untracked. Ignore or remove them from the commit scope in Git before committing from Nova." : undefined);
+    return {
+      runId: run.id, branch: source.branch, head: source.head,
+      fingerprint: sourceRevision.fingerprint, changes,
+      canCommit: !commitReason, commitReason,
+      canIntegrate: !integrationReason, integrationReason,
+      targetBranch: target.branch, targetHead: target.head, targetFingerprint: targetRevision.fingerprint,
+    };
+  }
+
+  async reviewWorktree(runId: string): Promise<WorktreeReview> {
+    this.ready();
+    return this.exclusive(() => this.worktreeReview(identifier(runId, "Run")));
+  }
+
+  async commitWorktree(value: CommitWorktreeRequest): Promise<WorktreeActionResult> {
+    const input = record(value, "Commit request");
+    const runId = identifier(input.runId, "Run");
+    const message = text(input.message, "Commit message", 4_000);
+    const expectedHead = text(input.expectedHead, "Reviewed commit", 64);
+    const expectedFingerprint = text(input.expectedFingerprint, "Reviewed fingerprint", 64);
+    if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(expectedHead) || !/^[a-f0-9]{64}$/.test(expectedFingerprint))
+      throw new Error("Refresh the worktree review before committing.");
+    return this.exclusive(async () => {
+      const run = this.getRun(runId);
+      this.assertActionsIdle(run.projectId);
+      const review = await this.worktreeReview(runId);
+      if (!review.canCommit) throw new Error(review.commitReason || "This worktree cannot be committed.");
+      if (review.head !== expectedHead || review.fingerprint !== expectedFingerprint)
+        throw new Error("Worktree changed while confirmation was open. Review the updated changes before committing.");
+      const thread = this.getThread(run.threadId);
+      const worktree = await this.validateWorktree(thread);
+      const commit = await commitReviewedWorktree(worktree, { branch: review.branch, head: expectedHead }, message, async () => {
+        this.assertActionsIdle(run.projectId);
+        const current = await inspectRepository(worktree);
+        const snapshot = await captureRevisionSnapshot(worktree);
+        if (current.branch !== review.branch || current.head !== expectedHead || !snapshot.complete ||
+            snapshot.head !== expectedHead || snapshot.fingerprint !== expectedFingerprint)
+          throw new Error("Worktree changed during commit preparation. No branch was advanced; refresh the review.");
+      });
+      const before = clone(run.events);
+      const previousUpdated = thread.updatedAt;
+      thread.updatedAt = now();
+      this.addEvent(run, { kind: "status", text: `User committed reviewed changes on ${review.branch}: ${commit}. No remote push was performed.` });
+      try { await this.persist(); }
+      catch (error) {
+        run.events = before; thread.updatedAt = previousUpdated;
+        throw new Error(`Git commit ${commit} succeeded, but its Nova history entry could not be saved. Refresh before retrying; the commit was preserved.`, { cause: error });
+      }
+      return { commit, branch: review.branch, message: "Committed reviewed worktree changes. Nothing was pushed or merged." };
+    });
+  }
+
+  async integrateWorktree(value: IntegrateWorktreeRequest): Promise<WorktreeActionResult> {
+    const input = record(value, "Integration request");
+    const runId = identifier(input.runId, "Run");
+    const expectedHead = text(input.expectedHead, "Reviewed source commit", 64);
+    const expectedTargetHead = text(input.expectedTargetHead, "Reviewed target commit", 64);
+    const expectedTargetBranch = text(input.expectedTargetBranch, "Reviewed target branch", 1_000);
+    const expectedFingerprint = text(input.expectedFingerprint, "Reviewed source fingerprint", 64);
+    const expectedTargetFingerprint = text(input.expectedTargetFingerprint, "Reviewed target fingerprint", 64);
+    if (![expectedHead, expectedTargetHead].every((sha) => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(sha)) ||
+        ![expectedFingerprint, expectedTargetFingerprint].every((sha) => /^[a-f0-9]{64}$/.test(sha)))
+      throw new Error("Refresh the worktree review before integrating.");
+    return this.exclusive(async () => {
+      const run = this.getRun(runId);
+      this.assertActionsIdle(run.projectId);
+      const review = await this.worktreeReview(runId);
+      if (!review.canIntegrate) throw new Error(review.integrationReason || "This branch cannot be fast-forwarded.");
+      if (review.head !== expectedHead || review.targetHead !== expectedTargetHead || review.targetBranch !== expectedTargetBranch ||
+          review.fingerprint !== expectedFingerprint || review.targetFingerprint !== expectedTargetFingerprint)
+        throw new Error("The source or target changed while confirmation was open. Refresh the review before integration.");
+      const project = this.getProject(run.projectId);
+      const original = await this.getProjectPath(project.id);
+      await fastForwardReviewedWorktree(original, expectedHead, this.dataDir);
+      const after = await inspectRepository(original);
+      if (after.head !== expectedHead || after.branch !== expectedTargetBranch)
+        throw new Error("Git finished, but the original checkout changed concurrently. Inspect it before continuing; no rollback or force operation was attempted.");
+      const eventsBefore = clone(run.events);
+      const oldBranch = project.branch;
+      project.branch = after.branch;
+      this.addEvent(run, { kind: "status", text: `User fast-forwarded ${after.branch} to ${expectedHead}. Worktree preserved; nothing pushed.` });
+      try { await this.persist(); }
+      catch (error) {
+        run.events = eventsBefore; project.branch = oldBranch;
+        throw new Error(`Fast-forward to ${expectedHead} succeeded, but its Nova history entry could not be saved. Refresh before retrying; Git changes were preserved.`, { cause: error });
+      }
+      return { commit: after.head, branch: after.branch, message: "Original checkout fast-forwarded. The thread worktree is preserved; nothing was pushed." };
+    });
+  }
+
+  private recoveryItems(): RecoveryItem[] {
+    const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const items: RecoveryItem[] = [];
+    for (const project of this.state.projects) {
+      const runs = this.state.runs.filter((run) => run.projectId === project.id && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt);
+      const checks = this.state.verifications.filter((check) => check.projectId === project.id && check.terminationUnconfirmed && !check.recoveryAcknowledgedAt);
+      if (!runs.length && !checks.length) continue;
+      items.push({
+        id: `project-${project.id}`, kind: "project", label: project.name,
+        detail: `${runs.length} agent run(s) and ${checks.length} check(s) have unconfirmed cleanup. Stop their remaining processes before acknowledging. This does not restore or roll back files.`,
+        token: digest([project.id, runs.map((run) => [run.id, run.finishedAt]), checks.map((check) => [check.id, check.finishedAt])]),
+      });
+    }
+    for (const home of this.state.codexRecoveryHomes || []) {
+      const nativeRuns = this.state.runs.filter((run) => run.provider === "codex" && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt &&
+        this.state.threads.some((thread) => thread.id === run.threadId && thread.codex && samePath(thread.codex.home, home)));
+      items.push({
+        id: `codex-home-${digest(home)}`, kind: "codex-home", label: home,
+        detail: "A Codex history engine could not be confirmed stopped. Stop remaining Codex processes for this home before acknowledging. No process is killed automatically.",
+        token: digest([home, this.state.codexRecoveryAcknowledgements?.filter((entry) => samePath(entry.home, home)), nativeRuns.map((run) => [run.id, run.finishedAt])]),
+      });
+    }
+    return items;
+  }
+
+  async listRecoveryItems(): Promise<RecoveryItem[]> {
+    this.ready();
+    return this.exclusive(async () => clone(this.recoveryItems()));
+  }
+
+  async acknowledgeRecovery(value: RecoveryRequest): Promise<void> {
+    const input = record(value, "Recovery acknowledgement");
+    const id = text(input.id, "Recovery item", 120);
+    const token = text(input.token, "Recovery token", 64);
+    return this.exclusive(async () => {
+      this.ready();
+      if (this.active.size || this.activeVerifications.size || this.compatibilityControllers.size)
+        throw new Error("Stop all active Nova agents, checks, and history operations before acknowledging cleanup.");
+      const item = this.recoveryItems().find((entry) => entry.id === id && entry.token === token);
+      if (!item) throw new Error("Recovery state changed. Refresh it and review the current cleanup warning.");
+      const previous = clone(this.state);
+      const acknowledgedAt = now();
+      if (item.kind === "project") {
+        const projectId = item.id.slice("project-".length);
+        for (const run of this.state.runs) {
+          if (run.projectId === projectId && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt)
+            run.recoveryAcknowledgedAt = acknowledgedAt;
+        }
+        for (const check of this.state.verifications) {
+          if (check.projectId === projectId && check.terminationUnconfirmed && !check.recoveryAcknowledgedAt)
+            check.recoveryAcknowledgedAt = acknowledgedAt;
+        }
+      } else {
+        const home = item.label;
+        this.state.codexRecoveryHomes = this.state.codexRecoveryHomes?.filter((entry) => !samePath(entry, home));
+        this.state.codexRecoveryAcknowledgements = [
+          ...(this.state.codexRecoveryAcknowledgements || []).filter((entry) => !samePath(entry.home, home)),
+          { home, acknowledgedAt },
+        ];
+        for (const run of this.state.runs) {
+          if (run.provider === "codex" && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt &&
+              this.state.threads.some((thread) => thread.id === run.threadId && thread.codex && samePath(thread.codex.home, home)))
+            run.recoveryAcknowledgedAt = acknowledgedAt;
+        }
+      }
+      try { await this.persist(); }
+      catch (error) { this.state = previous; throw error; }
+    });
+  }
+
+  async exportConversation(threadId: string): Promise<ConversationExport> {
+    this.ready();
+    return this.exclusive(async () => {
+      const thread = this.getThread(threadId);
+      const project = this.getProject(thread.projectId);
+      // This is a selected visible transcript, never a raw workspace/config dump.
+      const lines = ["# Nova Workbench conversation", "", `Project: ${project.name}`, `Conversation: ${thread.title}`, "",
+        "Export contains visible messages and active project memory. Provider credentials, configuration, raw tool logs, hidden reasoning, and native provider state are not added. Common token patterns are redacted, but private details can remain in visible text; review before sharing.", ""];
+      if (thread.codex) {
+        lines.push("## Imported visible Codex history", "", ...(thread.codex.historyTruncated ? ["The imported history is bounded and may omit older messages.", ""] : []));
+        for (const message of thread.codex.history) lines.push(`### ${message.role === "user" ? "You" : "Codex"}`, "", message.text, "");
+      }
+      for (const run of this.state.runs.filter((entry) => entry.threadId === thread.id)) {
+        lines.push("## You", "", run.prompt, "", `## ${run.provider} · ${run.mode} · ${run.status}`, "");
+        for (const event of run.events.filter((entry) => entry.kind === "message")) lines.push(event.text, "");
+      }
+      lines.push("## Active project memory", "", "Notes are user-maintained references, not automatically verified facts.", "");
+      for (const memory of this.state.memories.filter((entry) => entry.projectId === project.id && entry.status === "active"))
+        lines.push(`### ${memory.title}`, "", `Kind: ${memory.kind}`, "", memory.content, "");
+      let content = lines.join("\n");
+      if (Buffer.byteLength(content, "utf8") > 8 * 1024 * 1024)
+        throw new Error("This visible transcript exceeds the 8 MiB export limit. Export a smaller thread; no partial export was created.");
+      content = content
+        .replace(/-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----[\s\S]*?-----END (?:[A-Z ]*PRIVATE KEY)-----/g, "[private key redacted]")
+        .replace(/\b(?:sk-(?:proj-|ant-api\d+-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[token redacted]")
+        .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{16,}=*/gi, "Bearer [redacted]");
+      const name = thread.title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/[. ]+$/g, "").slice(0, 90) || "conversation";
+      return { filename: `Nova-${name}.md`, content };
+    });
+  }
+
   async startRun(
     value: RunRequest,
     expectedNativeConnection?: { home: string; codexPath: string },
@@ -1366,7 +1637,7 @@ export class WorkspaceService {
         );
       if (request.mode === "build" && this.hasTerminationIssue(project.id))
         throw new Error(
-          "Build is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes first. This milestone has no automatic unlock or cleanup; the recovery flag remains in workspace.json until deliberately cleared after cleanup.",
+          "Build is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes, then acknowledge cleanup in Settings → Recovery.",
         );
       const providerStatus = this.providers.find(
         (provider) => provider.id === request.provider,
@@ -1437,7 +1708,7 @@ export class WorkspaceService {
       const model =
         request.model ||
         (request.provider === "ollama" ? this.state.settings.localModel : "");
-      if (request.provider === "ollama") await assertLocalModelAvailable(model);
+      if (request.provider === "ollama") await assertLocalModelAvailable(model, this.state.settings);
       const executable = await resolveExecutable(
         request.provider === "claude"
           ? this.state.settings.claudePath
@@ -1595,7 +1866,12 @@ export class WorkspaceService {
             await this.persist();
           });
           if (this.closing) controller.abort();
-          const result =
+          const local = request.provider === "ollama"
+            ? await prepareLocalProvider(settings, model, controller.signal)
+            : undefined;
+          let result: Awaited<ReturnType<typeof runProvider>>;
+          try {
+            result =
             nativeLink && nativeHome && nativeThreadId
               ? await runNativeCodex({
                   settings,
@@ -1641,6 +1917,7 @@ export class WorkspaceService {
                     ...executable,
                     env: {
                       ...executable.env,
+                      ...local?.env,
                       ...(workerHome ? { CODEX_HOME: workerHome } : {}),
                     },
                     args: providerArguments(
@@ -1651,6 +1928,7 @@ export class WorkspaceService {
                       {
                         allowNonGit:
                           project.kind === "folder" && request.mode === "plan",
+                        localConfigArgs: local?.configArgs,
                       },
                     ),
                   },
@@ -1662,6 +1940,9 @@ export class WorkspaceService {
                   maxBytes: settings.maxOutputKb * 1024,
                   onEvent: receiveEvent,
                 });
+          } finally {
+            await local?.dispose();
+          }
           await this.exclusive(async () => {
             run.status = persistenceFailure
               ? "failed"
@@ -1977,7 +2258,7 @@ export class WorkspaceService {
         );
       if (this.hasTerminationIssue(run.projectId))
         throw new Error(
-          "Verification is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes before deliberately clearing the recovery flag in workspace.json.",
+          "Verification is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes, then acknowledge cleanup in Settings → Recovery.",
         );
       if (
         this.projectHasCheck(run.projectId) ||

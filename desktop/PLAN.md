@@ -58,7 +58,7 @@ Keyboard navigation, visible focus, readable contrast, predictable errors, and c
 
 The first adapter layer launches separately installed, unmodified provider CLIs and normalizes their structured events. Prompts travel over stdin, not through shell interpolation. Providers remain separate workers with distinct permissions, model catalogs, usage limits, and accounts.
 
-Local inference initially reuses **the Codex agent engine with a loopback Ollama provider**. The exact locally installed model is checked before a run; Nova must not automatically download a model or silently route it to a cloud service. It is not a new inference engine and does not make an unsuitable local model capable of frontier-level work.
+Local inference reuses **the Codex agent engine with a configurable loopback provider**. Version 0.4.0 offers Ollama, LM Studio, and custom API base URLs with metadata-only model discovery. Responses-native servers connect directly; a bounded per-run bridge supports the text/tool subset of streaming Chat Completions. It does not implement hosted tools, modalities, provider-native conversation IDs, or every Responses capability. The selected model must be listed by the chosen server; Nova neither downloads models nor silently routes to a cloud fallback. A local server can itself forward requests remotely, so a loopback URL is not an offline guarantee. Nova is not a new inference engine and does not make an unsuitable local model capable of frontier-level work.
 
 Version 0.3 adds the installed Codex app-server for native conversation listing, paginated visible history, resume/fork, and bounded turn lifecycle. It does not replace fresh Codex/Local exec workers or implement an interactive approval center: server-side tool/approval requests are denied. Native state remains owned by Codex; Claude and local models receive a bounded visible-history handoff, not a transplanted native session.
 
@@ -84,9 +84,24 @@ See [the integration contract](docs/codex-compatibility.md) for resource allowli
 
 Build tasks work in per-thread Git worktrees. The first implementation is deliberately conservative about concurrent writers. The project checkout remains the integration target, not a shared scratch directory for several independent agents.
 
+Version 0.4.0 adds explicit reviewed commits in those worktrees and a separate fast-forward-only integration action. Native confirmation pins the source revision/fingerprint and original target branch/revision/fingerprint; queued execution rechecks them. Source and target must be clean for integration, with the target an ancestor of the source. Dirty, divergent, conflicted, incomplete, or changed inputs are refused. No automatic push, merge commit, reset, stash, conflict resolution, or worktree deletion is introduced. This is a deliberate single-thread integration action, not the future multi-agent merge queue.
+
 Initial checkout suppresses hooks and checkout filters. Large-asset materialization, including Git LFS, needs a deliberate follow-up workflow before engine-level builds can be trusted. Plan and Build follow-ups in an existing thread should inspect the same preserved worktree rather than inadvertently analyzing a different revision.
 
 Future concurrency requires explicit task ownership, dependency ordering, versioned inputs, and an integrator. File locks alone do not detect semantic conflicts between changes to different files.
+
+## Version 0.4.0 — everyday workflow completion
+
+This development-alpha increment closes specific gaps in the existing desktop workflow without declaring the longer roadmap complete:
+
+- Settings tabs for General, Agents, Local models, Storage, and Recovery; native executable selection and metadata-only local model discovery.
+- Configurable local backends/protocols, including a bounded streaming Chat Completions bridge for compatible text/tool models.
+- Revision-bound reviewed commits and explicit fast-forward integration, with original checkout preservation on refused operations.
+- User-confirmed recovery acknowledgement after independent worker cleanup, preserving the original failure history and rejecting active or stale recovery requests. This replaces manual state-file edits, not operating-system containment.
+- Explicit Markdown export of retained visible conversation text and active project memory. No raw configuration, credentials, tool/error logs, or hidden state are added; common redaction is not comprehensive privacy assurance.
+- Device-local, bounded per-thread/new-task composer drafts, distinct from provider history and exported conversations.
+
+Live Windows behavior and actual installed Codex/Claude/local model compatibility remain untested for this commit. Synthetic integration coverage, renderer checks, and packaging do not establish those live results. MCP administration, automatic routing, unattended teams, semantic acceptance, signed distribution, and updates remain later work.
 
 ## Milestone 1 — usable foundation
 
@@ -209,9 +224,9 @@ Keep model/version, task revision, tool versions, hardware, and verification cri
 
 ## Immediate development sequence
 
-1. Validate the version 0.3 installation/history integration alongside desktop, context, and checks in Linux and Windows CI; inspect rendered review evidence.
+1. Validate version 0.4.0's local connection, Git action, recovery, export, and draft workflows alongside the existing installation/history integration in Linux and Windows CI; inspect rendered review evidence.
 2. Run Windows-native live-provider smoke tests with each intended CLI, starting with a disposable Git repository and Plan mode. Connect the user's actual Codex history only after native confirmation.
-3. Exercise native resume/fork, archived-source preservation, folder-only Plan, explicit Claude/local handoffs, source freshness, worktree relocation settings, checks, cancellation, and restart before using important projects.
+3. Exercise native resume/fork, archived-source preservation, folder-only Plan, explicit Claude/local handoffs, configured local protocols, source freshness, worktree storage settings, checks, reviewed commit/integration, deliberate recovery, export, and restart before using important projects.
 4. Establish repeatable project-specific verification profiles and a baseline task suite, including external dependency/version records.
 5. Expand shared-memory retrieval into incremental repository indexing and explicit context budgets.
-6. Add parallel delegation, routing, and controlled integration only after the preceding boundaries are measured and reliable.
+6. Add parallel delegation, routing, and a coordinated multi-agent integration queue only after the preceding boundaries are measured and reliable.

@@ -11,6 +11,15 @@ import type {
 } from "../shared/types";
 
 const bridge: WorkbenchAPI = {
+  chooseExecutable: (provider) => ipcRenderer.invoke("provider:choose-executable", provider),
+  openProviderHelp: (provider) => ipcRenderer.invoke("provider:help", provider),
+  listLocalModels: (connection) => ipcRenderer.invoke("provider:local-models", connection),
+  reviewWorktree: (runId) => ipcRenderer.invoke("worktree:review", runId),
+  commitWorktree: (request) => ipcRenderer.invoke("worktree:commit", request),
+  integrateWorktree: (request) => ipcRenderer.invoke("worktree:integrate", request),
+  listRecoveryItems: () => ipcRenderer.invoke("workspace:recovery"),
+  acknowledgeRecovery: (request) => ipcRenderer.invoke("workspace:acknowledge-recovery", request),
+  exportConversation: (threadId) => ipcRenderer.invoke("thread:export", threadId),
   inspectCodexInstallation: () => ipcRenderer.invoke("codex:installation"),
   chooseStorageDirectory: (kind) => ipcRenderer.invoke("storage:choose", kind),
   listCodexThreads: (query) => ipcRenderer.invoke("codex:threads", query),

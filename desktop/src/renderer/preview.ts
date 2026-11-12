@@ -13,6 +13,9 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
   const state = emptyWorkspace();
   const listeners = new Set<(value: WorkspaceState) => void>();
   const now = new Date().toISOString();
+  let previewCommitted = false;
+  let previewIntegrated = false;
+  let recoveryAcknowledged = false;
   const exampleProject: Project = {
     id: "preview-project",
     name: "Henday Heat",
@@ -174,6 +177,29 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
 
   return {
     ...createPreviewLibrary(state, publish),
+    async chooseExecutable(provider) {
+      return `C:\\Example runtimes (synthetic)\\${provider}.exe`;
+    },
+    async openProviderHelp() {},
+    async listLocalModels(connection) {
+      return { connection, models: [{ id: "example-coder:local", name: "Synthetic local coder" }, { id: "example-small:local", name: "Synthetic small model" }], warnings: ["Synthetic preview catalog. No local server was contacted and no model was downloaded."] };
+    },
+    async reviewWorktree(runId) {
+      return { runId, branch: "nova/example-world (synthetic)", head: previewCommitted ? "synthetic-preview-commit" : "synthetic-preview-head", fingerprint: previewCommitted ? "synthetic-clean" : "synthetic-changes", changes: previewCommitted ? [] : [{ path: "src/world/plan.ts", status: "M" }], canCommit: !previewCommitted, commitReason: previewCommitted ? "Synthetic worktree is clean." : undefined, canIntegrate: previewCommitted && !previewIntegrated, integrationReason: previewIntegrated ? "Synthetic target already includes this example commit." : !previewCommitted ? "Commit the reviewed example change first." : undefined, targetBranch: "main (synthetic)", targetHead: previewIntegrated ? "synthetic-preview-commit" : "synthetic-target-head", targetFingerprint: "synthetic-target-clean" };
+    },
+    async commitWorktree() {
+      previewCommitted = true;
+      return { commit: "synthetic-preview-commit", branch: "nova/example-world (synthetic)", message: "Preview only: simulated commit. No Git command or file write occurred." };
+    },
+    async integrateWorktree() {
+      previewIntegrated = true;
+      return { commit: "synthetic-preview-commit", branch: "main (synthetic)", message: "Preview only: simulated fast-forward. No original checkout was changed." };
+    },
+    async listRecoveryItems() {
+      return recoveryAcknowledged ? [] : [{ id: "synthetic-recovery", kind: "project", label: "Example interrupted worker (synthetic)", detail: "Illustrative cleanup failure only. There is no real process or project lock in this browser preview.", token: "synthetic-recovery-token" }];
+    },
+    async acknowledgeRecovery() { recoveryAcknowledged = true; },
+    async exportConversation() { return { saved: false }; },
     async updateThread(input) {
       const thread = state.threads.find((item) => item.id === input.id);
       if (!thread) throw new Error("The example conversation was not found.");
@@ -294,7 +320,7 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
           },
           {
             id: "ollama",
-            name: "Local · Ollama",
+            name: `Local · ${{ ollama: "Ollama", lmstudio: "LM Studio", custom: "Custom" }[state.settings.localProvider ?? "ollama"]}`,
             available: false,
             detail: "Desktop app required; not detected in browser preview.",
           },
@@ -315,7 +341,9 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
     },
     async cancelRun() {},
     async getDiff() {
-      return { branch: "main", changes: [], diff: "", truncated: false };
+      return seedDemo && !previewCommitted
+        ? { branch: "nova/example-world (synthetic)", changes: [{ path: "src/world/plan.ts", status: "M" }], diff: "diff --git a/src/world/plan.ts b/src/world/plan.ts\n--- a/src/world/plan.ts\n+++ b/src/world/plan.ts\n@@ -1 +1 @@\n-export const scope = 'city';\n+export const scope = 'one test block';\n", truncated: false }
+        : { branch: "main", changes: [], diff: "", truncated: false };
     },
     async saveMemory(input) {
       const previous = state.memories.find((item) => item.id === input.id);

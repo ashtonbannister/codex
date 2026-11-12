@@ -17,6 +17,8 @@ import type {
 } from "../../shared/compatibility";
 import path from "node:path";
 import { normalizeMemoryFilePath } from "./memory-source";
+import { validateLocalConnection } from "./local-models";
+import { LOCAL_DEFAULTS } from "../../shared/local-models";
 
 export function record(
   value: unknown,
@@ -318,10 +320,21 @@ export function validateSettings(value: unknown): Settings {
   }
   if (!["dark", "light", "system"].includes(String(input.theme)))
     throw new Error("Unknown theme.");
+  const localKind = input.localProvider ?? "ollama";
+  const localDefaults = localKind === "lmstudio" ? LOCAL_DEFAULTS.lmstudio
+    : localKind === "custom" ? LOCAL_DEFAULTS.custom : LOCAL_DEFAULTS.ollama;
+  const local = validateLocalConnection({
+    kind: localKind,
+    baseUrl: input.localBaseUrl ?? localDefaults.baseUrl,
+    protocol: input.localProtocol ?? localDefaults.protocol,
+  });
   return {
     codexPath,
     claudePath,
     localModel: modelName(input.localModel),
+    localProvider: local.kind,
+    localBaseUrl: local.baseUrl,
+    localProtocol: local.protocol,
     timeoutMinutes: input.timeoutMinutes as number,
     maxOutputKb: input.maxOutputKb as number,
     theme: input.theme as Settings["theme"],

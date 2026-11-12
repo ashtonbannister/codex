@@ -344,6 +344,7 @@ test("storage settings use native bridge pickers and explicitly do not relocate 
   await page.goto("/");
   await page.getByRole("button", { name: /^Settings/ }).click();
   const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Storage", exact: true }).click();
   await dialog
     .getByRole("button", { name: "Choose Codex home folder" })
     .click();

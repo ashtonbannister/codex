@@ -92,3 +92,39 @@ with cross-provider Context. All screenshot data is explicitly synthetic. Local
 browser execution remains unavailable in this environment; CI artifacts, not a
 simulated local render, supply visual-review evidence. These cases do not validate
 live provider accounts or Windows-native sandbox behavior.
+
+## v0.4.0 everyday-workflow extension
+
+The direction contract is unchanged. The existing workspace gains working actions
+inside its established surfaces, not a different desktop design or a claim of full
+Codex/Claude feature parity.
+
+Settings uses General, Agents, Local models, Storage, and Recovery tabs. Agents
+offers a native executable picker and official-tooling guidance. Local models
+shows the selected backend, loopback API base URL, protocol, discovery results,
+and manual model identifier. Discovery is labeled metadata-only, with local-server
+and protocol limits visible; an available catalog entry is not a successful model run.
+
+Changes presents the reviewed worktree branch, revision, paths, and original
+target branch. Commit and fast-forward integration are separate actions, each
+with a native confirmation and revision/fingerprint revalidation in the main
+process. Unavailable actions explain why rather than silently weakening the
+clean-baseline or fast-forward requirement. No push or destructive cleanup is
+implicit.
+
+Recovery lists affected projects/Codex homes and explicitly records the user's
+cleanup acknowledgement. It neither claims to have found every detached process
+nor turns a historical unconfirmed termination into a verified shutdown. Active
+work or stale recovery entries cannot be cleared through the interface.
+
+The thread toolbar/menu exposes Markdown export of retained visible messages and
+active project memory through a native Save dialog, with privacy limits disclosed.
+Per-thread and per-project new-task drafts retain text/provider/model/mode on this
+device within bounded storage; no draft is sent to a provider merely by switching
+threads. Storage failures are visible.
+
+Browser-preview actions remain explicitly simulated and cannot launch tools,
+models, native Git operations, or native export. Automated synthetic coverage is
+separate from actual Windows/provider compatibility, which remains untested for
+this commit. The alpha does not imply completed MCP administration, autonomous
+teams, routing, signed distribution, or every later roadmap milestone.

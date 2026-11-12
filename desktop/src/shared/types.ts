@@ -13,9 +13,24 @@ import type {
   CodexThreadPage,
   CodexThreadQuery,
 } from "./compatibility";
+import type {
+  LocalConnection,
+  LocalModelCatalog,
+  LocalProtocol,
+  LocalProviderKind,
+} from "./local-models";
+import type {
+  CodexRecoveryAcknowledgement,
+  CommitWorktreeRequest,
+  IntegrateWorktreeRequest,
+  RecoveryItem,
+  RecoveryRequest,
+  WorktreeActionResult,
+  WorktreeReview,
+} from "./workspace-actions";
 
 export type ProviderId = "codex" | "claude" | "ollama";
-export const APP_VERSION = "0.3.0";
+export const APP_VERSION = "0.4.0";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -84,6 +99,8 @@ export interface Run {
   providerSessionId?: string;
   /** Fail-closed recovery flag when the OS could not confirm worker termination. */
   terminationUnconfirmed?: boolean;
+  /** User-confirmed recovery, not an assertion that Nova observed OS cleanup. */
+  recoveryAcknowledgedAt?: string;
   contextMemoryIds: string[];
   events: RunEvent[];
   usage?: Usage;
@@ -117,6 +134,9 @@ export interface Settings {
   codexPath: string;
   claudePath: string;
   localModel: string;
+  localProvider?: LocalProviderKind;
+  localBaseUrl?: string;
+  localProtocol?: LocalProtocol;
   timeoutMinutes: number;
   maxOutputKb: number;
   theme: "dark" | "light" | "system";
@@ -137,6 +157,7 @@ export interface WorkspaceState {
   verifications: VerificationResult[];
   /** Native history workers whose exit could not be confirmed; no automatic retry. */
   codexRecoveryHomes?: string[];
+  codexRecoveryAcknowledgements?: CodexRecoveryAcknowledgement[];
 }
 
 export interface ProviderStatus {
@@ -263,6 +284,7 @@ export interface VerificationResult {
   inputRevision?: RevisionSnapshot;
   outputRevision?: RevisionSnapshot;
   terminationUnconfirmed?: boolean;
+  recoveryAcknowledgedAt?: string;
 }
 
 export interface VerificationRequest {
@@ -291,6 +313,15 @@ export interface DiffSnapshot {
 
 /** Narrow, validated bridge. The renderer never receives Node, IPC, or credentials. */
 export interface WorkbenchAPI {
+  chooseExecutable(provider: "codex" | "claude"): Promise<string | null>;
+  openProviderHelp(provider: ProviderId | "lmstudio"): Promise<void>;
+  listLocalModels(connection: LocalConnection): Promise<LocalModelCatalog>;
+  reviewWorktree(runId: string): Promise<WorktreeReview>;
+  commitWorktree(request: CommitWorktreeRequest): Promise<WorktreeActionResult>;
+  integrateWorktree(request: IntegrateWorktreeRequest): Promise<WorktreeActionResult>;
+  listRecoveryItems(): Promise<RecoveryItem[]>;
+  acknowledgeRecovery(request: RecoveryRequest): Promise<void>;
+  exportConversation(threadId: string): Promise<{ saved: boolean; path?: string }>;
   inspectCodexInstallation(): Promise<CodexInstallation>;
   chooseStorageDirectory(
     kind: "codex-home" | "worktrees",
@@ -330,6 +361,9 @@ export const DEFAULT_SETTINGS: Settings = {
   codexPath: "codex",
   claudePath: "claude",
   localModel: "",
+  localProvider: "ollama",
+  localBaseUrl: "http://127.0.0.1:11434/v1",
+  localProtocol: "responses",
   timeoutMinutes: 20,
   maxOutputKb: 512,
   theme: "dark",

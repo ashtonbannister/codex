@@ -1,4 +1,6 @@
 import type { Page } from "@playwright/test";
+import type { LocalConnection } from "../src/shared/local-models";
+import type { CommitWorktreeRequest, IntegrateWorktreeRequest, RecoveryRequest } from "../src/shared/workspace-actions";
 import type {
   CodexHistoryQuery,
   CodexImportRequest,
@@ -36,6 +38,14 @@ export interface FixtureCalls {
   resourceImports: CodexMemoryImportRequest[];
   resourcePreviews: CodexResourceRequest[];
   directoryPicks: string[];
+  executablePicks: string[];
+  providerHelp: string[];
+  modelQueries: LocalConnection[];
+  worktreeReviews: string[];
+  worktreeCommits: CommitWorktreeRequest[];
+  worktreeIntegrations: IntegrateWorktreeRequest[];
+  recoveryAcknowledgements: RecoveryRequest[];
+  exports: string[];
 }
 export interface FixtureControls {
   setRevision: (fingerprint: string) => void;
@@ -43,6 +53,7 @@ export interface FixtureControls {
   finishCheck: (id: string, status: "passed" | "failed") => void;
   setResourceDigest: (digest: string) => void;
   setLibraryFailure: (message: string) => void;
+  setExportCancelled: (cancelled: boolean) => void;
 }
 
 /** Renderer-only contract fixture. It cannot invoke Node, Electron, a CLI, or a model. */
@@ -56,6 +67,7 @@ export async function installFakeDesktopBridge(
     planOnly?: boolean;
     extraThreads?: number;
     libraryFailure?: string;
+    finishing?: boolean;
   } = {},
 ) {
   const initial = emptyWorkspace();
@@ -204,11 +216,23 @@ export async function installFakeDesktopBridge(
         resourceImports: [],
         resourcePreviews: [],
         directoryPicks: [],
+        executablePicks: [],
+        providerHelp: [],
+        modelQueries: [],
+        worktreeReviews: [],
+        worktreeCommits: [],
+        worktreeIntegrations: [],
+        recoveryAcknowledgements: [],
+        exports: [],
       };
       let available = config.available !== false;
       let fingerprint = "fixture-current";
       let resourceDigest = "fixture-resource-v1";
       let libraryFailure = config.libraryFailure ?? "";
+      let worktreeCommitted = false;
+      let worktreeIntegrated = false;
+      let recoveryAcknowledged = false;
+      let exportCancelled = false;
       const codexHome = "C:\\Fixtures\\Codex";
       const libraryThreads: CodexThreadSummary[] = [
         {
@@ -294,6 +318,40 @@ export async function installFakeDesktopBridge(
         platform: "mock-desktop",
       });
       const bridge: WorkbenchAPI = {
+        async chooseExecutable(provider) {
+          calls.executablePicks.push(provider);
+          return `C:\\Fixture runtimes\\${provider}.exe`;
+        },
+        async openProviderHelp(provider) { calls.providerHelp.push(provider); },
+        async listLocalModels(connection) {
+          calls.modelQueries.push(connection);
+          return { connection, models: [{ id: "fixture-coder", name: "Fixture coder" }], warnings: ["Synthetic fixture catalog. No server was contacted."] };
+        },
+        async reviewWorktree(runId) {
+          calls.worktreeReviews.push(runId);
+          return { runId, branch: "nova/fixture-change", head: worktreeCommitted ? "fixture-commit" : "fixture-head", fingerprint, targetFingerprint: "fixture-target-clean", targetHead: worktreeIntegrated ? "fixture-commit" : "fixture-target", targetBranch: "main", changes: worktreeCommitted ? [] : [{ path: "src/fixture.ts", status: "M" }], canCommit: !worktreeCommitted, commitReason: worktreeCommitted ? "Worktree is clean." : undefined, canIntegrate: worktreeCommitted && !worktreeIntegrated, integrationReason: worktreeIntegrated ? "Already integrated." : !worktreeCommitted ? "Commit reviewed changes before integrating." : undefined };
+        },
+        async commitWorktree(request) {
+          calls.worktreeCommits.push(request);
+          if (request.expectedFingerprint !== fingerprint) throw new Error("Worktree changed after review.");
+          worktreeCommitted = true;
+          fingerprint = "fixture-committed-clean";
+          return { commit: "fixture-commit", branch: "nova/fixture-change", message: "Fixture commit complete. No real Git command ran." };
+        },
+        async integrateWorktree(request) {
+          calls.worktreeIntegrations.push(request);
+          if (request.expectedFingerprint !== fingerprint || request.expectedTargetFingerprint !== "fixture-target-clean") throw new Error("Checkout changed after review.");
+          worktreeIntegrated = true;
+          return { commit: "fixture-commit", branch: "main", message: "Fixture fast-forward complete. No checkout was changed." };
+        },
+        async listRecoveryItems() {
+          return config.finishing && !recoveryAcknowledged ? [{ id: "fixture-recovery", kind: "project", label: "Fixture cleanup failure", detail: "Synthetic lock, not a real background process.", token: "fixture-lock-token" }] : [];
+        },
+        async acknowledgeRecovery(request) { calls.recoveryAcknowledgements.push(request); recoveryAcknowledged = true; },
+        async exportConversation(threadId) {
+          calls.exports.push(threadId);
+          return exportCancelled ? { saved: false } : { saved: true, path: "D:\\Fixtures\\conversation.md" };
+        },
         async inspectCodexInstallation() {
           return {
             home: state.settings.codexHome || codexHome,
@@ -625,7 +683,9 @@ export async function installFakeDesktopBridge(
           publish();
         },
         async getDiff() {
-          return { branch: "main", changes: [], diff: "", truncated: false };
+          return config.finishing && !worktreeCommitted
+            ? { branch: "nova/fixture-change", changes: [{ path: "src/fixture.ts", status: "M" }], diff: "@@ -1 +1 @@\n-old fixture\n+new fixture\n", truncated: false }
+            : { branch: "main", changes: [], diff: "", truncated: false };
         },
         async saveMemory(input: MemoryInput) {
           const index = state.memories.findIndex(
@@ -740,6 +800,7 @@ export async function installFakeDesktopBridge(
         },
       };
       const controls: FixtureControls = {
+        setExportCancelled(value) { exportCancelled = value; },
         setResourceDigest(value) {
           resourceDigest = value;
         },

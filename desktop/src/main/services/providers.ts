@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
 import type {
@@ -11,6 +12,8 @@ import type {
   Settings,
 } from "../../shared/types";
 import { normalizeProviderLine, type NormalizedEvent } from "./provider-events";
+import { connectionFromSettings } from "./local-models";
+export { assertLocalModelAvailable, prepareLocalProvider } from "./local-models";
 
 export interface Executable {
   command: string;
@@ -60,6 +63,14 @@ export async function resolveExecutable(
             input.endsWith(extension) ? input : `${input}${extension}`,
           ),
         );
+    }
+    // Official per-user locations only; never scan arbitrary package directories.
+    if (input === "codex" || input === "claude") {
+      const suffix = platform === "win32" ? ".exe" : "";
+      candidates.push(path.join(os.homedir(), input === "codex" ? ".codex/bin" : ".local/bin", `${input}${suffix}`));
+      const appData = process.env.APPDATA;
+      if (platform === "win32" && appData && path.isAbsolute(appData))
+        candidates.push(path.join(appData, "npm", `${input}.cmd`));
     }
   }
   for (const candidate of candidates) {
@@ -627,7 +638,7 @@ export async function probeProvider(
     provider === "claude"
       ? "Claude Code"
       : provider === "ollama"
-        ? "Local · Ollama"
+        ? `Local · ${settings.localProvider === "lmstudio" ? "LM Studio" : settings.localProvider === "custom" ? "Custom server" : "Ollama"}`
         : "Codex";
   try {
     const executable = await resolveExecutable(
@@ -657,6 +668,7 @@ export async function probeProvider(
       throw new Error(
         `Update ${provider === "claude" ? "Claude Code" : "Codex"}: this build lacks the safe noninteractive flags required by Nova Workbench.`,
       );
+    if (provider === "ollama") connectionFromSettings(settings);
     if (provider === "ollama" && !settings.localModel)
       return {
         id: provider,
@@ -664,7 +676,7 @@ export async function probeProvider(
         available: false,
         version,
         detail:
-          "Set the name of an already-installed Ollama model in Settings. No model is downloaded automatically.",
+          "Choose the local server and an installed model in Settings. Refresh models to list its available model IDs. No model is downloaded automatically.",
       };
     return {
       id: provider,
@@ -673,7 +685,7 @@ export async function probeProvider(
       version,
       detail:
         provider === "ollama"
-          ? "Codex bridge ready; local Ollama server/model availability is checked only when you run."
+          ? "Codex bridge ready; the selected local endpoint/model is checked when you run. No inference was requested by detection."
           : "CLI detected. Authentication and account limits remain with the official CLI; no model call has been made.",
     };
   } catch (error) {
@@ -692,7 +704,7 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
-  options: { allowNonGit?: boolean } = {},
+  options: { allowNonGit?: boolean; localConfigArgs?: string[] } = {},
 ): string[] {
   if (provider === "claude") {
     return [
@@ -758,7 +770,7 @@ export function providerArguments(
       : []),
     // Deliberately do NOT use --oss: Codex's OSS readiness path pulls missing models.
     ...(provider === "ollama"
-      ? [
+      ? options.localConfigArgs ?? [
           "--config",
           'model_provider="nova_ollama"',
           "--config",
@@ -774,67 +786,6 @@ export function providerArguments(
     ...(model ? ["--model", model] : []),
     "-",
   ];
-}
-
-/** Only consult the fixed loopback server. No remote fallback, key, or model pull. */
-export async function assertLocalModelAvailable(model: string): Promise<void> {
-  if (!model || /(?:[:/-]cloud)(?:$|[:/])/i.test(model))
-    throw new Error(
-      "Choose an already-installed local model, not an Ollama cloud model.",
-    );
-  let response: Response;
-  try {
-    response = await fetch("http://127.0.0.1:11434/api/tags", {
-      signal: AbortSignal.timeout(4_000),
-      redirect: "error",
-    });
-  } catch {
-    throw new Error(
-      "Local Ollama is not reachable at 127.0.0.1:11434. Start Ollama and install your chosen model before running.",
-    );
-  }
-  if (!response.ok || !response.body)
-    throw new Error("Ollama could not list its local models.");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      size += next.value.byteLength;
-      if (size > 1_048_576)
-        throw new Error("Ollama returned an oversized model list.");
-      chunks.push(next.value);
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-  let data: {
-    models?: Array<{
-      name?: string;
-      remote_host?: unknown;
-      remote_model?: unknown;
-    }>;
-  };
-  try {
-    data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new Error("Ollama returned an invalid model list.");
-  }
-  const selected = Array.isArray(data.models)
-    ? data.models.find(
-        (entry) => entry?.name === model || entry?.name === `${model}:latest`,
-      )
-    : undefined;
-  if (!selected)
-    throw new Error(
-      `Model ${model} is not installed locally. Nova does not download models; install it in Ollama first.`,
-    );
-  if (selected.remote_host || selected.remote_model)
-    throw new Error(
-      "This Ollama model forwards to a remote provider. Choose a local model for Local mode.",
-    );
 }
 
 export async function runProvider(options: {

@@ -4,6 +4,7 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
+  Download,
   FileCode2,
   Folder,
   FolderOpen,
@@ -47,6 +48,7 @@ import { ChecksPanel, ContextPanel, MemoryCard } from "./components/Evidence";
 import { MemoryForm, RenameThreadForm, SettingsForm } from "./components/Forms";
 import { ThreadMenu } from "./components/ThreadMenu";
 import { ImportedHistory, RunCard } from "./components/Transcript";
+import { WorktreeActions } from "./components/WorktreeActions";
 import {
   EmptyPanel,
   errorText,
@@ -58,6 +60,7 @@ import {
   statusLabel,
 } from "./components/primitives";
 import { ResizeHandle, useWorkspaceLayout } from "./layout";
+import { useComposerDraft } from "./drafts";
 
 type InspectorTab = "changes" | "context" | "memory" | "checks" | "activity";
 type Dialog = "settings" | "memory" | "palette" | "rename" | null;
@@ -100,10 +103,11 @@ export function App() {
   >();
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
-  const [provider, setProvider] = useState<ProviderId>("codex");
-  const [model, setModel] = useState("");
-  const [mode, setMode] = useState<RunMode>("plan");
-  const [draft, setDraft] = useState("");
+  const composerDraft = useComposerDraft(projectId, threadId);
+  const { provider, model, mode, text: draft } = composerDraft.draft;
+  const setModel = (value: string) => composerDraft.update({ model: value });
+  const setMode = (value: RunMode) => composerDraft.update({ mode: value });
+  const setDraft = (value: string) => composerDraft.update({ text: value });
   const [tab, setTab] = useState<InspectorTab>("changes");
   const [layout, setLayout] = useWorkspaceLayout();
   const [archived, setArchived] = useState(false);
@@ -115,6 +119,8 @@ export function App() {
     anchor: { x: number; y: number };
   } | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [exporting, setExporting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [diff, setDiff] = useState<DiffSnapshot | null>(null);
@@ -128,6 +134,8 @@ export function App() {
   const timeline = useRef<HTMLDivElement>(null);
   const diffRequestId = useRef(0);
   const { state, providers } = snapshot;
+  const localLabel = `Local · ${{ ollama: "Ollama", lmstudio: "LM Studio", custom: "Custom" }[state.settings.localProvider ?? "ollama"]}`;
+  const providerLabel = (id: ProviderId) => id === "ollama" ? localLabel : providerNames[id];
   const project = state.projects.find((item) => item.id === projectId);
   const thread = state.threads.find((item) => item.id === threadId);
   const runs = useMemo(
@@ -204,8 +212,8 @@ export function App() {
     document.documentElement.dataset.theme = state.settings.theme;
   }, [state.settings.theme]);
   useEffect(() => {
-    if (folderProject) setMode("plan");
-  }, [folderProject]);
+    if (folderProject && mode !== "plan") setMode("plan");
+  }, [folderProject, mode, threadId, projectId]);
   useEffect(() => {
     if (autoScroll && timeline.current)
       timeline.current.scrollTop = timeline.current.scrollHeight;
@@ -307,7 +315,6 @@ export function App() {
         setSurface("workspace");
         setProjectId(chosen.id);
         setThreadId(null);
-        setDraft("");
         setArchived(false);
       }
     } catch (reason) {
@@ -324,21 +331,18 @@ export function App() {
         )
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]?.id ?? null,
     );
-    setDraft("");
     setAutoScroll(true);
   };
   const selectThread = (next: Thread) => {
     setSurface("workspace");
     setProjectId(next.projectId);
     setThreadId(next.id);
-    setDraft("");
     setAutoScroll(true);
     setArchived(!!next.archivedAt);
   };
   const newThread = () => {
     setSurface("workspace");
     setThreadId(null);
-    setDraft("");
     setArchived(false);
     setAutoScroll(true);
     composer.current?.focus();
@@ -354,13 +358,17 @@ export function App() {
     (provider !== "ollama" || !!configuredModel);
   const submit = async () => {
     if (!canSend || !contextRequest) return;
+    const submittedKey = composerDraft.key;
+    const submittedDraft = composerDraft.draft;
     setBusy(true);
     setError("");
     try {
       const run = await api.startRun(contextRequest);
-      setThreadId(run.threadId);
-      setDraft("");
-      setAutoScroll(true);
+      composerDraft.clearSubmitted(submittedKey, submittedDraft, run.threadId);
+      if (composerDraft.currentKey.current === submittedKey) {
+        setThreadId(run.threadId);
+        setAutoScroll(true);
+      }
       await refreshSnapshot();
     } catch (reason) {
       setError(errorText(reason));
@@ -377,8 +385,16 @@ export function App() {
     setDialog("memory");
   };
   const changeProvider = (value: ProviderId) => {
-    setProvider(value);
-    setModel("");
+    composerDraft.update({ provider: value, model: "" });
+  };
+  const exportThread = async (id: string) => {
+    if (exporting) return;
+    setExporting(true); setError(""); setNotice(""); setThreadMenu(null);
+    try {
+      const result = await api.exportConversation(id);
+      setNotice(isPreview ? "Preview only — no conversation file is written. Export is available in the desktop app." : result.saved ? `Conversation exported as Markdown${result.path ? `: ${result.path}` : "."}` : "Export cancelled. No file was written.");
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setExporting(false); }
   };
   const menuAction = (action: () => Promise<unknown>) => {
     setThreadMenu(null);
@@ -600,7 +616,7 @@ export function App() {
                         title={runtime?.detail ?? "Checking runtime"}
                       >
                         <ProviderMark provider={id} small />
-                        <span>{providerNames[id]}</span>
+                        <span>{providerLabel(id)}</span>
                         <span
                           aria-label={
                             runtime?.available ? "Detected" : "Not detected"
@@ -672,6 +688,7 @@ export function App() {
             </div>
             {surface === "workspace" && (
               <div className="toolbar-actions">
+                {thread && <button className="icon-button" aria-label="Export conversation as Markdown" title="Export conversation as Markdown" disabled={exporting} onClick={() => void exportThread(thread.id)}>{exporting ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}</button>}
                 {project && (
                   <span
                     className="branch-label"
@@ -720,6 +737,7 @@ export function App() {
               </div>
             )}
           </div>
+          {(notice || composerDraft.storageWarning) && <div className="notice-banner" role="status"><span>{composerDraft.storageWarning || notice}</span>{!composerDraft.storageWarning && <button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button>}</div>}
           {error && (
             <div className="error-banner" role="alert">
               <AlertCircle size={16} />
@@ -742,9 +760,6 @@ export function App() {
               onOpenThread={async (next) => {
                 await refreshSnapshot();
                 selectThread(next);
-                setProvider("codex");
-                setModel("");
-                setMode("plan");
               }}
               onMemory={(id) => {
                 selectProject(id);
@@ -889,7 +904,7 @@ export function App() {
                   <div className="active-run-line" role="status">
                     <LoaderCircle size={12} className="spin" />
                     <span>
-                      {providerNames[activeRun.provider]} is working
+                      {providerLabel(activeRun.provider)} is working
                       {activeRun.mode === "build"
                         ? " in a separate worktree"
                         : " in Plan mode"}
@@ -947,7 +962,7 @@ export function App() {
                       >
                         <option value="codex">Codex</option>
                         <option value="claude">Claude Code</option>
-                        <option value="ollama">Local · Ollama</option>
+                        <option value="ollama">{localLabel}</option>
                       </select>
                     </div>
                     <input
@@ -960,6 +975,7 @@ export function App() {
                           : "Provider default"
                       }
                       value={model}
+                      maxLength={256}
                       onChange={(event) => setModel(event.target.value)}
                     />
                     <div className="composer-right">
@@ -1036,7 +1052,7 @@ export function App() {
                       >
                         {isPreview
                           ? "Preview only — agents are not connected."
-                          : `${providerNames[provider]} not detected. Open settings.`}
+                          : `${providerLabel(provider)} not detected. Open settings.`}
                       </button>
                     ) : mode === "plan" ? (
                       "Plan · no source edits requested"
@@ -1223,6 +1239,7 @@ export function App() {
                         Open worktree
                       </button>
                     )}
+                    {latestRun?.worktreePath && <WorktreeActions key={latestRun.id} run={latestRun} onChanged={refreshDiff} />}
                     <div className="inspector-bottom-note">
                       <ShieldCheck size={15} />
                       <p>
@@ -1437,6 +1454,8 @@ export function App() {
           thread={threadMenu.thread}
           anchor={threadMenu.anchor}
           onClose={() => setThreadMenu(null)}
+          onExport={() => void exportThread(threadMenu.thread.id)}
+          exporting={exporting}
           onRename={() => {
             setEditingThread(threadMenu.thread);
             setThreadMenu(null);

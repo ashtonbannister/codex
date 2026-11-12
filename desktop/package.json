@@ -1,6 +1,6 @@
 {
   "name": "nova-workbench",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "An independent, Windows-first desktop workbench for Codex, Claude Code, and local coding agents.",
   "author": "Inkform Labs",

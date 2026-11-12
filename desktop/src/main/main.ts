@@ -35,6 +35,14 @@ import type {
   CodexThreadQuery,
 } from "../shared/compatibility";
 import { confirmationValue } from "./confirmation";
+import { listLocalModels, validateLocalConnection } from "./services/local-models";
+import { resolveExecutable } from "./services/providers";
+import { saveMarkdownExport } from "./services/export-file";
+import type {
+  CommitWorktreeRequest,
+  IntegrateWorktreeRequest,
+  RecoveryRequest,
+} from "../shared/workspace-actions";
 import {
   APP_URL,
   assetPath,
@@ -129,6 +137,34 @@ function handle(
 }
 
 function registerHandlers(service: WorkspaceService) {
+  handle("provider:choose-executable", async (payload) => {
+    if (payload !== "codex" && payload !== "claude")
+      throw new Error("Choose Codex or Claude Code.");
+    const selection = await dialog.showOpenDialog(window!, {
+      title: `Choose the installed ${payload === "codex" ? "Codex" : "Claude Code"} executable`,
+      buttonLabel: "Use executable",
+      properties: ["openFile"],
+      filters: [{ name: "CLI executable or JavaScript entry point", extensions: ["exe", "js", "cjs", "mjs", "cmd"] }],
+    });
+    if (selection.canceled || !selection.filePaths[0]) return null;
+    const selected = await realpath(selection.filePaths[0]);
+    await resolveExecutable(selected);
+    return selected;
+  });
+  handle("provider:help", async (payload) => {
+    const pages: Record<string, string> = {
+      codex: "https://developers.openai.com/codex/cli/",
+      claude: "https://code.claude.com/docs/en/setup",
+      ollama: "https://docs.ollama.com/quickstart",
+      lmstudio: "https://lmstudio.ai/docs/developer",
+    };
+    if (typeof payload !== "string" || !Object.hasOwn(pages, payload))
+      throw new Error("Unknown provider documentation.");
+    await shell.openExternal(pages[payload]!);
+  });
+  handle("provider:local-models", async (payload) =>
+    listLocalModels(validateLocalConnection(payload)),
+  );
   const connectedProfiles = new Set<string>();
   const approvedHandoffs = new Set<string>();
   let connectionPrompt: Promise<void> | undefined;
@@ -357,6 +393,84 @@ function registerHandlers(service: WorkspaceService) {
   });
   handle("run:cancel", (value) => service.cancelRun(identifier(value)));
   handle("run:diff", (value) => service.getDiff(identifier(value)));
+  handle("worktree:review", (value) => service.reviewWorktree(identifier(value)));
+  handle("worktree:commit", async (payload) => {
+    const request = objectPayload(payload) as unknown as CommitWorktreeRequest;
+    identifier(request.runId);
+    if (typeof request.message !== "string" || !request.message.trim() ||
+      request.message.length > 4_000 || request.message.includes("\0"))
+      throw new Error("Enter a commit message of 1–4000 characters.");
+    const review = await service.reviewWorktree(request.runId);
+    if (!review.canCommit) throw new Error(review.commitReason ?? "This worktree cannot be committed yet.");
+    if (request.expectedHead !== review.head || request.expectedFingerprint !== review.fingerprint)
+      throw new Error("The worktree changed. Refresh Changes and review it before committing.");
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "question",
+      buttons: ["Cancel", "Commit reviewed changes"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Commit this worktree?",
+      message: `Commit ${review.changes.length} changed paths on ${confirmationValue(review.branch)}?`,
+      detail: `Message: ${confirmationValue(request.message)}\nRevision: ${review.head}\n\n${review.changes.slice(0, 30).map((change) => confirmationValue(change.path)).join("\n")}${review.changes.length > 30 ? "\n…additional reviewed paths" : ""}\n\nThis commits reviewed, non-ignored changes in Nova's owned worktree. Repository hooks, filters and signing helpers are not run. Nothing is pushed or merged into the original checkout. A commit does not mean the task has been verified.`,
+    });
+    if (confirmation.response !== 1) throw new Error("Commit cancelled; no commit was created.");
+    return service.commitWorktree(request);
+  });
+  handle("worktree:integrate", async (payload) => {
+    const request = objectPayload(payload) as unknown as IntegrateWorktreeRequest;
+    identifier(request.runId);
+    const review = await service.reviewWorktree(request.runId);
+    if (!review.canIntegrate) throw new Error(review.integrationReason ?? "This branch cannot be integrated yet.");
+    if (request.expectedHead !== review.head || request.expectedTargetHead !== review.targetHead ||
+      request.expectedTargetBranch !== review.targetBranch ||
+      request.expectedFingerprint !== review.fingerprint ||
+      request.expectedTargetFingerprint !== review.targetFingerprint)
+      throw new Error("A branch changed. Refresh the review before integrating.");
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "warning",
+      buttons: ["Cancel", "Fast-forward original checkout"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Bring the committed changes into your original project?",
+      message: `Update ${confirmationValue(review.targetBranch)} to ${confirmationValue(review.branch)}?`,
+      detail: `Original revision: ${review.targetHead}\nWorktree revision: ${review.head}\n\nThis changes files and advances the branch in your ORIGINAL project checkout. Both checkouts must be clean and the update must be a fast-forward. Nova refuses divergent history; it does not force a reset, create a merge commit, push, or delete the worktree. Review the diff and relevant checks first.`,
+    });
+    if (confirmation.response !== 1) throw new Error("Integration cancelled; the original project was not updated.");
+    return service.integrateWorktree(request);
+  });
+  handle("workspace:recovery", () => service.listRecoveryItems());
+  handle("workspace:acknowledge-recovery", async (payload) => {
+    const request = objectPayload(payload) as unknown as RecoveryRequest;
+    const item = (await service.listRecoveryItems()).find((entry) => entry.id === request.id);
+    if (!item || item.token !== request.token)
+      throw new Error("The recovery state changed. Refresh Recovery before continuing.");
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "warning",
+      buttons: ["Keep locked", "Acknowledge and unlock"],
+      defaultId: 0,
+      cancelId: 0,
+      checkboxLabel: "I have inspected and stopped the remaining worker processes for this item.",
+      checkboxChecked: false,
+      title: "Confirm worker cleanup before unlocking",
+      message: `Unlock ${confirmationValue(item.label)}?`,
+      detail: `${confirmationValue(item.detail)}\n\nNova could not confirm that an earlier worker stopped. Close or terminate the affected CLI workers first, including any child processes. This records YOUR confirmation, not a successful automatic process inspection. The original failure remains in history. Unlocking while a worker is still active can allow competing file changes.`,
+    });
+    if (confirmation.response !== 1 || !confirmation.checkboxChecked)
+      throw new Error("Recovery remains locked. Confirm cleanup before unlocking.");
+    return service.acknowledgeRecovery(request);
+  });
+  handle("thread:export", async (payload) => {
+    const exported = await service.exportConversation(identifier(payload));
+    const selection = await dialog.showSaveDialog(window!, {
+      title: "Export visible conversation and project memory",
+      buttonLabel: "Save Markdown",
+      defaultPath: path.join(app.getPath("documents"), exported.filename),
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (selection.canceled || !selection.filePath) return { saved: false };
+    const destination = await saveMarkdownExport(selection.filePath, exported.content);
+    return { saved: true, path: destination };
+  });
   handle("memory:save", (payload) =>
     service.saveMemory(objectPayload(payload) as unknown as MemoryInput),
   );

@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Pin, PinOff, Pencil } from "lucide-react";
+import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { Thread } from "../../shared/types";
 
@@ -9,6 +9,8 @@ export function ThreadMenu({
   onRename,
   onPin,
   onArchive,
+  onExport,
+  exporting,
 }: {
   thread: Thread;
   anchor: { x: number; y: number };
@@ -16,6 +18,8 @@ export function ThreadMenu({
   onRename: () => void;
   onPin: () => void;
   onArchive: () => void;
+  onExport: () => void;
+  exporting: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -59,7 +63,7 @@ export function ThreadMenu({
       aria-label={`Actions for ${thread.title}`}
       style={{
         left: Math.min(anchor.x, window.innerWidth - 218),
-        top: Math.min(anchor.y, window.innerHeight - 142),
+        top: Math.min(anchor.y, window.innerHeight - 185),
       }}
     >
       <button role="menuitem" onClick={onRename}>
@@ -77,6 +81,10 @@ export function ThreadMenu({
           <Archive size={14} />
         )}
         {thread.archivedAt ? "Restore thread" : "Archive thread"}
+      </button>
+      <button role="menuitem" onClick={onExport} disabled={exporting}>
+        <Download size={14} />
+        Export as Markdown…
       </button>
     </div>
   );

@@ -1,14 +1,19 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
   open,
+  readFile,
   realpath,
+  rename,
   rmdir,
   stat,
+  unlink,
 } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -97,6 +102,7 @@ async function executeGit(
   maxBytes = STATUS_LIMIT,
   allowTruncation = false,
   timeoutMs = 60_000,
+  indexFile?: string,
 ): Promise<{ output: string; truncated: boolean }> {
   validatePath(cwd);
   if (
@@ -109,7 +115,7 @@ async function executeGit(
   // names through a config-only read and override conversion commands for all
   // content-sensitive operations. The config read does not recurse here.
   const contentArgs = args.some((arg) =>
-    ["status", "diff", "worktree"].includes(arg),
+    ["status", "diff", "worktree", "add", "read-tree", "merge"].includes(arg),
   )
     ? await disabledFilterArgs(cwd)
     : [];
@@ -131,7 +137,10 @@ async function executeGit(
         shell: false,
         windowsHide: true,
         encoding: "utf8",
-        env: gitEnvironment(),
+        env: {
+          ...gitEnvironment(),
+          ...(indexFile ? { GIT_INDEX_FILE: indexFile } : {}),
+        },
         maxBuffer: maxBytes,
         timeout: timeoutMs,
       },
@@ -345,6 +354,132 @@ export function parsePorcelain(output: string): GitChange[] {
     if (/[RC]/.test(code)) index += 1;
   }
   return changes;
+}
+
+/** Reject hidden index flags and unfinished operations before reviewed mutations. */
+export async function assertOrdinaryGitState(root: string): Promise<void> {
+  const files = await runGit(root, ["ls-files", "-v", "-z"]);
+  if (files.split("\0").some((entry) => entry && (entry[0] === "S" || /[a-z]/.test(entry[0]!))))
+    throw new Error("Review requires an ordinary checkout without skip-worktree or assume-unchanged files. Resolve those index flags in Git first.");
+  if ((await runGit(root, ["ls-files", "--unmerged", "-z"])).length)
+    throw new Error("Resolve the existing Git conflict before committing or integrating.");
+  for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]) {
+    const location = (await runGit(root, ["rev-parse", "--git-path", marker])).trim();
+    try {
+      await lstat(path.resolve(root, location));
+      throw new Error("Finish the existing merge, rebase, or cherry-pick before using Nova's Git actions.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+export async function sameGitRepository(left: string, right: string): Promise<boolean> {
+  const directory = async (root: string) => realpath(path.resolve(root,
+    (await runGit(root, ["rev-parse", "--git-common-dir"])).trim()));
+  return (await directory(left)) === (await directory(right));
+}
+
+export async function isGitAncestor(root: string, ancestor: string, descendant: string): Promise<boolean> {
+  if (!SHA.test(ancestor) || !SHA.test(descendant)) throw new Error("Invalid commit identity.");
+  try {
+    await runGit(root, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch (error) {
+    if (((error as Error).cause as { code?: unknown })?.code === 1) return false;
+    throw error;
+  }
+}
+
+/**
+ * Build a reviewed index separately, then atomically advance only its expected
+ * branch. Holding the normal index lock prevents another Git command from
+ * staging/checkout over this operation. A rejected review preserves its index.
+ */
+export async function commitReviewedWorktree(
+  root: string,
+  expected: { branch: string; head: string },
+  message: string,
+  verify: () => Promise<void>,
+): Promise<string> {
+  if (!SHA.test(expected.head) || !expected.branch.startsWith("nova/"))
+    throw new Error("Only a recorded Nova branch can be committed.");
+  await assertOrdinaryGitState(root);
+  await runGit(root, ["check-ref-format", `refs/heads/${expected.branch}`]);
+  const index = path.resolve(root, (await runGit(root, ["rev-parse", "--git-path", "index"])).trim());
+  const parent = await realpath(path.dirname(index));
+  if (parent !== path.dirname(index) || (await lstat(index)).isSymbolicLink())
+    throw new Error("The Git index path is linked or moved. No commit was made.");
+  const temporaryIndex = path.join(parent, `.nova-index-${randomUUID()}`);
+  const indexLock = `${index}.lock`;
+  const hooks = await mkdtemp(path.join(parent, ".nova-no-hooks-"));
+  const lock = await open(indexLock, "wx", 0o600).catch(async () => {
+    await rmdir(hooks).catch(() => undefined);
+    throw new Error("Git is already using this worktree's index. Wait for that operation to finish.");
+  });
+  let lockOpen = true;
+  let lockOwned = true;
+  let advanced = false;
+  const atIndex = async (args: string[]) => (await executeGit(root, args, STATUS_LIMIT, false, 60_000, temporaryIndex)).output;
+  try {
+    // Preserve explicitly staged ignored files and index intent; a HEAD-only
+    // index would silently omit a user's deliberately force-added file.
+    await copyFile(index, temporaryIndex, constants.COPYFILE_EXCL);
+    await atIndex(["add", "--all", "--", "."]);
+    const tree = (await atIndex(["write-tree"])).trim();
+    if (!SHA.test(tree)) throw new Error("Git did not produce a valid reviewed tree.");
+    await verify();
+    const metadata = await stat(temporaryIndex);
+    if (!metadata.isFile() || metadata.size > 64 * 1024 * 1024)
+      throw new Error("Git index exceeds the reviewed commit size limit.");
+    await lock.writeFile(await readFile(temporaryIndex));
+    await lock.sync();
+    await lock.close();
+    lockOpen = false;
+    // commit-tree never runs commit hooks. Signing is deliberately not invoked.
+    let commit: string;
+    try {
+      commit = (await runGit(root, ["-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgSign=false", "commit-tree", tree, "-p", expected.head, "-m", message])).trim();
+    } catch (error) {
+      throw new Error("Could not create the commit. Configure your Git user.name and user.email, then retry; source files and the original index are preserved.", { cause: error });
+    }
+    if (!SHA.test(commit)) throw new Error("Git did not return a valid commit.");
+    await runGit(root, ["-c", `core.hooksPath=${hooks}`, "update-ref", "-m", "Nova Workbench reviewed commit", `refs/heads/${expected.branch}`, commit, expected.head]);
+    advanced = true;
+    await rename(indexLock, index);
+    lockOwned = false;
+    return commit;
+  } catch (error) {
+    if (advanced)
+      throw new Error("The commit was created, but replacing its index did not finish. Your files are preserved. Inspect the branch and Git index before retrying; Nova did not roll back the commit.", { cause: error });
+    throw error;
+  } finally {
+    if (lockOpen) await lock.close().catch(() => undefined);
+    if (lockOwned) await unlink(indexLock).catch(() => undefined);
+    await unlink(temporaryIndex).catch(() => undefined);
+    await unlink(`${temporaryIndex}.lock`).catch(() => undefined);
+    await rmdir(hooks).catch(() => undefined);
+  }
+}
+
+/** A deliberate fast-forward, never a merge commit, reset, autostash, or push. */
+export async function fastForwardReviewedWorktree(root: string, sourceHead: string, storage: string): Promise<void> {
+  if (!SHA.test(sourceHead)) throw new Error("Invalid integration commit.");
+  const hooks = await mkdtemp(path.join(storage, "git-no-hooks-"));
+  try {
+    await runGit(root, [
+      "-c", `core.hooksPath=${hooks}`,
+      "-c", "merge.autostash=false",
+      "-c", "merge.autoStash=false",
+      "-c", "submodule.recurse=false",
+      "-c", "rerere.enabled=false",
+      "-c", "maintenance.auto=false",
+      "-c", "gc.auto=0",
+      "merge", "--ff-only", "--no-edit", "--no-stat", "--no-verify-signatures", "--no-overwrite-ignore", sourceHead,
+    ]);
+  } finally {
+    await rmdir(hooks).catch(() => undefined);
+  }
 }
 
 function sensitiveUntrackedPath(filePath: string): boolean {

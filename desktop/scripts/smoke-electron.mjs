@@ -70,6 +70,9 @@ try {
       ...value.state.settings,
       theme: "light",
       codexHome: home,
+      localProvider: "custom",
+      localBaseUrl: "http://127.0.0.1:8080/v1",
+      localProtocol: "chat-completions",
     });
   }, codexHome);
   const installation = await page.evaluate(() =>
@@ -108,6 +111,28 @@ try {
     true,
     "native reference bridge must reject private/traversal paths",
   );
+  assert.deepEqual(await page.evaluate(() => window.workbench.listRecoveryItems()), []);
+  const rejectedLocalEndpoint = await page.evaluate(async () => {
+    try {
+      await window.workbench.listLocalModels({
+        kind: "custom", baseUrl: "https://example.invalid/v1", protocol: "chat-completions",
+      });
+      return false;
+    } catch { return true; }
+  });
+  assert.equal(rejectedLocalEndpoint, true, "local discovery must reject remote destinations before any request");
+  const rejectedUnknownActions = await page.evaluate(async () => {
+    const actions = [
+      () => window.workbench.chooseExecutable("unknown"),
+      () => window.workbench.openProviderHelp("https://example.invalid"),
+      () => window.workbench.reviewWorktree("missing-run"),
+      () => window.workbench.exportConversation("missing-thread"),
+    ];
+    return Promise.all(actions.map(async (action) => {
+      try { await action(); return false; } catch { return true; }
+    }));
+  });
+  assert.deepEqual(rejectedUnknownActions, [true, true, true, true]);
   await page.waitForFunction(
     () => document.documentElement.dataset.theme === "light",
   );
@@ -130,6 +155,9 @@ try {
   );
   assert.equal(restored.state.settings.theme, "light");
   assert.equal(restored.state.settings.codexHome, codexHome);
+  assert.equal(restored.state.settings.localProvider, "custom");
+  assert.equal(restored.state.settings.localBaseUrl, "http://127.0.0.1:8080/v1");
+  assert.equal(restored.state.settings.localProtocol, "chat-completions");
   const rejected = await reopened.evaluate(async () => {
     try {
       await window.workbench.updateThread({
@@ -144,7 +172,7 @@ try {
   assert.equal(rejected, true, "native bridge must reject invalid identifiers");
   assert.deepEqual(errors, [], "renderer must start without uncaught errors");
   console.log(
-    "Native Electron smoke passed: custom protocol, isolated preload, validated IPC, synthetic Codex inventory/reference preview, settings, and restart persistence. No native history server or model was started.",
+    "Native Electron smoke passed: custom protocol, isolated preload, validated action IPC, local endpoint rejection, synthetic Codex inventory/reference preview, settings, recovery listing, and restart persistence. No native history server or model was started.",
   );
 } finally {
   if (application) await application.close();

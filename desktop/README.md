@@ -4,17 +4,17 @@ A Windows-first, multi-provider development workbench built alongside the open-s
 
 Nova uses the familiar **projects → conversation → changes** workflow of Codex and Claude Code, with its own interface and branding. It is an independent project, not an official OpenAI or Anthropic desktop application, and does not contain either company's proprietary desktop UI.
 
-**Status: development alpha, version 0.3.0.** The foundation now includes existing Codex installation/history integration, inspectable shared context, thread organization, and revision-bound command checks. It is not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
+**Status: development alpha, version 0.4.0.** This increment adds configurable local servers, reviewed Git commit/integration, explicit recovery, and conversation export to the existing Codex history and shared-context workflows. Live Windows use with the actual installed Codex, Claude, and local providers remains untested for this commit. It is not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
 
 ## What's in this milestone
 
 - Project and thread navigation, a conversation composer, and Changes, Context, Memory, Checks, and Activity inspectors.
-- Manual provider selection: Codex, Claude Code, or a local Ollama model through the Codex agent engine.
+- Manual provider selection: Codex, Claude Code, or a model served by Ollama, LM Studio, or a compatible custom loopback endpoint through the Codex agent engine.
 - Plan mode and explicitly confirmed Build mode in a separate Git worktree.
 - Streaming agent messages and tool activity, failure states, cancellation, and runtime/output limits.
 - Persistent local projects, conversations, settings, and user-authored project memories.
 - Shared, bounded project-memory and conversation context when changing providers.
-- Worktree diffs for review, without automatic merging or deleting worktrees.
+- Worktree diffs, reviewed commits, and separately confirmed fast-forward-only integration into the original checkout; no automatic merging, pushing, or deleting worktrees.
 - A narrow Electron bridge, isolated renderer, and Windows packaging configuration.
 - Thread rename, pin, archive, and restore without deleting conversations or worktrees.
 - Inspectable context packs with inclusion/omission reasons and optional file-linked memory fingerprints.
@@ -23,6 +23,9 @@ Nova uses the familiar **projects → conversation → changes** workflow of Cod
 - Native Codex continuation through the installed app-server, with preserved original history and isolated native forks for Build; bounded Claude/local handoffs in the same Nova thread.
 - Selective Markdown memory, instructions, skill-reference, and plan import with source fingerprints and stale-content omission.
 - Configurable existing Codex home and storage for new Nova worktrees; existing locations are not moved.
+- Tabbed Settings with native CLI executable selection and local model discovery, without downloading models or starting inference during discovery.
+- User-confirmed recovery acknowledgement that preserves the original unconfirmed-termination history.
+- Explicit Markdown export of visible conversation text and active project memory, plus device-local per-thread composer drafts.
 
 The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventions are recorded in [DESIGN.md](DESIGN.md). Automatic model routing, unattended agent teams, automatic knowledge extraction, repository-wide symbol indexing, a general MCP manager, and semantic Unreal/BeamNG validation are **not implemented**. The new checks establish which command ran against which source, not whether every engineering requirement is correct.
 
@@ -34,7 +37,7 @@ The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventio
 2. At least one supported provider installed separately:
    - [Codex CLI](https://github.com/openai/codex), for OpenAI-hosted models.
    - [Claude Code](https://code.claude.com/docs/en/setup), for Claude.
-   - Codex CLI plus [Ollama](https://ollama.com/), for a locally installed model.
+   - Codex CLI plus an already-running Ollama, LM Studio, or compatible local API server, for local models. See the protocol limits below.
 3. Complete authentication in the provider's **own official CLI**, where required. Nova does not provide a Claude.ai/OpenAI login form, read provider credential files, or import credentials.
 
 From this repository's root, open PowerShell:
@@ -54,20 +57,35 @@ npm run build
 npm start
 ```
 
-If provider discovery fails, use Settings to choose the installed native executable. A configured executable must actually be executable; a command containing shell operators is not a supported configuration. Nova intentionally does not use a shell to interpolate prompts or launch arbitrary renderer-supplied commands.
+Settings is organized into **General**, **Agents**, **Local models**, **Storage**, and **Recovery**. If provider discovery fails, use **Agents → Browse** to select the installed native executable. Supported JavaScript CLI entry points use the configured Node runtime; arbitrary `.cmd`/`.bat` wrappers are not interpreted. A command containing shell operators is not a supported configuration. Nova intentionally does not use a shell to interpolate prompts or launch arbitrary renderer-supplied commands.
 
 After installing or updating a CLI, use **Refresh agent availability** to rerun capability detection. Saving Settings also refreshes detection. Routine conversation updates use cached results; they do not repeatedly launch the CLIs.
 
 ### First task
 
 1. Choose **Open project** and select a local Git repository.
-2. Choose a provider. For Local, set the exact name of an already-installed Ollama model in Settings and start Ollama separately.
+2. Choose a provider. For Local, start the server separately, configure its backend/URL/protocol in Settings, then discover and select an available model.
 3. Start in **Plan** mode to inspect or discuss the project.
 4. Add relevant constraints or decisions in **Memory**. Include a source that another agent or human can check.
 5. Choose **Build** when you want file changes. The first build needs a clean Git baseline; Nova creates an isolated worktree for the thread and asks for confirmation before execution.
-6. Inspect **Changes** and run the project's real verification steps. Nova does not merge the branch into your original checkout.
+6. Inspect **Changes** and run the project's real verification steps. Commit reviewed changes when ready; bringing that commit into the original checkout is a separate, explicit fast-forward action.
 
 Changing the provider within a thread passes a bounded transcript and selected project memories to the next worker. This is **not** a transfer of private reasoning, provider-native hidden state, or an unlimited conversation context. Providers retain their own model limits, account access, and billing rules.
+
+### Connect a local model
+
+In **Settings → Local models**, choose the backend, API base URL, and protocol. Defaults are Ollama at `http://127.0.0.1:11434/v1`, LM Studio at `http://127.0.0.1:1234/v1`, or a custom server at `http://127.0.0.1:8080/v1`. Use the protocol actually supported by the installed server; choosing its brand is not proof of compatibility.
+
+**Discover models** requests metadata only: Ollama's `/api/tags`, or the other backends' `/models` endpoint. Nova checks the selected model against that catalog before execution. It does not download, load, or run a model during discovery, and excludes model entries identified as remote/cloud. A catalog entry alone does not establish that a model is loaded, supports tools, or has enough context for the task.
+
+| Selected protocol | Execution path and limits |
+| ----------------- | ------------------------- |
+| Responses | The Codex harness connects directly to the selected local server's Responses API. Actual server/model compatibility remains its responsibility. |
+| Chat completions | A bounded, per-run loopback bridge translates full-context Responses requests into streaming Chat Completions, including text and function/custom-text tool calls. It requires streaming tool-capable output; it is not a complete Responses implementation. |
+
+The Chat Completions bridge rejects images/audio/attachments, encrypted or nonportable reasoning state, provider-native response IDs, background jobs, hosted tools/tool search, and structured response formats. Custom text tools are represented as function calls; grammar guidance does not give a local model native grammar-constrained decoding. The bridge is limited to 16 MiB request bodies, 256 tools, a bounded response stream, and a maximum ten-minute upstream request; normal worker limits still apply. Its generated authorization token exists only for that worker and is not saved in Settings.
+
+Endpoints must use loopback (`127.0.0.1`, `localhost`, or `[::1]`) without embedded credentials, query, or fragment. Discovery and bridged requests refuse redirects; authenticated local servers are not supported by this adapter. There is no hosted-model fallback. A loopback server can itself forward requests elsewhere, so connect only a server you trust. A Strata or other custom endpoint is usable only if it meets this contract; Nova has not live-tested or certified every local runtime.
 
 ### Connect an existing Codex installation
 
@@ -88,6 +106,10 @@ Memory entries may link to a project-relative file. Saving records the file's di
 
 Pin important threads, rename them, or archive completed conversations. Archiving preserves history and the worktree; active work must finish or be cancelled first. Restore an archived thread to continue it.
 
+Composer text, provider, model, and mode are retained locally for each thread and each project's unsent new task. Drafts are bounded to 40 recent entries, 32,000 prompt characters each, and an approximately 256,000-character serialized budget; older entries can be evicted. They are not synchronized to providers or included in conversation exports. They use plaintext renderer storage, not an encrypted vault; a storage failure displays a warning.
+
+Choose **Export Markdown** from the thread toolbar/menu to save the retained visible conversation and active project memories through a native Save dialog. This exports only Nova's retained imported history and visible user/assistant messages—not all native Codex history, configuration, credentials, raw tool/error logs, or private reasoning. Active memory includes user notes that may be stale or unverified; export does not certify them. Common credential patterns are redacted, but private details or unrecognized secrets can remain in visible text. Review the file before sharing. Exports over 8 MiB fail instead of silently producing a partial file.
+
 ### Run an explicit check
 
 1. Select a thread with an existing Build worktree. Checks never execute in the original project checkout.
@@ -99,7 +121,15 @@ Verification commands run as your own user account, **outside the agent sandbox*
 
 The source fingerprint covers tracked and Git-unignored files, including binary content and symlink metadata, within bounded size/time limits. Git-ignored dependencies, generated outputs, external symlink targets, the broader machine environment, and network services are outside that fingerprint. Oversized, unstable, unreadable, or unsupported source snapshots cannot earn a current passing result. If the source changes while the command runs, the result is stale even when the command exits zero. Passing one profile is not a blanket "task verified" state.
 
-The Local adapter checks for the exact installed model at Ollama's loopback endpoint before starting. It does not pull models or fall back to a cloud model. Install the model yourself with the official Ollama tools; the selected model must support the capabilities needed by the Codex harness.
+### Review, commit, and integrate changes
+
+1. Finish or cancel active workers and checks. In **Changes**, review the worktree branch, HEAD, changed paths, and original target branch. An incomplete or unstable source fingerprint cannot be approved.
+2. Enter a commit message and choose **Commit changes**. The native confirmation is tied to the reviewed revision and file bytes. Nova rechecks them before committing; changed inputs require a fresh review. The commit remains on the Nova-owned thread branch, leaving the original checkout untouched.
+3. After reviewing the committed result and relevant check evidence, choose the separate fast-forward integration action. Both checkouts must be clean, the original branch must still match the reviewed target, and its HEAD must be an ancestor of the source commit.
+
+Git actions suppress repository hooks, signing helpers, and clean/smudge filters. Commits include reviewed staged changes and Git-unignored worktree changes; suspicious untracked credential filenames are refused. Ignored dependencies/outputs are not automatically added. Integration refuses divergence, dirty files, ignored-file collisions, recovery locks, and stale branch/revision evidence instead of resetting, stashing, resolving conflicts, or creating a merge commit. No action pushes to a remote or removes the worktree. Git identity must already be configured. Stop external editors/agents that may write during these actions; Nova's queue does not lock every other application.
+
+A successful command check is evidence for its recorded snapshot, not an automatic integration approval. If Git succeeds but saving Nova state fails, the error reports the preserved Git result; Nova does not undo a real commit or fast-forward to hide a persistence failure.
 
 ## Plan versus Build
 
@@ -113,7 +143,7 @@ The first version limits writer concurrency and never silently merges competing 
 
 Process cleanup tracks owned process groups on POSIX and observable process ancestry on Windows. Windows cleanup uses the built-in PowerShell/CIM tools to inspect process IDs, parent IDs, and creation times, not command lines or credentials; unavailable inspection is reported as unconfirmed cleanup. This is lifecycle management, not full operating-system containment. Deliberately detached processes or Windows ancestry lost through already-exited intermediate parents require stronger isolation, such as Windows Job Objects, which this version does not implement.
 
-If worker termination cannot be confirmed, Nova reports a failure and locks further Build tasks for that project, including after restart. Do not simply retry the task: inspect and stop any remaining CLI processes first. This milestone has no automatic recovery/unlock UI. After confirming cleanup, close Nova, back up `workspace.json`, and deliberately clear the affected run's `terminationUnconfirmed` flag before restarting. Do not clear the flag while a worker may still be editing files.
+If worker termination cannot be confirmed, Nova reports a failure and locks further Build/check/Git actions for that project, including after restart. Do not simply retry: inspect and stop any remaining CLI workers and children first. Then use **Settings → Recovery** to review and acknowledge only the affected entry through a native confirmation. Nova refuses acknowledgement while an agent, check, or history operation is active, and rechecks that the listed recovery state has not changed. This records **your confirmation**, not a new successful operating-system process inspection. The original unconfirmed-termination history stays intact with acknowledgement metadata; no manual `workspace.json` editing is required. Never acknowledge cleanup while a worker may still be editing files.
 
 Unsupported safety capabilities must fail with an actionable error rather than falling back to an unrestricted invocation. Nova does not use permission-bypass or no-sandbox modes. Inherited hooks, plugins, and MCP integrations are deliberately not part of this initial adapter contract; explicit integration management is a later milestone.
 
@@ -129,9 +159,10 @@ Application state is written atomically to `workspace/workspace.json` under Elec
 - Verification commands, arguments, and output are also stored locally. Commands can print sensitive data; review what a check emits before sharing logs.
 - Do not put API keys, passwords, or other secrets in project memory.
 - A cloud provider receives the prompt and context passed to it and any project content its tools read. Local persistence does not make cloud execution private or offline.
-- The Local adapter uses a local model through Codex/Ollama; it is not a blanket guarantee that every external tool or provider configuration is offline.
+- The Local adapter uses the Codex harness and a configured loopback server; it is not a blanket guarantee that every external tool or local server is offline.
 - No project-memory export to the repository is automatic. Nova memory is separate from Codex's internal store; explicitly imported reference text is a source-linked copy, not a synchronized write into that store.
 - Provider credentials remain with the official provider tooling. Nova does not copy, exchange, or share authentication between providers.
+- Composer drafts are separate plaintext device-local storage. An explicit Markdown export creates a plaintext file at your chosen destination; it is not a complete native-history backup or a guaranteed secrets scrubber.
 
 Only use trusted repositories and executables. A malicious project can influence an agent through its contents; context delimiters and worktrees are not a complete prompt-injection defense.
 
@@ -201,7 +232,10 @@ The initial package is unsigned. A public release still needs a Windows-native s
 - [ ] Run Plan against a disposable repository, then confirm Build creates a separate worktree and leaves the original checkout unchanged.
 - [ ] Cancel an active task and verify its worker exits while existing changes remain reviewable.
 - [ ] Restart the app and verify projects, conversations, and memory persist; interrupted tasks must not appear active.
-- [ ] Review actual diffs and run the project's own checks before manually integrating anything.
+- [ ] Discover the intended local server's models, then confirm its selected Responses or streaming Chat Completions protocol can complete a real tool-using task.
+- [ ] Review actual diffs, run the project's own checks, commit, and explicitly fast-forward a disposable original checkout; confirm dirty/divergent targets remain untouched.
+- [ ] Exercise Recovery only after independently stopping remaining workers; verify the uncertainty record survives acknowledgement and restart.
+- [ ] Confirm draft persistence and review a Markdown export for expected visible content and private details before sharing it.
 
 This checklist is intentionally separate from automated test results. Provider compatibility and Windows-native behavior need observed evidence on the machine where the application will run.
 
