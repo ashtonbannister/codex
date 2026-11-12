@@ -785,7 +785,7 @@ ${fakeCli}`,
   assert.equal(local.version, codex.version);
   assert.match(
     local.detail,
-    /Set the name of an already-installed Ollama model/,
+    /Select an installed model from your local server/,
   );
   assert.deepEqual(
     (await probeArguments()).map((args) => args.join(" ")).sort(),
@@ -802,7 +802,7 @@ ${fakeCli}`,
   )!;
   assert.equal(configured.available, true);
   assert.equal(configured.version, codex.version);
-  assert.match(configured.detail, /availability is checked only when you run/);
+  assert.match(configured.detail, /selected local server and exact model are checked before running/);
   assert.equal(
     (await probeArguments()).length,
     8,
