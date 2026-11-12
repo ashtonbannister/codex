@@ -49,6 +49,25 @@ jobs:
       - name: UI integration tests
         if: runner.os == 'Linux'
         run: npm run test:ui
+      - name: Capture UI review evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: Nova-Workbench-UI-screenshots
+          path: desktop/artifacts/*.png
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Native Windows Electron smoke test
+        if: runner.os == 'Windows'
+        run: npm run test:electron
+      - name: Upload native smoke evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: Nova-Workbench-Windows-smoke
+          path: desktop/artifacts/native-*.png
+          if-no-files-found: warn
+          retention-days: 14
       - name: Package unsigned Windows installers
         if: runner.os == 'Windows'
         run: npm run pack:win

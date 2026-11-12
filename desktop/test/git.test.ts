@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -64,7 +65,9 @@ test("repository selection resolves nested directories to a canonical root", asy
   const nested = path.join(root, "nested");
   await mkdir(nested);
   const info = await inspectRepository(nested);
-  assert.equal(info.path, root);
+  // Windows temp paths may use an 8.3 alias; repository selection returns the
+  // canonical long path, so compare canonical paths on both sides.
+  assert.equal(info.path, await realpath(root));
   assert.equal(info.name, "project with spaces");
   assert.equal(info.branch, "main");
   assert.equal(info.clean, true);

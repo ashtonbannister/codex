@@ -96,6 +96,7 @@ async function executeGit(
   args: string[],
   maxBytes = STATUS_LIMIT,
   allowTruncation = false,
+  timeoutMs = 60_000,
 ): Promise<{ output: string; truncated: boolean }> {
   validatePath(cwd);
   if (
@@ -132,7 +133,7 @@ async function executeGit(
         encoding: "utf8",
         env: gitEnvironment(),
         maxBuffer: maxBytes,
-        timeout: 60_000,
+        timeout: timeoutMs,
       },
     );
     return { output: stdout, truncated: false };
@@ -157,7 +158,7 @@ async function executeGit(
       );
     if (error.killed)
       throw new Error(
-        "Git did not finish within 60 seconds. No automatic rollback or deletion was performed.",
+        "Git did not finish within its time budget. No automatic rollback or deletion was performed.",
       );
     // Do not copy command strings or arbitrary gitconfig content into app errors.
     throw new Error(
@@ -171,8 +172,11 @@ export async function runGit(
   cwd: string,
   args: string[],
   maxBytes = STATUS_LIMIT,
+  timeoutMs = 60_000,
 ): Promise<string> {
-  return (await executeGit(cwd, args, maxBytes)).output;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000)
+    throw new Error("Invalid Git time budget.");
+  return (await executeGit(cwd, args, maxBytes, false, timeoutMs)).output;
 }
 
 export interface RepositoryInfo {

@@ -3,6 +3,9 @@ import type {
   MemoryInput,
   RunRequest,
   Settings,
+  ThreadUpdate,
+  VerificationProfileInput,
+  VerificationRequest,
   WorkbenchAPI,
   WorkspaceState,
 } from "../shared/types";
@@ -11,6 +14,10 @@ const bridge: WorkbenchAPI = {
   getSnapshot: () => ipcRenderer.invoke("workspace:snapshot"),
   refreshProviderStatus: () =>
     ipcRenderer.invoke("workspace:refresh-providers"),
+  updateThread: (input: ThreadUpdate) =>
+    ipcRenderer.invoke("thread:update", input),
+  previewContext: (request: RunRequest) =>
+    ipcRenderer.invoke("context:preview", request),
   chooseProject: () => ipcRenderer.invoke("project:choose"),
   startRun: (request: RunRequest) => ipcRenderer.invoke("run:start", request),
   cancelRun: (runId: string) => ipcRenderer.invoke("run:cancel", runId),
@@ -18,6 +25,16 @@ const bridge: WorkbenchAPI = {
   saveMemory: (input: MemoryInput) => ipcRenderer.invoke("memory:save", input),
   archiveMemory: (memoryId: string) =>
     ipcRenderer.invoke("memory:archive", memoryId),
+  saveVerificationProfile: (input: VerificationProfileInput) =>
+    ipcRenderer.invoke("verification:save-profile", input),
+  deleteVerificationProfile: (profileId: string) =>
+    ipcRenderer.invoke("verification:delete-profile", profileId),
+  getVerificationReport: (runId: string) =>
+    ipcRenderer.invoke("verification:report", runId),
+  startVerification: (request: VerificationRequest) =>
+    ipcRenderer.invoke("verification:start", request),
+  cancelVerification: (id: string) =>
+    ipcRenderer.invoke("verification:cancel", id),
   updateSettings: (settings: Settings) =>
     ipcRenderer.invoke("settings:update", settings),
   openProject: (projectId: string) =>

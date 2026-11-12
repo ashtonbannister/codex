@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { promisify } from "node:util";
 import type {
   ProviderId,
   ProviderStatus,
@@ -99,46 +100,286 @@ export async function resolveExecutable(
   );
 }
 
-async function terminateTree(child: ChildProcess): Promise<void> {
-  if (!child.pid) return;
-  if (process.platform === "win32") {
-    const killer = spawn(
-      path.join(
-        process.env.SystemRoot || "C:\\Windows",
-        "System32",
-        "taskkill.exe",
-      ),
-      ["/PID", String(child.pid), "/T", "/F"],
-      { windowsHide: true, shell: false, stdio: "ignore" },
-    );
-    await new Promise<void>((resolve) => {
-      killer.once("error", () => {
-        child.kill();
-        resolve();
-      });
-      killer.once("close", () => resolve());
-    });
-    return;
-  }
-  // A leader can exit while its descendants still hold the inherited pipes.
-  // The detached POSIX group remains addressable even after that leader exits.
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    child.kill("SIGTERM");
-  }
-  const timer = setTimeout(() => {
-    try {
-      if (child.pid) process.kill(-child.pid, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }, 600);
-  timer.unref();
-  // Parent close alone is not proof that all descendants obeyed SIGTERM.
+const execFileAsync = promisify(execFile);
+const ownedProcesses = new WeakMap<
+  ChildProcess,
+  { startedAt: number; exitedAt?: number }
+>();
+const terminationTasks = new WeakMap<ChildProcess, Promise<boolean>>();
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Register immediately after spawning, before any asynchronous work. */
+export function trackOwnedProcess(
+  child: ChildProcess,
+  startedAt: number,
+): void {
+  const lifetime = { startedAt, exitedAt: undefined as number | undefined };
+  ownedProcesses.set(child, lifetime);
+  child.once("exit", () => {
+    lifetime.exitedAt = Date.now();
+  });
 }
 
-function disconnectChild(child: ChildProcess): void {
+async function processGroupState(
+  pid: number,
+): Promise<"alive" | "gone" | "unknown"> {
+  try {
+    process.kill(-pid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH"
+      ? "gone"
+      : "unknown";
+  }
+  try {
+    // kill(group, 0) also sees orphan zombies awaiting the OS reaper. They
+    // cannot execute or write, so distinguish them from runnable descendants.
+    const { stdout } = await execFileAsync(
+      "/bin/ps",
+      ["-A", "-o", "pgid=", "-o", "stat="],
+      {
+        shell: false,
+        encoding: "utf8",
+        timeout: 300,
+        maxBuffer: 1_048_576,
+      },
+    );
+    for (const line of stdout.split("\n")) {
+      const match = /^\s*(\d+)\s+(\S+)\s*$/.exec(line);
+      if (!match) {
+        if (line.trim()) return "unknown";
+        continue;
+      }
+      if (Number(match[1]) === pid && !/^[ZX]/.test(match[2])) return "alive";
+    }
+    return "gone";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function terminatePosixGroup(pid: number): Promise<boolean> {
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  const grace = Date.now() + 150;
+  do {
+    if ((await processGroupState(pid)) === "gone") return true;
+    await pause(25);
+  } while (Date.now() < grace);
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+  }
+  const deadline = Date.now() + 650;
+  do {
+    if ((await processGroupState(pid)) === "gone") return true;
+    await pause(25);
+  } while (Date.now() < deadline);
+  return false;
+}
+
+interface WindowsProcess {
+  pid: number;
+  parent: number;
+  started: number;
+}
+
+/** Pure identity filtering, shared by cleanup and PID-reuse regression tests. */
+export function selectWindowsDescendants(
+  rows: WindowsProcess[],
+  leader: {
+    pid: number;
+    startedAt: number;
+    exitedAt?: number;
+    hasExited: boolean;
+  },
+  known: Map<number, number>,
+): WindowsProcess[] {
+  const currentLeader = rows.find((row) => row.pid === leader.pid);
+  if (
+    currentLeader &&
+    (leader.hasExited ||
+      !Number.isFinite(currentLeader.started) ||
+      currentLeader.started < leader.startedAt)
+  )
+    throw new Error("The worker PID is no longer uniquely identified.");
+  if (currentLeader) known.set(leader.pid, currentLeader.started);
+  const discovered = new Map<number, WindowsProcess>();
+  if (currentLeader) discovered.set(leader.pid, currentLeader);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const row of rows) {
+      if (row.pid === leader.pid || discovered.has(row.pid)) continue;
+      const parentStart = known.get(row.parent);
+      if (parentStart === undefined) continue;
+      if (!Number.isFinite(row.started))
+        throw new Error("Unknown descendant identity.");
+      // No multi-second tolerance: a process older than the owned parent's
+      // recorded spawn cannot be attributed to it through a historical PPID.
+      if (row.started < parentStart) continue;
+      if (
+        row.parent === leader.pid &&
+        leader.exitedAt !== undefined &&
+        row.started > leader.exitedAt
+      )
+        continue;
+      const previouslyKnown = known.get(row.pid);
+      if (
+        previouslyKnown === undefined &&
+        row.parent !== leader.pid &&
+        !rows.some(
+          (parent) =>
+            parent.pid === row.parent && parent.started === parentStart,
+        )
+      )
+        throw new Error(
+          "A historical descendant parent can no longer be uniquely identified.",
+        );
+      if (previouslyKnown !== undefined && previouslyKnown !== row.started)
+        throw new Error("A descendant PID was reused.");
+      discovered.set(row.pid, row);
+      known.set(row.pid, row.started);
+      changed = true;
+    }
+  }
+  for (const row of rows) {
+    const start = known.get(row.pid);
+    if (row.pid !== leader.pid && start !== undefined) {
+      if (row.started !== start)
+        throw new Error("A descendant PID was reused.");
+      discovered.set(row.pid, row);
+    }
+  }
+  return [...discovered.values()];
+}
+
+async function windowsProcessTable(timeout: number): Promise<WindowsProcess[]> {
+  // Fixed OS command, no profile scripts and no model/repository text. Only
+  // process identity metadata is inspected, never command lines or env vars.
+  const command =
+    "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; parent=$_.ParentProcessId; started=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }) } }) | ConvertTo-Json -Compress";
+  const { stdout } = await execFileAsync(
+    path.join(
+      process.env.SystemRoot || "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+    {
+      shell: false,
+      windowsHide: true,
+      encoding: "utf8",
+      timeout,
+      maxBuffer: 2_097_152,
+    },
+  );
+  const parsed: unknown = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  if (!rows.length || rows.length > 50_000)
+    throw new Error("Incomplete process inventory.");
+  return rows.map((value: unknown) => {
+    if (!value || typeof value !== "object")
+      throw new Error("Invalid process inventory.");
+    const row = value as Record<string, unknown>;
+    if (
+      !Number.isInteger(row.pid) ||
+      !Number.isInteger(row.parent) ||
+      Number(row.pid) < 0 ||
+      Number(row.parent) < 0 ||
+      typeof row.started !== "string"
+    )
+      throw new Error("Invalid process identity.");
+    return {
+      pid: Number(row.pid),
+      parent: Number(row.parent),
+      started: Date.parse(row.started),
+    };
+  });
+}
+
+async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
+  const pid = child.pid!;
+  const lifetime = ownedProcesses.get(child);
+  if (!lifetime) return false;
+  const deadline = Date.now() + 8_000;
+  const timeLeft = () => Math.max(1, Math.min(3_000, deadline - Date.now()));
+  const kill = async (target: number) => {
+    try {
+      await execFileAsync(
+        path.join(
+          process.env.SystemRoot || "C:\\Windows",
+          "System32",
+          "taskkill.exe",
+        ),
+        ["/PID", String(target), "/T", "/F"],
+        {
+          shell: false,
+          windowsHide: true,
+          timeout: timeLeft(),
+          maxBuffer: 65_536,
+        },
+      );
+    } catch {
+      /* A parent can exit before taskkill observes it. Inspect below. */
+    }
+  };
+  // Kill while the leader still exists, so taskkill can follow its live tree.
+  if (child.exitCode === null && child.signalCode === null) await kill(pid);
+  const known = new Map<number, number>([[pid, lifetime.startedAt]]);
+  while (Date.now() < deadline) {
+    const rows = await windowsProcessTable(timeLeft());
+    const discovered = selectWindowsDescendants(
+      rows,
+      {
+        pid,
+        ...lifetime,
+        hasExited:
+          child.exitCode !== null ||
+          child.signalCode !== null ||
+          lifetime.exitedAt !== undefined,
+      },
+      known,
+    );
+    if (!discovered.length) return true;
+    if (discovered.length > 256) return false;
+    const targets = discovered.map((row) => row.pid);
+    for (
+      let offset = 0;
+      offset < targets.length && Date.now() < deadline;
+      offset += 8
+    )
+      await Promise.all(targets.slice(offset, offset + 8).map(kill));
+  }
+  return false;
+}
+
+/**
+ * Resolves only after owned process-group/tree cleanup, never at leader close.
+ * This is lifecycle management, not a sandbox: deliberately detached POSIX
+ * processes and Windows ancestry already lost through exited intermediates
+ * require stronger OS containment (for example a Windows Job Object).
+ */
+export function terminateTree(child: ChildProcess): Promise<boolean> {
+  const existing = terminationTasks.get(child);
+  if (existing) return existing;
+  const task = (
+    !child.pid
+      ? Promise.resolve(true)
+      : process.platform === "win32"
+        ? terminateWindowsTree(child)
+        : terminatePosixGroup(child.pid)
+  ).catch(() => false);
+  terminationTasks.set(child, task);
+  return task;
+}
+
+export function disconnectChild(child: ChildProcess): void {
   child.stdin?.destroy();
   child.stdout?.destroy();
   child.stderr?.destroy();
@@ -153,6 +394,7 @@ export async function captureCommand(
   maximum = 128_000,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn(executable.command, [...executable.prefix, ...args], {
       cwd,
       env: { ...process.env, ...executable.env, NO_COLOR: "1" },
@@ -161,25 +403,53 @@ export async function captureCommand(
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    trackOwnedProcess(child, startedAt);
     const chunks: Buffer[] = [];
     let bytes = 0;
     let failure = "";
     let settled = false;
+    let finishing = false;
+    let termination: Promise<boolean> | undefined;
     let drain: NodeJS.Timeout | undefined;
-    const stop = () => {
-      if (drain || settled) return;
-      void terminateTree(child);
-      drain = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        disconnectChild(child);
+    const finish = async (
+      code: number | null,
+      unconfirmed = false,
+      spawnError = false,
+    ) => {
+      if (settled || finishing) return;
+      finishing = true;
+      clearTimeout(timeout);
+      clearTimeout(drain);
+      unconfirmed ||= !(await (termination ??= terminateTree(child)));
+      settled = true;
+      if (unconfirmed)
         reject(
           new Error(
             `${failure} CLI descendant termination could not be confirmed; inspect running CLI processes.`,
           ),
         );
-      }, 1_500);
+      else if (failure || spawnError || code !== 0)
+        reject(
+          new Error(
+            failure ||
+              (spawnError
+                ? "The CLI could not be started. Check its executable path."
+                : "CLI metadata probe failed. Run the official CLI in a terminal to diagnose installation."),
+          ),
+        );
+      else resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    const stop = () => {
+      if (termination || settled || finishing) return;
+      termination = terminateTree(child);
+      void termination.then(() => {
+        if (settled || finishing) return;
+        drain = setTimeout(() => {
+          if (settled || finishing) return;
+          disconnectChild(child);
+          void finish(child.exitCode, true);
+        }, 1_500);
+      });
     };
     const timeout = setTimeout(() => {
       failure = "CLI metadata probe timed out.";
@@ -195,27 +465,10 @@ export async function captureCommand(
     child.stdout.on("data", data);
     child.stderr.on("data", data);
     child.on("error", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      clearTimeout(drain);
-      reject(
-        new Error("The CLI could not be started. Check its executable path."),
-      );
+      void finish(null, false, true);
     });
     child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      clearTimeout(drain);
-      if (failure || code !== 0)
-        reject(
-          new Error(
-            failure ||
-              "CLI metadata probe failed. Run the official CLI in a terminal to diagnose installation.",
-          ),
-        );
-      else resolve(Buffer.concat(chunks).toString("utf8"));
+      void finish(code);
     });
   });
 }
@@ -445,6 +698,7 @@ export async function runProvider(options: {
 }): Promise<ProcessResult> {
   if (options.signal.aborted) return { cancelled: true, completed: false };
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(
       options.command.command,
       [...options.command.prefix, ...options.command.args],
@@ -457,6 +711,7 @@ export async function runProvider(options: {
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
+    trackOwnedProcess(child, startedAt);
     const decoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     let buffer = "";
@@ -464,16 +719,21 @@ export async function runProvider(options: {
     let completed = false;
     let failure: string | undefined;
     let settled = false;
+    let finishing = false;
+    let termination: Promise<boolean> | undefined;
     let stderr = "";
     let drain: NodeJS.Timeout | undefined;
     const stop = () => {
-      if (drain || settled) return;
-      void terminateTree(child);
-      drain = setTimeout(() => {
-        if (settled) return;
-        disconnectChild(child);
-        finish(null, false, true);
-      }, 1_500);
+      if (termination || settled || finishing) return;
+      termination = terminateTree(child);
+      void termination.then(() => {
+        if (settled || finishing) return;
+        drain = setTimeout(() => {
+          if (settled || finishing) return;
+          disconnectChild(child);
+          void finish(null, false, true);
+        }, 1_500);
+      });
     };
     const fail = (message: string) => {
       failure ??= message;
@@ -523,15 +783,18 @@ export async function runProvider(options: {
         ),
       options.timeoutMs,
     );
-    const finish = (
+    const finish = async (
       code: number | null,
       spawnError = false,
       terminationUnconfirmed = false,
     ) => {
-      if (settled) return;
-      settled = true;
+      if (settled || finishing) return;
+      finishing = true;
       clearTimeout(timer);
       clearTimeout(drain);
+      terminationUnconfirmed ||= !(await (termination ??=
+        terminateTree(child)));
+      settled = true;
       options.signal.removeEventListener("abort", abort);
       buffer += decoder.end();
       if (buffer && bytes <= options.maxBytes) emitLine(buffer);
@@ -555,8 +818,12 @@ export async function runProvider(options: {
         terminationUnconfirmed: terminationUnconfirmed || undefined,
       });
     };
-    child.on("error", () => finish(null, true));
-    child.on("close", (code) => finish(code));
+    child.on("error", () => {
+      void finish(null, true);
+    });
+    child.on("close", (code) => {
+      void finish(code);
+    });
     child.stdin.on("error", () => {
       /* closed stdin is handled by the child exit/result */
     });

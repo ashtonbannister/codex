@@ -1,4 +1,12 @@
-import type { MemoryInput, RunRequest, Settings } from "../../shared/types";
+import type {
+  MemoryInput,
+  RunRequest,
+  Settings,
+  ThreadUpdate,
+  VerificationProfileInput,
+  VerificationRequest,
+} from "../../shared/types";
+import { normalizeMemoryFilePath } from "./memory-source";
 
 export function record(
   value: unknown,
@@ -47,7 +55,10 @@ export function modelName(value: unknown): string {
   return model;
 }
 
-export function validateRunRequest(value: unknown): RunRequest {
+export function validateRunRequest(
+  value: unknown,
+  allowEmptyPrompt = false,
+): RunRequest {
   const input = record(value, "Run request");
   if (!["codex", "claude", "ollama"].includes(String(input.provider)))
     throw new Error("Unknown provider.");
@@ -62,7 +73,7 @@ export function validateRunRequest(value: unknown): RunRequest {
     provider: input.provider as RunRequest["provider"],
     mode: input.mode,
     model: modelName(input.model),
-    prompt: text(input.prompt, "Prompt", 32_000),
+    prompt: text(input.prompt, "Prompt", 32_000, allowEmptyPrompt),
   };
 }
 
@@ -77,6 +88,91 @@ export function validateMemoryInput(value: unknown): MemoryInput {
     content: text(input.content, "Memory content", 8_000),
     kind: input.kind as MemoryInput["kind"],
     source: text(input.source, "Memory source", 500, true) || "User note",
+    filePath:
+      input.filePath === undefined ||
+      (typeof input.filePath === "string" && !input.filePath.trim())
+        ? undefined
+        : normalizeMemoryFilePath(input.filePath),
+  };
+}
+
+export function validateThreadUpdate(value: unknown): ThreadUpdate {
+  const input = record(value, "Thread update");
+  for (const key of ["pinned", "archived"]) {
+    if (input[key] !== undefined && typeof input[key] !== "boolean")
+      throw new Error(`${key} must be true or false.`);
+  }
+  if (
+    input.title === undefined &&
+    input.pinned === undefined &&
+    input.archived === undefined
+  )
+    throw new Error("Choose a thread field to update.");
+  return {
+    id: identifier(input.id, "Thread"),
+    title:
+      input.title === undefined
+        ? undefined
+        : text(input.title, "Thread title", 160).replace(/\s+/g, " "),
+    pinned: input.pinned as boolean | undefined,
+    archived: input.archived as boolean | undefined,
+  };
+}
+
+export function validateVerificationProfileInput(
+  value: unknown,
+): VerificationProfileInput {
+  const input = record(value, "Verification profile");
+  const executable = text(input.executable, "Verification executable", 2_000);
+  const name = text(input.name, "Profile name", 160);
+  if (
+    /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(
+      executable + name,
+    )
+  )
+    throw new Error(
+      "Verification names and executable paths cannot contain control or bidirectional formatting characters.",
+    );
+  if (
+    !Array.isArray(input.args) ||
+    input.args.length > 64 ||
+    input.args.some(
+      (arg) =>
+        typeof arg !== "string" || arg.includes("\0") || arg.length > 4_000,
+    )
+  )
+    throw new Error(
+      "Verification arguments must be at most 64 text values of 4000 characters each without null bytes.",
+    );
+  if (
+    input.args.reduce((size, arg) => size + (arg as string).length, 0) > 32_000
+  )
+    throw new Error("Verification arguments exceed 32000 characters.");
+  if (
+    !Number.isInteger(input.timeoutMinutes) ||
+    Number(input.timeoutMinutes) < 1 ||
+    Number(input.timeoutMinutes) > 120
+  )
+    throw new Error(
+      "Verification timeout must be a whole number between 1 and 120 minutes.",
+    );
+  return {
+    id: input.id === undefined ? undefined : identifier(input.id, "Profile"),
+    projectId: identifier(input.projectId, "Project"),
+    name,
+    executable,
+    args: [...input.args] as string[],
+    timeoutMinutes: input.timeoutMinutes as number,
+  };
+}
+
+export function validateVerificationRequest(
+  value: unknown,
+): VerificationRequest {
+  const input = record(value, "Verification request");
+  return {
+    runId: identifier(input.runId, "Run"),
+    profileId: identifier(input.profileId, "Profile"),
   };
 }
 

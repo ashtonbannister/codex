@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
+import { APP_VERSION } from "../src/shared/types";
 
 interface PackageConfiguration {
   name: string;
@@ -34,6 +35,11 @@ const { expandMacro } =
   };
 
 test("installed Windows packager expands distinct setup and portable filenames", () => {
+  assert.equal(
+    configuration.version,
+    APP_VERSION,
+    "UI/runtime and package versions must agree",
+  );
   assert.deepEqual(configuration.build.win.target, ["nsis", "portable"]);
   const appInfo = {
     name: configuration.name,

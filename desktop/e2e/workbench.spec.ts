@@ -1,158 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { emptyWorkspace } from "../src/shared/types";
-import type { Run, RunRequest, WorkspaceState } from "../src/shared/types";
-
-/** These are renderer integration tests, not Electron or live-provider tests. */
-async function installFakeDesktopBridge(
-  page: Page,
-  options: { available?: boolean; complete?: boolean; literal?: boolean } = {},
-) {
-  const initial = emptyWorkspace();
-  initial.projects.push({
-    id: "test-project",
-    name: "Fixture repository",
-    path: "D:\\Fixtures\\repository",
-    branch: "main",
-    createdAt: "2026-11-12T00:00:00Z",
-  });
-  await page.addInitScript(
-    ({ initialState, config }) => {
-      const state = initialState;
-      const listeners = new Set<(value: WorkspaceState) => void>();
-      const calls = {
-        requests: [] as RunRequest[],
-        cancellations: [] as string[],
-        refreshes: 0,
-        opens: [] as string[],
-      };
-      let available = config.available !== false;
-      const publish = () =>
-        listeners.forEach((callback) => callback(structuredClone(state)));
-      const snapshot = () => ({
-        state: structuredClone(state),
-        providers: [
-          {
-            id: "codex",
-            name: "Codex",
-            available,
-            detail: "Mock runtime for renderer tests",
-          },
-          {
-            id: "claude",
-            name: "Claude Code",
-            available,
-            detail: "Mock runtime for renderer tests",
-          },
-          {
-            id: "ollama",
-            name: "Local · Ollama",
-            available,
-            detail: "Mock runtime for renderer tests",
-          },
-        ],
-        appVersion: "0.1.0-test",
-        platform: "mock-desktop",
-      });
-      Object.assign(window, {
-        __workbenchTest: calls,
-        workbench: {
-          async getSnapshot() {
-            return snapshot();
-          },
-          async refreshProviderStatus() {
-            calls.refreshes += 1;
-            available = true;
-            return snapshot();
-          },
-          async chooseProject() {
-            return state.projects[0];
-          },
-          async startRun(request: RunRequest) {
-            calls.requests.push(structuredClone(request));
-            const threadId =
-              request.threadId ?? `test-thread-${calls.requests.length}`;
-            if (!state.threads.some((thread) => thread.id === threadId))
-              state.threads.push({
-                id: threadId,
-                projectId: request.projectId,
-                title: request.prompt.slice(0, 50),
-                createdAt: "2026-11-12T00:00:00Z",
-                updatedAt: "2026-11-12T00:00:00Z",
-              });
-            const run: Run = {
-              id: `test-run-${calls.requests.length}`,
-              threadId,
-              projectId: request.projectId,
-              provider: request.provider,
-              model: request.model ?? "Provider default",
-              mode: request.mode,
-              prompt: request.prompt,
-              status: config.complete ? "completed" : "running",
-              createdAt: "2026-11-12T00:00:00Z",
-              startedAt: "2026-11-12T00:00:00Z",
-              verification: "not-run",
-              contextMemoryIds: [],
-              events: [
-                {
-                  id: "test-event-status",
-                  at: "2026-11-12T00:00:00Z",
-                  kind: "status",
-                  text: "Mock process event",
-                },
-                {
-                  id: "test-event-message",
-                  at: "2026-11-12T00:00:01Z",
-                  kind: "message",
-                  text: config.literal
-                    ? '<img src="bad.example" onerror="window.injected=true">\n\n```html\n<script>window.injected=true</script>\n```'
-                    : "A mocked response for testing the desktop bridge.",
-                },
-              ],
-            };
-            state.runs.push(run);
-            publish();
-            return structuredClone(run);
-          },
-          async cancelRun(id: string) {
-            calls.cancellations.push(id);
-            const run = state.runs.find((item) => item.id === id);
-            if (run) run.status = "cancelled";
-            publish();
-          },
-          async getDiff() {
-            return { branch: "main", changes: [], diff: "", truncated: false };
-          },
-          async saveMemory() {
-            throw new Error("Not used by this fixture");
-          },
-          async archiveMemory() {
-            throw new Error("Not used by this fixture");
-          },
-          async updateSettings(settings: WorkspaceState["settings"]) {
-            state.settings = settings;
-            publish();
-            return settings;
-          },
-          async openProject(id: string) {
-            calls.opens.push(id);
-          },
-          async revealWorktree(id: string) {
-            calls.opens.push(id);
-          },
-          onStateChanged(callback: (value: WorkspaceState) => void) {
-            listeners.add(callback);
-            return () => {
-              listeners.delete(callback);
-            };
-          },
-        },
-      });
-    },
-    { initialState: initial, config: options },
-  );
-}
+import type { RunRequest } from "../src/shared/types";
+import { installFakeDesktopBridge } from "./desktop-fixture";
+import type { FixtureCalls, FixtureControls } from "./desktop-fixture";
 
 test("browser preview has an honest empty state and refuses model execution", async ({
   page,
@@ -166,7 +17,7 @@ test("browser preview has an honest empty state and refuses model execution", as
     ),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: /One workspace/ }),
+    page.getByRole("heading", { name: "Start with a project" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Send message", exact: true }),
@@ -206,11 +57,6 @@ test("sample conversation is explicitly illustrative and unverified", async ({
   await expect(
     page.getByRole("heading", { name: "Simulation comes first" }),
   ).toBeVisible();
-  await mkdir("artifacts", { recursive: true });
-  await page.screenshot({
-    path: "artifacts/workbench-preview.png",
-    fullPage: true,
-  });
 });
 
 test("project memory can be created, edited, and explicitly archived", async ({
@@ -239,11 +85,9 @@ test("project memory can be created, edited, and explicitly archived", async ({
     .getByRole("button", { name: "Save memory", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
-  let card = page
-    .locator(".memory-card")
-    .filter({
-      has: page.getByRole("heading", { name: "Preserve stable interfaces" }),
-    });
+  let card = page.locator(".memory-card").filter({
+    has: page.getByRole("heading", { name: "Preserve stable interfaces" }),
+  });
   await expect(card).toContainText("docs/architecture.md");
   await card.getByRole("button", { name: "Edit", exact: true }).click();
   dialog = page.getByRole("dialog", { name: "Edit project memory" });
@@ -253,13 +97,11 @@ test("project memory can be created, edited, and explicitly archived", async ({
   await dialog
     .getByRole("button", { name: "Save memory", exact: true })
     .click();
-  card = page
-    .locator(".memory-card")
-    .filter({
-      has: page.getByRole("heading", {
-        name: "Review interface compatibility",
-      }),
-    });
+  card = page.locator(".memory-card").filter({
+    has: page.getByRole("heading", {
+      name: "Review interface compatibility",
+    }),
+  });
   await expect(card).toBeVisible();
   await card.getByRole("button", { name: "Archive", exact: true }).click();
   await expect(card).toBeVisible();
@@ -343,7 +185,7 @@ test("narrow desktop layout does not overflow horizontally", async ({
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
-  await page.getByRole("button", { name: "Hide inspector" }).click();
+  await page.getByRole("button", { name: "Close inspector" }).click();
   await expect(
     page.getByRole("complementary", { name: "Project inspector" }),
   ).toHaveCount(0);
@@ -430,7 +272,7 @@ test("model HTML and script text remain literal, and success is never called ver
   ).toBeVisible();
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await expect(
-    page.getByText("Verification not run", { exact: true }),
+    page.getByText("Task not automatically verified", { exact: true }),
   ).toBeVisible();
 });
 
@@ -495,4 +337,409 @@ test("local model runs require an explicit model and Build is sent to the native
   });
   // Native confirmation is main-process owned; these tests do not emulate or validate it.
   await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("command palette navigates threads and settings using the keyboard", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true });
+  await page.goto("/");
+  await page.keyboard.press("Control+k");
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette).toBeVisible();
+  const search = palette.getByRole("combobox", { name: "Search commands" });
+  await search.fill("Review the fixture change");
+  await search.press("Enter");
+  await expect(palette).toHaveCount(0);
+  await expect(page.locator(".toolbar-breadcrumb")).toContainText(
+    "Review the fixture change",
+  );
+  await page.keyboard.press("Control+k");
+  await search.fill("Settings");
+  await search.press("Enter");
+  await expect(
+    page.getByRole("dialog", { name: "Workbench settings" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+k");
+  await search.fill("New thread");
+  await search.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "What are we working on?" }),
+  ).toBeVisible();
+});
+
+test("thread names, pinning, archiving, and restoration are state backed", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true });
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Thread actions: Review the fixture change" })
+    .click();
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Thread name" })
+    .fill("Focused fixture task");
+  await page.getByRole("button", { name: "Save name" }).click();
+  await expect(page.locator(".toolbar-breadcrumb")).toContainText(
+    "Focused fixture task",
+  );
+  await page
+    .getByRole("button", { name: "Thread actions: Focused fixture task" })
+    .click();
+  await page.getByRole("menuitem", { name: "Pin thread", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Thread actions: Focused fixture task" })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Unpin thread", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("menuitem", { name: "Archive thread", exact: true })
+    .click();
+  await expect(
+    page.getByText("This conversation is archived.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Message your coding agent" }),
+  ).toBeDisabled();
+  await page
+    .getByRole("combobox", { name: "Thread filter" })
+    .selectOption("archived");
+  await page
+    .getByRole("button", { name: "Thread actions: Focused fixture task" })
+    .click();
+  await page
+    .getByRole("menuitem", { name: "Restore thread", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Message your coding agent" }),
+  ).toBeEnabled();
+  await page
+    .getByRole("combobox", { name: "Thread filter" })
+    .selectOption("active");
+  await expect(
+    page.getByRole("button", { name: "Thread actions: Focused fixture task" }),
+  ).toBeVisible();
+  const updates = await page.evaluate(
+    () =>
+      (window as unknown as { __workbenchTest: FixtureCalls }).__workbenchTest
+        .threadUpdates,
+  );
+  expect(updates).toEqual([
+    { id: "test-thread-1", title: "Focused fixture task" },
+    { id: "test-thread-1", pinned: true },
+    { id: "test-thread-1", archived: true },
+    { id: "test-thread-1", archived: false },
+  ]);
+});
+
+test("layout separators support keyboard resizing, collapse, and persistence", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const separator = page.getByRole("separator", {
+    name: "Resize project sidebar",
+  });
+  await separator.focus();
+  await separator.press("ArrowRight");
+  await expect(separator).toHaveAttribute("aria-valuenow", "252");
+  await page.reload();
+  await expect(separator).toHaveAttribute("aria-valuenow", "252");
+  const inspectorSeparator = page.getByRole("separator", {
+    name: "Resize inspector",
+  });
+  await inspectorSeparator.focus();
+  await inspectorSeparator.press("ArrowLeft");
+  await expect(inspectorSeparator).toHaveAttribute("aria-valuenow", "372");
+  await page.getByRole("button", { name: "Hide project sidebar" }).click();
+  await expect(
+    page.getByRole("complementary", { name: "Project navigation" }),
+  ).toHaveCount(0);
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Show project sidebar" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show project sidebar" }).click();
+  await expect(separator).toHaveAttribute("aria-valuenow", "252");
+});
+
+test("context displays the exact payload and preserves bounded history across providers", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true });
+  await page.goto("/");
+  await page
+    .getByRole("textbox", { name: "Message your coding agent" })
+    .fill("Continue the focused task");
+  await page.getByRole("button", { name: "Preview context" }).click();
+  const payload = page.getByLabel("Exact context payload");
+  await expect(payload).toContainText("FIXTURE EXACT REQUEST");
+  await expect(payload).toContainText("Task: Continue the focused task");
+  await expect(payload).toContainText("History: Inspect the test fixture");
+  await expect(payload).not.toContainText("This note needs review.");
+  await expect(page.locator(".context-memory-list")).toContainText(
+    "Source changed",
+  );
+  await expect(page.locator(".context-memory-list")).toContainText("Omitted");
+  await expect(
+    page.getByText("Token estimate uses characters ÷ 4.", { exact: false }),
+  ).toBeVisible();
+  const first = await payload.textContent();
+  await page
+    .getByRole("combobox", { name: "Choose agent" })
+    .selectOption("claude");
+  await expect(payload).toHaveText(first!);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as { __workbenchTest: FixtureCalls }
+          ).__workbenchTest.contextRequests.at(-1)?.provider,
+      ),
+    )
+    .toBe("claude");
+  const requests = await page.evaluate(
+    () =>
+      (window as unknown as { __workbenchTest: FixtureCalls }).__workbenchTest
+        .contextRequests,
+  );
+  expect(requests.at(-1)?.threadId).toBe("test-thread-1");
+});
+
+test("linked memories expose freshness and original-checkout reconfirmation", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Memory", exact: true }).click();
+  const card = page
+    .locator(".memory-card")
+    .filter({
+      has: page.getByRole("heading", { name: "Prior source decision" }),
+    });
+  await expect(card).toContainText("Source changed");
+  await expect(card).toContainText("Omitted from current context");
+  await card
+    .getByRole("button", { name: "Review original project source" })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Edit project memory" });
+  await expect(dialog).toContainText("not the selected thread’s worktree");
+  await expect(
+    dialog.getByRole("textbox", { name: "Linked source file" }),
+  ).toHaveValue("src/changed.ts");
+  await dialog
+    .getByRole("button", { name: "Save memory", exact: true })
+    .click();
+  await expect(card).toContainText("Source unchanged");
+  await expect(card).toContainText("Included in current context");
+});
+
+test("check profiles validate JSON arguments and saving never executes them", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Checks", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add check profile", exact: true })
+    .last()
+    .click();
+  const form = page.getByRole("form", { name: "New check profile" });
+  await form.getByRole("button", { name: "Typecheck", exact: true }).click();
+  await expect(form.getByRole("textbox", { name: "Check name" })).toHaveValue(
+    "Typecheck",
+  );
+  await form
+    .getByRole("textbox", { name: "Arguments · JSON array" })
+    .fill('{"unsafe":"shape"}');
+  await form.getByRole("button", { name: "Save profile" }).click();
+  await expect(form.getByRole("alert")).toContainText("JSON array of strings");
+  await form
+    .getByRole("textbox", { name: "Arguments · JSON array" })
+    .fill('["run","typecheck"]');
+  await form.getByRole("button", { name: "Save profile" }).click();
+  await expect(
+    page.getByRole("button", { name: "Run check: Typecheck", exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __workbenchTest: FixtureCalls }).__workbenchTest
+          .checks,
+    ),
+  ).toEqual([]);
+});
+
+test("checks stream mock output, cancel, and mark earlier evidence stale", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Checks", exact: true }).click();
+  await expect(
+    page.getByText("Passed · current revision", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __workbenchFixture: FixtureControls }
+    ).__workbenchFixture.setRevision("fixture-changed"),
+  );
+  await page.getByRole("button", { name: "Refresh check results" }).click();
+  await expect(
+    page.getByText("Stale · files changed", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Run check: Fixture typecheck", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Cancel check", exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __workbenchFixture: FixtureControls }
+    ).__workbenchFixture.appendCheckOutput(
+      "fixture-check-1",
+      "Streaming fixture output\n<img src=x>\n",
+    ),
+  );
+  await expect(
+    page.getByLabel("Check output for Fixture typecheck").first(),
+  ).toContainText("Streaming fixture output");
+  await expect(page.locator(".check-output img")).toHaveCount(0);
+  await page.getByRole("button", { name: "Cancel check", exact: true }).click();
+  await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __workbenchTest: FixtureCalls }).__workbenchTest
+          .checkCancellations,
+    ),
+  ).toEqual(["fixture-check-1"]);
+  await expect(
+    page.getByText("Finished · not verified", { exact: true }),
+  ).toBeVisible();
+});
+
+test("Plan-only threads cannot execute project checks", async ({ page }) => {
+  await installFakeDesktopBridge(page, { seed: true, planOnly: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Checks", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Run check: Fixture typecheck" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByText("Checks need a completed run in a thread worktree.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+});
+
+test("browser preview refuses check execution and composer grows without horizontal overflow", async ({
+  page,
+}) => {
+  await page.goto("/?demo=1");
+  const composer = page.getByRole("textbox", {
+    name: "Message your coding agent",
+  });
+  const initialHeight = (await composer.boundingBox())!.height;
+  await composer.fill(
+    Array.from(
+      { length: 9 },
+      (_, index) => `Line ${index + 1}: a focused draft`,
+    ).join("\n"),
+  );
+  expect((await composer.boundingBox())!.height).toBeGreaterThan(initialHeight);
+  await expect(composer).toHaveAttribute("maxlength", "32000");
+  await page.getByRole("tab", { name: "Checks", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Run check: Typecheck", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("UI preview only");
+  expect(
+    await page
+      .locator(".composer")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+test("capture six synthetic desktop states for human visual review", async ({
+  page,
+}) => {
+  await mkdir("artifacts", { recursive: true });
+  await page.goto("/?demo=1");
+  await expect(
+    page.getByText("Finished · not verified", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "Memory", exact: true }).click();
+  await expect(page.locator(".memory-freshness").first()).toContainText(
+    "Source unchanged",
+  );
+  await page.screenshot({
+    path: "artifacts/workbench-dark-desktop.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  await page
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("light");
+  await page
+    .getByRole("button", { name: "Save settings", exact: true })
+    .click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.screenshot({
+    path: "artifacts/workbench-light-desktop.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 980, height: 720 });
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: "artifacts/workbench-compact-980.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 940 });
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  await page
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("dark");
+  await page
+    .getByRole("button", { name: "Save settings", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "Message your coding agent" })
+    .fill("Continue the milestone with the current project constraints.");
+  await page.getByRole("button", { name: "Preview context" }).click();
+  await expect(page.getByLabel("Exact context payload")).toContainText(
+    "SYNTHETIC UI PREVIEW",
+  );
+  await page.screenshot({
+    path: "artifacts/workbench-context.png",
+    fullPage: true,
+  });
+  await page.getByRole("tab", { name: "Checks", exact: true }).click();
+  await expect(
+    page.getByText("Passed · current revision", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Stale · files changed", { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "artifacts/workbench-checks.png",
+    fullPage: true,
+  });
+  await page.keyboard.press("Control+k");
+  await expect(
+    page.getByRole("dialog", { name: "Command palette" }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "artifacts/workbench-command-palette.png",
+    fullPage: true,
+  });
 });

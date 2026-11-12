@@ -4,11 +4,11 @@ A Windows-first, multi-provider development workbench built alongside the open-s
 
 Nova uses the familiar **projects → conversation → changes** workflow of Codex and Claude Code, with its own interface and branding. It is an independent project, not an official OpenAI or Anthropic desktop application, and does not contain either company's proprietary desktop UI.
 
-**Status: initial foundation, version 0.1.0.** This is a runnable development starting point, not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
+**Status: development alpha, version 0.2.0.** The foundation now includes inspectable context, thread organization, and revision-bound command checks. It is not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
 
 ## What's in this milestone
 
-- Project and thread navigation, a conversation composer, and Changes, Memory, and Activity inspectors.
+- Project and thread navigation, a conversation composer, and Changes, Context, Memory, Checks, and Activity inspectors.
 - Manual provider selection: Codex, Claude Code, or a local Ollama model through the Codex agent engine.
 - Plan mode and explicitly confirmed Build mode in a separate Git worktree.
 - Streaming agent messages and tool activity, failure states, cancellation, and runtime/output limits.
@@ -16,8 +16,11 @@ Nova uses the familiar **projects → conversation → changes** workflow of Cod
 - Shared, bounded project-memory and conversation context when changing providers.
 - Worktree diffs for review, without automatic merging or deleting worktrees.
 - A narrow Electron bridge, isolated renderer, and Windows packaging configuration.
+- Thread rename, pin, archive, and restore without deleting conversations or worktrees.
+- Inspectable context packs with inclusion/omission reasons and optional file-linked memory fingerprints.
+- Saved verification command profiles with explicit native confirmation, bounded output, cancellation, and source-revision evidence.
 
-The larger roadmap is in [PLAN.md](PLAN.md). Automatic model routing, unattended agent teams, automatic knowledge extraction, a general MCP manager, and automated Unreal/BeamNG validation are **not implemented in this milestone**.
+The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventions are recorded in [DESIGN.md](DESIGN.md). Automatic model routing, unattended agent teams, automatic knowledge extraction, repository-wide symbol indexing, a general MCP manager, and semantic Unreal/BeamNG validation are **not implemented**. The new checks establish which command ran against which source, not whether every engineering requirement is correct.
 
 ## Run on Windows
 
@@ -62,6 +65,25 @@ After installing or updating a CLI, use **Refresh agent availability** to rerun 
 
 Changing the provider within a thread passes a bounded transcript and selected project memories to the next worker. This is **not** a transfer of private reasoning, provider-native hidden state, or an unlimited conversation context. Providers retain their own model limits, account access, and billing rules.
 
+### Inspect context and organize ongoing work
+
+Use the Context inspector before sending a request to see the bounded prompt, included/omitted memories, history selection, and warnings. The token figure is a character-based estimate, not the provider's tokenizer, bill, or context-window limit. Previewing never launches a model or creates a worktree. Before a thread's first Build, its preview is explicitly provisional: it inspects the original checkout, while the new worktree can lack ignored files or have different checkout bytes. A later run rebuilds context against its actual working files at launch; the preview is not a frozen promise that external edits cannot change it.
+
+Memory entries may link to a project-relative file. Saving records the file's digest from the **original project checkout**, not an automatic copy of its contents. Before context selection, Nova compares that digest against the selected worktree or project. Changed, missing, or unreadable linked sources are omitted with a reason. Reviewing and saving again reconfirms the original checkout's bytes; it does not endorse different worktree bytes. A memory whose source differs only in a Build worktree remains omitted until the source is deliberately reconciled and the note reviewed. Worktree-only files cannot yet be used as memory sources. Unlinked user notes remain usable but are not source-verified. **Matching source bytes are not proof that a note is factually correct.**
+
+Pin important threads, rename them, or archive completed conversations. Archiving preserves history and the worktree; active work must finish or be cancelled first. Restore an archived thread to continue it.
+
+### Run an explicit check
+
+1. Select a thread with an existing Build worktree. Checks never execute in the original project checkout.
+2. In Checks, save a profile with a name, executable, exact argument array, and timeout. The npm presets are editable suggestions; saving does not execute them.
+3. Choose Run check and inspect the native confirmation's program, arguments, and working directory.
+4. Review output, exit status, and input/output source fingerprints. A result is current only for the source snapshot it actually tested.
+
+Verification commands run as your own user account, **outside the agent sandbox**. They can execute project scripts, modify files, or access the network. Only approve trusted programs and repositories. Nova passes an explicit argument array without implicit shell interpolation. Windows npm is resolved through its known JavaScript entry point; arbitrary `.cmd`/`.bat` shims are not interpreted. A script needing a shell must use an explicitly configured interpreter whose arguments are visible in the confirmation.
+
+The source fingerprint covers tracked and Git-unignored files, including binary content and symlink metadata, within bounded size/time limits. Git-ignored dependencies, generated outputs, external symlink targets, the broader machine environment, and network services are outside that fingerprint. Oversized, unstable, unreadable, or unsupported source snapshots cannot earn a current passing result. If the source changes while the command runs, the result is stale even when the command exits zero. Passing one profile is not a blanket "task verified" state.
+
 The Local adapter checks for the exact installed model at Ollama's loopback endpoint before starting. It does not pull models or fall back to a cloud model. Install the model yourself with the official Ollama tools; the selected model must support the capabilities needed by the Codex harness.
 
 ## Plan versus Build
@@ -73,6 +95,8 @@ The Local adapter checks for the exact installed model at Ollama's loopback endp
 | Finished | The provider completed its process/turn                                            | Does not mean builds, tests, physics, or visual behavior passed                                  |
 
 The first version limits writer concurrency and never silently merges competing changes. Existing worktrees are retained for inspection and follow-up work. Cancellation stops the running worker; it does not roll back edits already made.
+
+Process cleanup tracks owned process groups on POSIX and observable process ancestry on Windows. Windows cleanup uses the built-in PowerShell/CIM tools to inspect process IDs, parent IDs, and creation times, not command lines or credentials; unavailable inspection is reported as unconfirmed cleanup. This is lifecycle management, not full operating-system containment. Deliberately detached processes or Windows ancestry lost through already-exited intermediate parents require stronger isolation, such as Windows Job Objects, which this version does not implement.
 
 If worker termination cannot be confirmed, Nova reports a failure and locks further Build tasks for that project, including after restart. Do not simply retry the task: inspect and stop any remaining CLI processes first. This milestone has no automatic recovery/unlock UI. After confirming cleanup, close Nova, back up `workspace.json`, and deliberately clear the affected run's `terminationUnconfirmed` flag before restarting. Do not clear the flag while a worker may still be editing files.
 
@@ -87,6 +111,7 @@ Worktree creation deliberately avoids running repository hooks or checkout filte
 Application state is written atomically to `workspace/workspace.json` under Electron's per-user application-data directory. On a typical Windows installation the file is `%APPDATA%\Nova Workbench\workspace\workspace.json`, and worktrees are kept in the neighboring `workspace\worktrees\<thread-id>` directories. Electron or operating-system configuration can change the base location.
 
 - Projects, runs, messages, memory entries, and settings are stored locally in plaintext. This is not an encrypted secrets vault.
+- Verification commands, arguments, and output are also stored locally. Commands can print sensitive data; review what a check emits before sharing logs.
 - Do not put API keys, passwords, or other secrets in project memory.
 - A cloud provider receives the prompt and context passed to it and any project content its tools read. Local persistence does not make cloud execution private or offline.
 - The Local adapter uses a local model through Codex/Ollama; it is not a blanket guarantee that every external tool or provider configuration is offline.
@@ -107,7 +132,7 @@ npm run build
 npm run check
 ```
 
-Tests use temporary repositories and fake provider processes. They should not require a live model request, a cloud API key, or paid inference. Passing them validates the application plumbing, not the quality of a provider's generated code.
+Tests use temporary repositories and fake provider processes. They should not require a live model request, a cloud API key, or paid inference. Passing them validates the application plumbing, not the quality of a provider's generated code. Legacy version-1 workspace files are read with defaults for the new optional metadata and check collections; no existing history is intentionally discarded.
 
 Run browser interaction tests separately:
 
@@ -116,7 +141,9 @@ npx playwright install chromium
 npm run test:ui
 ```
 
-Playwright starts the renderer development server when needed. These checks exercise the interface and explicit browser-preview behavior, not native Electron privileges or a live model. The `Nova Workbench` GitHub Actions workflow runs typechecking, unit/integration tests, and production builds on Linux and Windows; browser interaction checks run on Linux, and unsigned installer packaging runs on Windows. Inspect the actual workflow result before treating either platform as validated.
+Playwright starts the renderer development server when needed. These checks exercise the interface and explicit browser-preview behavior, not native Electron privileges or a live model. The `Nova Workbench` GitHub Actions workflow runs typechecking, unit/integration tests, and production builds on Linux and Windows; browser interaction checks and review screenshots run on Linux. Windows additionally runs a native Electron startup/preload/IPC/restart smoke test before unsigned installer packaging. Inspect the actual workflow result before treating either platform as validated.
+
+After `npm run build`, `npm run test:electron` runs that native smoke test using an isolated temporary user-data directory. It does not choose a project, run inference, or execute a saved command profile. It tests the compiled development application, not installer installation/uninstallation or every Windows sandbox capability.
 
 For renderer-only development:
 

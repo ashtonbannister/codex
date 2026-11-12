@@ -1,4 +1,5 @@
 export type ProviderId = "codex" | "claude" | "ollama";
+export const APP_VERSION = "0.2.0";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -26,6 +27,8 @@ export interface Thread {
   worktreePath?: string;
   branch?: string;
   baseCommit?: string;
+  pinned?: boolean;
+  archivedAt?: string;
 }
 
 export interface RunEvent {
@@ -64,6 +67,12 @@ export interface Run {
   events: RunEvent[];
   usage?: Usage;
   verification: "not-run";
+  contextSummary?: {
+    characters: number;
+    estimatedTokens: number;
+    omittedMemoryIds: string[];
+    warnings: string[];
+  };
 }
 
 export interface MemoryEntry {
@@ -77,6 +86,9 @@ export interface MemoryEntry {
   createdAt: string;
   updatedAt: string;
   commit?: string;
+  /** Optional project-relative source; only its digest is captured automatically. */
+  filePath?: string;
+  fileSha256?: string;
 }
 
 export interface Settings {
@@ -95,6 +107,8 @@ export interface WorkspaceState {
   runs: Run[];
   memories: MemoryEntry[];
   settings: Settings;
+  verificationProfiles: VerificationProfile[];
+  verifications: VerificationResult[];
 }
 
 export interface ProviderStatus {
@@ -128,6 +142,111 @@ export interface MemoryInput {
   content: string;
   kind: MemoryKind;
   source: string;
+  filePath?: string;
+}
+
+export interface ThreadUpdate {
+  id: string;
+  title?: string;
+  pinned?: boolean;
+  archived?: boolean;
+}
+
+export type MemoryFreshness =
+  | "current"
+  | "changed"
+  | "missing"
+  | "unlinked"
+  | "unavailable";
+
+export interface ContextMemory {
+  id: string;
+  title: string;
+  kind: MemoryKind;
+  source: string;
+  filePath?: string;
+  freshness: MemoryFreshness;
+  included: boolean;
+  reason?: string;
+}
+
+export interface ContextPreview {
+  projectId: string;
+  threadId?: string;
+  prompt: string;
+  characters: number;
+  /** Approximation only, not the selected model's actual tokenizer or billing. */
+  estimatedTokens: number;
+  memories: ContextMemory[];
+  includedMemoryIds: string[];
+  omittedMemoryIds: string[];
+  historyRunIds: string[];
+  warnings: string[];
+}
+
+export interface VerificationProfileInput {
+  id?: string;
+  projectId: string;
+  name: string;
+  executable: string;
+  args: string[];
+  timeoutMinutes: number;
+}
+
+export interface VerificationProfile extends VerificationProfileInput {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RevisionSnapshot {
+  head: string;
+  fingerprint: string;
+  complete: boolean;
+  reason?: string;
+}
+
+export type VerificationStatus =
+  | "running"
+  | "passed"
+  | "failed"
+  | "cancelled"
+  | "error"
+  | "interrupted"
+  | "stale";
+
+export interface VerificationResult {
+  id: string;
+  projectId: string;
+  threadId: string;
+  runId: string;
+  profileId: string;
+  profileName: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  status: VerificationStatus;
+  createdAt: string;
+  finishedAt?: string;
+  exitCode?: number;
+  output: string;
+  truncated: boolean;
+  error?: string;
+  inputRevision?: RevisionSnapshot;
+  outputRevision?: RevisionSnapshot;
+  terminationUnconfirmed?: boolean;
+}
+
+export interface VerificationRequest {
+  runId: string;
+  profileId: string;
+}
+
+export interface VerificationReport {
+  profiles: VerificationProfile[];
+  results: VerificationResult[];
+  currentRevision?: RevisionSnapshot;
+  busy: boolean;
 }
 
 export interface GitChange {
@@ -146,12 +265,21 @@ export interface DiffSnapshot {
 export interface WorkbenchAPI {
   getSnapshot(): Promise<WorkspaceSnapshot>;
   refreshProviderStatus(): Promise<WorkspaceSnapshot>;
+  updateThread(input: ThreadUpdate): Promise<Thread>;
+  previewContext(request: RunRequest): Promise<ContextPreview>;
   chooseProject(): Promise<Project | null>;
   startRun(request: RunRequest): Promise<Run>;
   cancelRun(runId: string): Promise<void>;
   getDiff(runId: string): Promise<DiffSnapshot>;
   saveMemory(input: MemoryInput): Promise<MemoryEntry>;
   archiveMemory(memoryId: string): Promise<void>;
+  saveVerificationProfile(
+    input: VerificationProfileInput,
+  ): Promise<VerificationProfile>;
+  deleteVerificationProfile(profileId: string): Promise<void>;
+  getVerificationReport(runId: string): Promise<VerificationReport>;
+  startVerification(request: VerificationRequest): Promise<VerificationResult>;
+  cancelVerification(id: string): Promise<void>;
   updateSettings(settings: Settings): Promise<Settings>;
   openProject(projectId: string): Promise<void>;
   revealWorktree(runId: string): Promise<void>;
@@ -175,5 +303,7 @@ export function emptyWorkspace(): WorkspaceState {
     runs: [],
     memories: [],
     settings: { ...DEFAULT_SETTINGS },
+    verificationProfiles: [],
+    verifications: [],
   };
 }

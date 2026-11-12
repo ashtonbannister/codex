@@ -4,6 +4,7 @@ import {
   dialog,
   ipcMain,
   net,
+  nativeTheme,
   protocol,
   session,
   shell,
@@ -14,9 +15,13 @@ import type {
   MemoryInput,
   RunRequest,
   Settings,
+  ThreadUpdate,
+  VerificationProfileInput,
+  VerificationRequest,
   WorkspaceState,
 } from "../shared/types";
 import { WorkspaceService } from "./services/workspace-service";
+import { confirmationValue } from "./confirmation";
 import {
   APP_URL,
   assetPath,
@@ -27,6 +32,17 @@ import {
 
 app.setName("Nova Workbench");
 app.enableSandbox();
+// The CI smoke test uses an explicit temporary profile, never the user's real workspace.
+// This switch has no effect in packaged releases.
+if (!app.isPackaged && process.argv.includes("--nova-smoke-test")) {
+  const smokeDirectory = process.env.NOVA_TEST_USER_DATA;
+  if (!smokeDirectory || !path.isAbsolute(smokeDirectory)) {
+    throw new Error(
+      "The native smoke test requires an absolute temporary user-data directory.",
+    );
+  }
+  app.setPath("userData", smokeDirectory);
+}
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "nova",
@@ -44,6 +60,7 @@ const development =
 
 function broadcast(state: WorkspaceState) {
   latestState = state;
+  applyNativeTheme(state.settings.theme);
   if (broadcastTimer) return;
   broadcastTimer = setTimeout(() => {
     broadcastTimer = undefined;
@@ -51,6 +68,18 @@ function broadcast(state: WorkspaceState) {
       window.webContents.send("workspace:changed", latestState);
     }
   }, 80);
+}
+
+function applyNativeTheme(theme: Settings["theme"]) {
+  if (nativeTheme.themeSource !== theme) nativeTheme.themeSource = theme;
+  if (!window || window.isDestroyed()) return;
+  const dark = nativeTheme.shouldUseDarkColors;
+  window.setTitleBarOverlay({
+    color: dark ? "#181a19" : "#f1f2ef",
+    symbolColor: dark ? "#d9dedb" : "#242724",
+    height: 42,
+  });
+  window.setBackgroundColor(dark ? "#1b1d1c" : "#f7f7f5");
 }
 
 function assertSender(event: Electron.IpcMainInvokeEvent) {
@@ -89,6 +118,12 @@ function handle(
 function registerHandlers(service: WorkspaceService) {
   handle("workspace:snapshot", () => service.snapshot());
   handle("workspace:refresh-providers", () => service.refreshProviderStatus());
+  handle("thread:update", (payload) =>
+    service.updateThread(objectPayload(payload) as unknown as ThreadUpdate),
+  );
+  handle("context:preview", (payload) =>
+    service.previewContext(objectPayload(payload) as unknown as RunRequest),
+  );
   handle("project:choose", async () => {
     const result = await dialog.showOpenDialog(window!, {
       title: "Open a Git project",
@@ -130,6 +165,52 @@ function registerHandlers(service: WorkspaceService) {
     service.saveMemory(objectPayload(payload) as unknown as MemoryInput),
   );
   handle("memory:archive", (value) => service.archiveMemory(identifier(value)));
+  handle("verification:save-profile", (payload) =>
+    service.saveVerificationProfile(
+      objectPayload(payload) as unknown as VerificationProfileInput,
+    ),
+  );
+  handle("verification:delete-profile", (value) =>
+    service.deleteVerificationProfile(identifier(value)),
+  );
+  handle("verification:report", (value) =>
+    service.getVerificationReport(identifier(value)),
+  );
+  handle("verification:cancel", (value) =>
+    service.cancelVerification(identifier(value)),
+  );
+  handle("verification:start", async (payload) => {
+    const value = objectPayload(payload);
+    const request: VerificationRequest = {
+      runId: identifier(value.runId),
+      profileId: identifier(value.profileId),
+    };
+    const report = await service.getVerificationReport(request.runId);
+    const profile = report.profiles.find(
+      (item) => item.id === request.profileId,
+    );
+    if (!profile)
+      throw new Error("This verification profile is no longer available.");
+    if (report.busy)
+      throw new Error(
+        "Wait for this project's active work to finish before running checks.",
+      );
+    const folder = await service.getWorktreePath(request.runId);
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "warning",
+      buttons: ["Cancel", "Run check"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Run this verification command?",
+      message: `Run ${confirmationValue(profile.name)}?`,
+      detail:
+        `Program: ${confirmationValue(profile.executable)}\nArguments: ${confirmationValue(profile.args)}\nWorktree: ${confirmationValue(folder)}\nTimeout: ${profile.timeoutMinutes} minutes\n\n` +
+        "This command runs under your Windows/user account, not inside the agent sandbox. It may edit files, run project scripts, or access the network. Only run commands and repositories you trust. Passing this check is not proof of all task requirements.",
+    });
+    if (confirmation.response !== 1)
+      throw new Error("Verification cancelled before execution.");
+    return service.startVerification(request, profile);
+  });
   handle("settings:update", (payload) =>
     service.updateSettings(objectPayload(payload) as unknown as Settings),
   );
@@ -152,7 +233,7 @@ async function createWindow() {
     minWidth: 980,
     minHeight: 680,
     title: "Nova Workbench",
-    backgroundColor: "#181a19",
+    backgroundColor: "#1b1d1c",
     show: false,
     titleBarStyle: "hidden",
     titleBarOverlay: { color: "#181a19", symbolColor: "#d9dedb", height: 42 },
@@ -167,6 +248,7 @@ async function createWindow() {
     },
   });
   window.setMenuBarVisibility(false);
+  if (latestState) applyNativeTheme(latestState.settings.theme);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.on("will-attach-webview", (event) =>
@@ -185,6 +267,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => {
     if (window?.isMinimized()) window.restore();
     window?.focus();
+  });
+  nativeTheme.on("updated", () => {
+    if (latestState) applyNativeTheme(latestState.settings.theme);
   });
   void app
     .whenReady()

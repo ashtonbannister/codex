@@ -11,6 +11,7 @@ import {
 import path from "node:path";
 import type {
   DiffSnapshot,
+  ContextPreview,
   MemoryEntry,
   MemoryInput,
   Project,
@@ -20,11 +21,21 @@ import type {
   RunRequest,
   Settings,
   Thread,
+  ThreadUpdate,
+  RevisionSnapshot,
+  VerificationProfile,
+  VerificationProfileInput,
+  VerificationReport,
+  VerificationRequest,
+  VerificationResult,
   WorkspaceSnapshot,
   WorkspaceState,
 } from "../../shared/types";
-import { emptyWorkspace } from "../../shared/types";
+import { APP_VERSION, emptyWorkspace } from "../../shared/types";
 import { buildRunContext } from "./context";
+import { captureMemoryFingerprint } from "./memory-source";
+import { captureRevisionSnapshot } from "./revision";
+import { runVerificationCommand } from "./verification";
 import {
   createIsolatedWorktree,
   getWorkspaceDiff,
@@ -45,6 +56,9 @@ import {
   validateMemoryInput,
   validateRunRequest,
   validateSettings,
+  validateThreadUpdate,
+  validateVerificationProfileInput,
+  validateVerificationRequest,
 } from "./validation";
 
 const ACTIVE = new Set(["queued", "running"]);
@@ -57,6 +71,74 @@ function optionalText(
   maximum = 32_768,
 ): string | undefined {
   return value === undefined ? undefined : text(value, name, maximum, true);
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value !== undefined && typeof value !== "boolean")
+    throw new Error(`${name} must be true or false.`);
+  return value as boolean | undefined;
+}
+
+/** External tool output is data, not command input: JSON can safely preserve NUL and other text. */
+function displayText(value: unknown, name: string, maximum: number): string {
+  if (typeof value !== "string" || value.length > maximum)
+    throw new Error(`${name} must be text of at most ${maximum} characters.`);
+  return value;
+}
+
+function optionalDisplayText(
+  value: unknown,
+  name: string,
+  maximum: number,
+): string | undefined {
+  return value === undefined ? undefined : displayText(value, name, maximum);
+}
+
+function revision(value: unknown): RevisionSnapshot | undefined {
+  if (value === undefined) return undefined;
+  const input = record(value, "Source revision");
+  if (typeof input.complete !== "boolean")
+    throw new Error("Invalid source revision completeness.");
+  const head = text(input.head, "Source revision", 64, true);
+  const fingerprint = text(input.fingerprint, "Source fingerprint", 64);
+  if (
+    (head && !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(head)) ||
+    (input.complete && !head) ||
+    !/^[a-f0-9]{64}$/.test(fingerprint)
+  )
+    throw new Error("Invalid source revision fingerprint.");
+  return {
+    head,
+    fingerprint,
+    complete: input.complete,
+    reason: optionalDisplayText(input.reason, "Snapshot reason", 4_000),
+  };
+}
+
+function contextSummary(value: unknown): Run["contextSummary"] {
+  if (value === undefined) return undefined;
+  const input = record(value, "Context summary");
+  if (
+    !Number.isInteger(input.characters) ||
+    Number(input.characters) < 0 ||
+    Number(input.characters) > 2_000_000 ||
+    !Number.isInteger(input.estimatedTokens) ||
+    Number(input.estimatedTokens) < 0 ||
+    Number(input.estimatedTokens) > 2_000_000 ||
+    !Array.isArray(input.omittedMemoryIds) ||
+    input.omittedMemoryIds.length > 20_000 ||
+    !Array.isArray(input.warnings) ||
+    input.warnings.length > 100
+  )
+    throw new Error("Invalid saved context summary.");
+  return {
+    characters: input.characters as number,
+    estimatedTokens: input.estimatedTokens as number,
+    omittedMemoryIds: input.omittedMemoryIds.map((id) => identifier(id)),
+    warnings: input.warnings.map((warning) =>
+      text(warning, "Context warning", 2_000),
+    ),
+  };
 }
 
 /** A broken state file is reported and preserved, never silently replaced by empty state. */
@@ -99,6 +181,8 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       worktreePath: optionalText(item.worktreePath, "Worktree"),
       branch: optionalText(item.branch, "Branch", 1_000),
       baseCommit: optionalText(item.baseCommit, "Commit", 80),
+      pinned: optionalBoolean(item.pinned, "Thread pin"),
+      archivedAt: optionalText(item.archivedAt, "Archive date", 80),
     };
   });
   const threadsById = new Map(threads.map((thread) => [thread.id, thread]));
@@ -137,7 +221,7 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
         id: identifier(event.id),
         at: text(event.at, "Date", 80),
         kind: event.kind as RunEvent["kind"],
-        text: text(event.text, "Event", 4_194_304, true),
+        text: displayText(event.text, "Event", 4_194_304),
       };
     });
     const usageInput =
@@ -170,15 +254,17 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       worktreePath: optionalText(item.worktreePath, "Worktree"),
       branch: optionalText(item.branch, "Branch", 1_000),
       baseCommit: optionalText(item.baseCommit, "Commit", 80),
-      error: optionalText(item.error, "Error", 16_000),
-      providerSessionId: optionalText(
+      error: optionalDisplayText(item.error, "Error", 16_000),
+      // Older builds did not cap this external display-only metadata at ingestion.
+      providerSessionId: optionalDisplayText(
         item.providerSessionId,
         "Provider session",
-        200,
-      ),
+        4_194_304,
+      )?.slice(0, 200),
       contextMemoryIds: Array.isArray(item.contextMemoryIds)
         ? item.contextMemoryIds.map((id) => identifier(id))
         : [],
+      contextSummary: contextSummary(item.contextSummary),
       events,
       usage,
       verification: "not-run",
@@ -198,6 +284,13 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       !["active", "archived"].includes(String(item.status))
     )
       throw new Error("Invalid saved memory.");
+    const fileSha256 = optionalText(
+      item.fileSha256,
+      "Memory source fingerprint",
+      64,
+    );
+    if (fileSha256 && (!input.filePath || !/^[a-f0-9]{64}$/.test(fileSha256)))
+      throw new Error("Invalid memory source fingerprint.");
     return {
       ...input,
       id: input.id,
@@ -205,10 +298,113 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       createdAt: text(item.createdAt, "Date", 80),
       updatedAt: text(item.updatedAt, "Date", 80),
       commit: optionalText(item.commit, "Commit", 80),
+      fileSha256,
     };
   });
   if (new Set(memories.map((memory) => memory.id)).size !== memories.length)
     throw new Error("Duplicate saved memory IDs.");
+  for (const key of ["verificationProfiles", "verifications"]) {
+    if (
+      state[key] !== undefined &&
+      (!Array.isArray(state[key]) || (state[key] as unknown[]).length > 20_000)
+    )
+      throw new Error(`Invalid saved ${key}.`);
+  }
+  const verificationProfiles = (
+    (state.verificationProfiles || []) as unknown[]
+  ).map((entry): VerificationProfile => {
+    const item = record(entry);
+    const profile = validateVerificationProfileInput(item);
+    if (!profile.id || !projectsById.has(profile.projectId))
+      throw new Error("Invalid saved verification profile.");
+    return {
+      ...profile,
+      id: profile.id,
+      createdAt: text(item.createdAt, "Date", 80),
+      updatedAt: text(item.updatedAt, "Date", 80),
+    };
+  });
+  if (
+    new Set(verificationProfiles.map((profile) => profile.id)).size !==
+    verificationProfiles.length
+  )
+    throw new Error("Duplicate saved verification profiles.");
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const verifications = ((state.verifications || []) as unknown[]).map(
+    (entry): VerificationResult => {
+      const item = record(entry);
+      const projectId = identifier(item.projectId);
+      const runId = identifier(item.runId);
+      const threadId = identifier(item.threadId);
+      const run = runsById.get(runId);
+      if (!run || run.projectId !== projectId || run.threadId !== threadId)
+        throw new Error("Invalid saved verification association.");
+      const profile = validateVerificationProfileInput({
+        ...item,
+        name: item.profileName,
+        timeoutMinutes: 1,
+      });
+      if (
+        ![
+          "running",
+          "passed",
+          "failed",
+          "cancelled",
+          "error",
+          "interrupted",
+          "stale",
+        ].includes(String(item.status)) ||
+        typeof item.truncated !== "boolean" ||
+        typeof item.output !== "string" ||
+        item.output.length > 4_194_304 ||
+        (item.exitCode !== undefined && !Number.isInteger(item.exitCode))
+      )
+        throw new Error("Invalid saved verification result.");
+      return {
+        id: identifier(item.id),
+        projectId,
+        threadId,
+        runId,
+        profileId: identifier(item.profileId),
+        profileName: profile.name,
+        executable: profile.executable,
+        args: profile.args,
+        cwd: text(item.cwd, "Check working directory", 32_768),
+        status: item.status as VerificationResult["status"],
+        createdAt: text(item.createdAt, "Date", 80),
+        finishedAt: optionalText(item.finishedAt, "Date", 80),
+        exitCode: item.exitCode as number | undefined,
+        output: item.output,
+        truncated: item.truncated,
+        error: optionalDisplayText(item.error, "Verification error", 16_000),
+        inputRevision: revision(item.inputRevision),
+        outputRevision: revision(item.outputRevision),
+        terminationUnconfirmed: optionalBoolean(
+          item.terminationUnconfirmed,
+          "Verification termination",
+        ),
+      };
+    },
+  );
+  if (
+    new Set(verifications.map((entry) => entry.id)).size !==
+    verifications.length
+  )
+    throw new Error("Duplicate saved verification results.");
+  for (const check of verifications) {
+    if (
+      check.status === "passed" &&
+      (check.exitCode !== 0 ||
+        !check.inputRevision?.complete ||
+        !check.outputRevision?.complete ||
+        check.inputRevision.fingerprint !== check.outputRevision.fingerprint ||
+        check.inputRevision.head !== check.outputRevision.head)
+    ) {
+      check.status = "stale";
+      check.error =
+        "The saved result did not contain matching complete source snapshots and a successful exit code; it is not treated as a pass.";
+    }
+  }
   return {
     schemaVersion: 1,
     projects,
@@ -216,6 +412,8 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
     runs,
     memories,
     settings: validateSettings(state.settings),
+    verificationProfiles,
+    verifications,
   };
 }
 
@@ -224,6 +422,10 @@ export class WorkspaceService {
   private providers: ProviderStatus[] = [];
   private queue: Promise<unknown> = Promise.resolve();
   private readonly active = new Map<
+    string,
+    { controller: AbortController; done?: Promise<void> }
+  >();
+  private readonly activeVerifications = new Map<
     string,
     { controller: AbortController; done?: Promise<void> }
   >();
@@ -296,6 +498,7 @@ export class WorkspaceService {
       }
       for (const run of this.state.runs) {
         if (ACTIVE.has(run.status)) {
+          if (run.status === "running") run.terminationUnconfirmed = true;
           run.status = "interrupted";
           run.finishedAt = now();
           run.error =
@@ -306,6 +509,15 @@ export class WorkspaceService {
             kind: "status",
             text: run.error,
           });
+        }
+      }
+      for (const check of this.state.verifications) {
+        if (check.status === "running") {
+          check.status = "interrupted";
+          check.finishedAt = now();
+          check.terminationUnconfirmed = true;
+          check.error =
+            "The app stopped during this check. Inspect and stop remaining processes before clearing the recovery flag; no check was resumed automatically.";
         }
       }
       this.initialized = true;
@@ -328,7 +540,7 @@ export class WorkspaceService {
     return {
       state: clone(this.state),
       providers: clone(this.providers),
-      appVersion: "0.1.0",
+      appVersion: APP_VERSION,
       platform: process.platform,
     };
   }
@@ -387,6 +599,98 @@ export class WorkspaceService {
     return run;
   }
 
+  private getThread(id: string): Thread {
+    const thread = this.state.threads.find(
+      (entry) => entry.id === identifier(id, "Thread"),
+    );
+    if (!thread) throw new Error("Thread not found.");
+    return thread;
+  }
+
+  private hasTerminationIssue(projectId: string): boolean {
+    return (
+      this.state.runs.some(
+        (run) => run.projectId === projectId && run.terminationUnconfirmed,
+      ) ||
+      this.state.verifications.some(
+        (check) =>
+          check.projectId === projectId && check.terminationUnconfirmed,
+      )
+    );
+  }
+
+  private projectHasCheck(projectId: string): boolean {
+    return this.state.verifications.some(
+      (check) => check.projectId === projectId && check.status === "running",
+    );
+  }
+
+  async updateThread(value: ThreadUpdate): Promise<Thread> {
+    this.ready();
+    const input = validateThreadUpdate(value);
+    return this.exclusive(async () => {
+      this.ready();
+      const thread = this.getThread(input.id);
+      if (
+        input.archived &&
+        (this.state.runs.some(
+          (run) => run.threadId === thread.id && ACTIVE.has(run.status),
+        ) ||
+          this.state.verifications.some(
+            (check) =>
+              check.threadId === thread.id && check.status === "running",
+          ))
+      )
+        throw new Error(
+          "Stop this thread's active agent or verification before archiving it.",
+        );
+      const before = clone(thread);
+      if (input.title !== undefined) thread.title = input.title;
+      if (input.pinned !== undefined) thread.pinned = input.pinned;
+      if (input.archived !== undefined)
+        thread.archivedAt = input.archived ? now() : undefined;
+      thread.updatedAt = now();
+      try {
+        await this.persist();
+      } catch (error) {
+        Object.assign(thread, before);
+        thread.archivedAt = before.archivedAt;
+        thread.pinned = before.pinned;
+        throw error;
+      }
+      return clone(thread);
+    });
+  }
+
+  async previewContext(value: RunRequest): Promise<ContextPreview> {
+    this.ready();
+    const request = validateRunRequest(value, true);
+    const project = clone(this.getProject(request.projectId));
+    const thread = request.threadId
+      ? clone(this.getThread(request.threadId))
+      : undefined;
+    if (thread && thread.projectId !== project.id)
+      throw new Error("Thread does not belong to this project.");
+    const state = clone(this.state);
+    const usesOriginalCheckout = !thread?.worktreePath;
+    const cwd =
+      !usesOriginalCheckout && thread
+        ? await this.validateWorktree(thread)
+        : await this.getProjectPath(project.id);
+    this.ready();
+    const preview = await buildRunContext(
+      state,
+      thread ? clone(thread) : { id: "", projectId: project.id },
+      request.prompt,
+      cwd,
+    );
+    if (request.mode === "build" && usesOriginalCheckout)
+      preview.warnings.unshift(
+        "Provisional Build preview: this inspects the original checkout. The first Build creates a clean isolated worktree and recomputes context; ignored/local-only files and checkout conversions can change which source-linked notes are included.",
+      );
+    return preview;
+  }
+
   private async validateWorktree(thread: Thread): Promise<string> {
     if (!thread.worktreePath || !thread.branch || !thread.baseCommit)
       throw new Error("Thread has no isolated worktree.");
@@ -434,12 +738,7 @@ export class WorkspaceService {
     return this.exclusive(async () => {
       this.ready();
       const project = this.getProject(request.projectId);
-      if (
-        request.mode === "build" &&
-        this.state.runs.some(
-          (run) => run.projectId === project.id && run.terminationUnconfirmed,
-        )
-      )
+      if (request.mode === "build" && this.hasTerminationIssue(project.id))
         throw new Error(
           "Build is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes first. This milestone has no automatic unlock or cleanup; the recovery flag remains in workspace.json until deliberately cleared after cleanup.",
         );
@@ -456,6 +755,21 @@ export class WorkspaceService {
         : undefined;
       if (request.threadId && (!thread || thread.projectId !== project.id))
         throw new Error("Thread does not belong to this project.");
+      if (thread?.archivedAt)
+        throw new Error(
+          "Restore this archived thread before starting another run.",
+        );
+      if (
+        this.projectHasCheck(project.id) &&
+        (request.mode === "build" ||
+          this.state.verifications.some(
+            (check) =>
+              check.threadId === thread?.id && check.status === "running",
+          ))
+      )
+        throw new Error(
+          "A verification is using this worktree. Wait for it to finish before starting this agent.",
+        );
       if (
         thread &&
         this.state.runs.some(
@@ -507,7 +821,13 @@ export class WorkspaceService {
         ? await this.validateWorktree(thread)
         : project.path;
       this.ready(); // Shutdown may have started during Git / provider preparation.
-      const context = buildRunContext(this.state, thread, request.prompt);
+      const context = await buildRunContext(
+        this.state,
+        thread,
+        request.prompt,
+        cwd,
+      );
+      this.ready();
       const run: Run = {
         id: randomUUID(),
         projectId: project.id,
@@ -521,7 +841,13 @@ export class WorkspaceService {
         worktreePath: thread.worktreePath,
         branch: thread.branch || project.branch,
         baseCommit: thread.baseCommit || source.head,
-        contextMemoryIds: context.memoryIds,
+        contextMemoryIds: context.includedMemoryIds,
+        contextSummary: {
+          characters: context.characters,
+          estimatedTokens: context.estimatedTokens,
+          omittedMemoryIds: context.omittedMemoryIds,
+          warnings: context.warnings,
+        },
         events: [],
         verification: "not-run",
       };
@@ -616,7 +942,10 @@ export class WorkspaceService {
             run.terminationUnconfirmed = result.terminationUnconfirmed;
             run.finishedAt = now();
             if (persistenceFailure || result.error) {
-              run.error = persistenceFailure || result.error;
+              run.error = (persistenceFailure || result.error)?.slice(
+                0,
+                16_000,
+              );
               this.addEvent(run, { kind: "error", text: run.error! });
             } else
               this.addEvent(run, {
@@ -637,14 +966,19 @@ export class WorkspaceService {
                 ? "cancelled"
                 : "failed";
             run.finishedAt = now();
-            run.error =
+            run.error = (
               persistenceFailure ||
-              (error instanceof Error ? error.message : "Worker failed.");
+              (error instanceof Error ? error.message : "Worker failed.")
+            ).slice(0, 16_000);
             this.addEvent(run, { kind: "error", text: run.error });
             try {
               await this.persist();
             } catch {
-              run.error = `${run.error} The latest status could not be saved. Worktree files are preserved.`;
+              run.error =
+                `${run.error} The latest status could not be saved. Worktree files are preserved.`.slice(
+                  0,
+                  16_000,
+                );
               this.publish();
             }
             this.active.delete(run.id);
@@ -672,7 +1006,7 @@ export class WorkspaceService {
   }
 
   private applyProviderEvent(run: Run, event: NormalizedEvent): void {
-    if (event.sessionId) run.providerSessionId = event.sessionId;
+    if (event.sessionId) run.providerSessionId = event.sessionId.slice(0, 200);
     if (event.usage) run.usage = event.usage;
     for (const item of event.events) this.addEvent(run, item);
   }
@@ -712,11 +1046,19 @@ export class WorkspaceService {
     return this.exclusive(async () => {
       const project = this.getProject(input.projectId);
       const repository = await inspectRepository(project.path);
+      if (repository.path !== project.path)
+        throw new Error(
+          "The selected repository path changed. Open the project again.",
+        );
+      const source = input.filePath
+        ? await captureMemoryFingerprint(repository.path, input.filePath)
+        : undefined;
       const existing = input.id
         ? this.state.memories.find((memory) => memory.id === input.id)
         : undefined;
       if (input.id && (!existing || existing.projectId !== project.id))
         throw new Error("Memory does not belong to this project.");
+      const before = existing ? clone(existing) : undefined;
       const memory: MemoryEntry = {
         ...input,
         id: existing?.id || randomUUID(),
@@ -724,10 +1066,24 @@ export class WorkspaceService {
         createdAt: existing?.createdAt || now(),
         updatedAt: now(),
         commit: repository.head,
+        filePath: source?.filePath,
+        fileSha256: source?.fileSha256,
       };
       if (existing) Object.assign(existing, memory);
       else this.state.memories.push(memory);
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (error) {
+        if (existing && before) {
+          Object.assign(existing, before);
+          existing.filePath = before.filePath;
+          existing.fileSha256 = before.fileSha256;
+        } else
+          this.state.memories = this.state.memories.filter(
+            (entry) => entry.id !== memory.id,
+          );
+        throw error;
+      }
       return clone(memory);
     });
   }
@@ -739,17 +1095,338 @@ export class WorkspaceService {
         (entry) => entry.id === identifier(id, "Memory"),
       );
       if (!memory) throw new Error("Memory not found.");
+      const before = { status: memory.status, updatedAt: memory.updatedAt };
       memory.status = "archived";
       memory.updatedAt = now();
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (error) {
+        Object.assign(memory, before);
+        throw error;
+      }
     });
+  }
+
+  async saveVerificationProfile(
+    value: VerificationProfileInput,
+  ): Promise<VerificationProfile> {
+    this.ready();
+    const input = validateVerificationProfileInput(value);
+    return this.exclusive(async () => {
+      this.ready();
+      this.getProject(input.projectId);
+      const existing = input.id
+        ? this.state.verificationProfiles.find((entry) => entry.id === input.id)
+        : undefined;
+      if (input.id && (!existing || existing.projectId !== input.projectId))
+        throw new Error(
+          "Verification profile does not belong to this project.",
+        );
+      const before = existing ? clone(existing) : undefined;
+      const updatedAt = new Date(
+        Math.max(
+          Date.now(),
+          existing ? Date.parse(existing.updatedAt) + 1 || 0 : 0,
+        ),
+      ).toISOString();
+      const profile: VerificationProfile = {
+        ...input,
+        id: existing?.id || randomUUID(),
+        createdAt: existing?.createdAt || now(),
+        updatedAt,
+      };
+      if (existing) Object.assign(existing, profile);
+      else this.state.verificationProfiles.push(profile);
+      try {
+        await this.persist();
+      } catch (error) {
+        if (existing && before) Object.assign(existing, before);
+        else
+          this.state.verificationProfiles =
+            this.state.verificationProfiles.filter(
+              (entry) => entry.id !== profile.id,
+            );
+        throw error;
+      }
+      return clone(profile);
+    });
+  }
+
+  async deleteVerificationProfile(id: string): Promise<void> {
+    this.ready();
+    const profileId = identifier(id, "Profile");
+    return this.exclusive(async () => {
+      this.ready();
+      const index = this.state.verificationProfiles.findIndex(
+        (entry) => entry.id === profileId,
+      );
+      if (index < 0) throw new Error("Verification profile not found.");
+      const [profile] = this.state.verificationProfiles.splice(index, 1);
+      try {
+        await this.persist();
+      } catch (error) {
+        this.state.verificationProfiles.splice(index, 0, profile);
+        throw error;
+      }
+      // Historical results keep their exact executable, arguments and profile name.
+    });
+  }
+
+  async getVerificationReport(runId: string): Promise<VerificationReport> {
+    this.ready();
+    const run = this.getRun(runId);
+    const thread = this.getThread(run.threadId);
+    const profiles = clone(
+      this.state.verificationProfiles.filter(
+        (profile) => profile.projectId === run.projectId,
+      ),
+    );
+    const results = clone(
+      this.state.verifications.filter((check) => check.runId === run.id),
+    );
+    if (!thread.worktreePath) return { profiles, results, busy: false };
+    const currentRevision = await captureRevisionSnapshot(
+      await this.validateWorktree(thread),
+    );
+    for (const result of results) {
+      if (
+        result.status === "passed" &&
+        (!currentRevision.complete ||
+          !result.outputRevision?.complete ||
+          result.outputRevision.fingerprint !== currentRevision.fingerprint ||
+          result.outputRevision.head !== currentRevision.head)
+      ) {
+        result.status = "stale";
+        result.error =
+          "This command previously passed, but its recorded source snapshot no longer matches a complete snapshot of the current worktree.";
+      }
+    }
+    return {
+      profiles,
+      results,
+      currentRevision,
+      busy:
+        this.projectHasCheck(run.projectId) ||
+        this.state.runs.some(
+          (entry) =>
+            ACTIVE.has(entry.status) &&
+            (entry.threadId === thread.id ||
+              (entry.projectId === run.projectId && entry.mode === "build")),
+        ),
+    };
+  }
+
+  async startVerification(
+    value: VerificationRequest,
+    expectedProfile?: VerificationProfile,
+  ): Promise<VerificationResult> {
+    this.ready();
+    const request = validateVerificationRequest(value);
+    return this.exclusive(async () => {
+      this.ready();
+      const run = this.getRun(request.runId);
+      const thread = this.getThread(run.threadId);
+      if (thread.archivedAt)
+        throw new Error(
+          "Restore this archived thread before starting verification.",
+        );
+      if (this.hasTerminationIssue(run.projectId))
+        throw new Error(
+          "Verification is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes before deliberately clearing the recovery flag in workspace.json.",
+        );
+      if (
+        this.projectHasCheck(run.projectId) ||
+        this.state.runs.some(
+          (entry) =>
+            ACTIVE.has(entry.status) &&
+            (entry.threadId === thread.id ||
+              (entry.projectId === run.projectId && entry.mode === "build")),
+        )
+      )
+        throw new Error(
+          "An agent or verification is already using this project. Stop it or wait before checking this worktree.",
+        );
+      const saved = this.state.verificationProfiles.find(
+        (profile) =>
+          profile.id === request.profileId &&
+          profile.projectId === run.projectId,
+      );
+      if (!saved)
+        throw new Error(
+          "Verification profile does not belong to this project.",
+        );
+      if (
+        expectedProfile &&
+        (saved.id !== expectedProfile.id ||
+          saved.projectId !== expectedProfile.projectId ||
+          saved.name !== expectedProfile.name ||
+          saved.executable !== expectedProfile.executable ||
+          saved.timeoutMinutes !== expectedProfile.timeoutMinutes ||
+          saved.updatedAt !== expectedProfile.updatedAt ||
+          JSON.stringify(saved.args) !== JSON.stringify(expectedProfile.args))
+      )
+        throw new Error(
+          "The verification profile changed after confirmation. Review and confirm its exact command again.",
+        );
+      const profile = clone(saved);
+      const cwd = await this.validateWorktree(thread);
+      const inputRevision = await captureRevisionSnapshot(cwd);
+      this.ready();
+      const check: VerificationResult = {
+        id: randomUUID(),
+        projectId: run.projectId,
+        threadId: thread.id,
+        runId: run.id,
+        profileId: profile.id,
+        profileName: profile.name,
+        executable: profile.executable,
+        args: [...profile.args],
+        cwd,
+        status: "running",
+        createdAt: now(),
+        output: "",
+        truncated: false,
+        inputRevision,
+      };
+      const controller = new AbortController();
+      const active: { controller: AbortController; done?: Promise<void> } = {
+        controller,
+      };
+      this.state.verifications.push(check);
+      this.activeVerifications.set(check.id, active);
+      try {
+        await this.persist();
+      } catch (error) {
+        this.activeVerifications.delete(check.id);
+        this.state.verifications = this.state.verifications.filter(
+          (entry) => entry.id !== check.id,
+        );
+        throw new Error(
+          "The verification could not be saved, so its command was not started.",
+          { cause: error },
+        );
+      }
+      const maxBytes = this.state.settings.maxOutputKb * 1024;
+      let pendingOutput = "";
+      let flushQueued = false;
+      let persistenceFailure: string | undefined;
+      const onOutput = (chunk: string) => {
+        if (persistenceFailure) return;
+        pendingOutput += chunk;
+        if (flushQueued) return;
+        flushQueued = true;
+        void this.exclusive(async () => {
+          check.output += pendingOutput;
+          pendingOutput = "";
+          flushQueued = false;
+          await this.persist();
+        }).catch(() => {
+          persistenceFailure =
+            "Verification stopped because its output could not be saved. Worktree files were preserved; the latest status may not be on disk.";
+          controller.abort();
+        });
+      };
+      active.done = Promise.resolve()
+        .then(async () => {
+          if (this.closing) controller.abort();
+          const result = await runVerificationCommand({
+            profile,
+            cwd,
+            signal: controller.signal,
+            maxBytes,
+            onOutput,
+          });
+          const outputRevision =
+            !result.cancelled && !result.terminationUnconfirmed && !this.closing
+              ? await captureRevisionSnapshot(cwd)
+              : undefined;
+          await this.exclusive(async () => {
+            check.output = result.output;
+            check.truncated = result.truncated;
+            check.exitCode = result.exitCode;
+            check.outputRevision = outputRevision;
+            check.finishedAt = now();
+            check.terminationUnconfirmed = result.terminationUnconfirmed;
+            check.error = (persistenceFailure || result.error)?.slice(
+              0,
+              16_000,
+            );
+            if (persistenceFailure || result.terminationUnconfirmed)
+              check.status = "error";
+            else if (result.cancelled || controller.signal.aborted)
+              check.status = "cancelled";
+            else if (
+              typeof result.exitCode === "number" &&
+              result.exitCode !== 0
+            )
+              check.status = "failed";
+            else if (result.error || result.exitCode !== 0) {
+              check.status = "error";
+              check.error ||=
+                "The verification did not return a successful exit code.";
+            } else if (
+              !inputRevision.complete ||
+              !outputRevision?.complete ||
+              inputRevision.fingerprint !== outputRevision.fingerprint ||
+              inputRevision.head !== outputRevision.head
+            ) {
+              check.status = "stale";
+              check.error =
+                !inputRevision.complete || !outputRevision?.complete
+                  ? `Command exited successfully, but a complete source snapshot was unavailable. ${inputRevision.reason || outputRevision?.reason || ""}`.trim()
+                  : "Command exited successfully, but source files changed while it ran; the result is not a pass for an unchanged revision.";
+            } else check.status = "passed";
+            await this.persist();
+            this.activeVerifications.delete(check.id);
+          });
+        })
+        .catch(async (error) => {
+          await this.exclusive(async () => {
+            check.status = persistenceFailure
+              ? "error"
+              : controller.signal.aborted
+                ? "cancelled"
+                : "error";
+            check.finishedAt = now();
+            check.error = (
+              persistenceFailure ||
+              (error instanceof Error
+                ? error.message
+                : "Verification failed unexpectedly.")
+            ).slice(0, 16_000);
+            try {
+              await this.persist();
+            } catch {
+              check.error =
+                `${check.error} The latest status could not be saved; worktree files were preserved.`.slice(
+                  0,
+                  16_000,
+                );
+              this.publish();
+            }
+            this.activeVerifications.delete(check.id);
+          });
+        });
+      return clone(check);
+    });
+  }
+
+  async cancelVerification(id: string): Promise<void> {
+    this.ready();
+    const checkId = identifier(id, "Verification");
+    if (!this.state.verifications.some((check) => check.id === checkId))
+      throw new Error("Verification result not found.");
+    const active = this.activeVerifications.get(checkId);
+    if (!active) return;
+    active.controller.abort();
+    await active.done;
   }
 
   async updateSettings(value: Settings): Promise<Settings> {
     this.ready();
     const settings = validateSettings(value);
     return this.exclusive(async () => {
-      if (this.active.size)
+      if (this.active.size || this.activeVerifications.size)
         throw new Error(
           "Wait for active runs to finish before changing worker settings.",
         );
@@ -763,12 +1440,18 @@ export class WorkspaceService {
   async dispose(): Promise<void> {
     this.closing = true;
     for (const worker of this.active.values()) worker.controller.abort();
+    for (const worker of this.activeVerifications.values())
+      worker.controller.abort();
     // Drain any in-flight startup before taking the final worker snapshot.
     // startRun checks closing again after asynchronous Git preparation.
     await this.queue;
     for (const worker of this.active.values()) worker.controller.abort();
+    for (const worker of this.activeVerifications.values())
+      worker.controller.abort();
     await Promise.allSettled(
-      [...this.active.values()].map((worker) => worker.done),
+      [...this.active.values(), ...this.activeVerifications.values()].map(
+        (worker) => worker.done,
+      ),
     );
     await this.queue;
   }

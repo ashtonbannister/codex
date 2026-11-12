@@ -1,6 +1,6 @@
 {
   "name": "nova-workbench",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "An independent, Windows-first desktop workbench for Codex, Claude Code, and local coding agents.",
   "author": "Inkform Labs",
@@ -15,8 +15,9 @@
     "dev:ui": "vite --host 127.0.0.1",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts src/renderer/renderer.test.tsx",
     "test:ui": "playwright test",
+    "test:electron": "node scripts/smoke-electron.mjs",
     "check": "npm run typecheck && npm test && npm run build",
     "start": "electron .",
     "pack:win": "npm run build && electron-builder --win --x64 --publish never",

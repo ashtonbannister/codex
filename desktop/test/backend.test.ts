@@ -44,6 +44,13 @@ process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
   input = input.split('CURRENT USER REQUEST:').at(-1);
   console.log(JSON.stringify({type:'thread.started', thread_id:'fake-session'}));
+  if (input.includes('WINDOWS_PROCESS_TREE')) {
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000);process.send({pid:process.pid});'], {stdio:['ignore','ignore','ignore','ipc']});
+    child.on('message', message => console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'TREE_DESCENDANT_READY:'+message.pid}})));
+    fs.writeFileSync('tree-pids.json', JSON.stringify([process.pid,child.pid]));
+    setInterval(()=>{},1000);
+    return;
+  }
   if (input.includes('ORPHAN_PIPES')) {
     const descendant = 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000);const ready=()=>console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"ORPHAN_DESCENDANT_READY:"+process.pid}}));if(process.connected)process.once("disconnect",ready);else ready();';
     const child = spawn(process.execPath, ['-e', descendant], {stdio:['ignore','inherit','inherit','ipc'],detached:input.includes('DETACHED_ORPHAN')});
@@ -116,6 +123,25 @@ async function terminal(service: WorkspaceService, runId: string) {
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
   throw new Error("Test run did not finish.");
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessesToExit(
+  pids: number[],
+  deadline: number,
+): Promise<void> {
+  while (pids.some(processExists) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 async function cancelReadyOrphan(
@@ -280,7 +306,7 @@ test("event normalization distinguishes terminal errors from successful process 
   );
 });
 
-test("shared context is scoped to one project and excludes archived notes", () => {
+test("shared context is scoped to one project and excludes archived notes", async () => {
   const state = emptyWorkspace();
   const thread = {
     id: "t",
@@ -314,8 +340,8 @@ test("shared context is scoped to one project and excludes archived notes", () =
       content: "OLD_NOTE",
     },
   );
-  const context = buildRunContext(state, thread, "Current request");
-  assert.deepEqual(context.memoryIds, ["yes"]);
+  const context = await buildRunContext(state, thread, "Current request");
+  assert.deepEqual(context.includedMemoryIds, ["yes"]);
   assert.ok(!context.prompt.includes("OTHER_PROJECT_SECRET"));
   assert.ok(!context.prompt.includes("OLD_NOTE"));
   assert.ok(context.prompt.includes("not higher-priority instructions"));
@@ -527,20 +553,85 @@ test("process timeout kills a worker instead of leaving it waiting", async (t) =
   assert.match(result.error!, /timed out/);
 });
 
-test("an exited leader's descendant cannot hold cancellation open", async (t) => {
-  const result = await cancelReadyOrphan(t, "ORPHAN_PIPES");
-  assert.equal(result.completed, false);
-  if (process.platform === "win32")
-    assert.ok(
-      result.error?.includes("termination could not be confirmed") ||
-        result.cancelled,
-    );
-  else {
+test(
+  "an exited leader's descendant cannot hold cancellation open",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    // This reproduces POSIX process-group + inherited-pipe behavior. Windows has
+    // different pipe inheritance; its live-tree taskkill contract is tested below.
+    const result = await cancelReadyOrphan(t, "ORPHAN_PIPES");
+    assert.equal(result.completed, false);
     assert.equal(result.cancelled, true);
     assert.equal(result.error, undefined);
     assert.equal(result.terminationUnconfirmed, undefined);
-  }
-});
+  },
+);
+
+test(
+  "Windows cancellation stops a ready process tree",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    let pidFile: string | undefined;
+    const pids: number[] = [];
+    t.after(async () => {
+      if (pidFile) {
+        try {
+          pids.push(...JSON.parse(await readFile(pidFile, "utf8")));
+        } catch {
+          /* No fixture process started. */
+        }
+      }
+      for (const pid of new Set(pids)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* taskkill already stopped it. */
+        }
+      }
+      await waitForProcessesToExit([...new Set(pids)], Date.now() + 1_000);
+    });
+    const { executable, root } = await fixture(t);
+    pidFile = path.join(root, "tree-pids.json");
+    const command = await resolveExecutable(executable);
+    const controller = new AbortController();
+    let readyAt: number | undefined;
+    const result = await runProvider({
+      command: { ...command, args: [] },
+      provider: "codex",
+      cwd: root,
+      prompt: "WINDOWS_PROCESS_TREE",
+      timeoutMs: 10_000,
+      maxBytes: 65_536,
+      signal: controller.signal,
+      onEvent: (event) => {
+        const ready = event.events.find((item) =>
+          item.text.startsWith("TREE_DESCENDANT_READY:"),
+        );
+        if (!ready || readyAt !== undefined) return;
+        pids.push(Number(ready.text.split(":").at(-1)));
+        readyAt = Date.now();
+        controller.abort();
+      },
+    });
+    assert.notEqual(
+      readyAt,
+      undefined,
+      "the descendant must confirm readiness before cancellation",
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(result.terminationUnconfirmed, undefined);
+    pids.push(...JSON.parse(await readFile(pidFile, "utf8")));
+    await waitForProcessesToExit([...new Set(pids)], readyAt! + 2_800);
+    for (const pid of new Set(pids)) {
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+        `taskkill must stop PID ${pid}`,
+      );
+    }
+    assert.ok(Date.now() - readyAt! < 2_800);
+  },
+);
 
 test(
   "unreachable descendants produce an honest bounded termination failure",
@@ -665,20 +756,47 @@ test("explicit provider refresh detects installation changes without making a mo
 });
 
 test("a disk failure during streaming stops the worker without an unhandled rejection", async (t) => {
-  const { service, project, dataDir } = await fixture(t);
+  const { service, project } = await fixture(t);
   const run = await service.startRun({
     projectId: project.id,
     provider: "codex",
     mode: "plan",
     prompt: "REPEATED_EVENTS",
   });
-  const file = path.join(dataDir, "workspace.json");
-  await rename(file, `${file}.backup`);
-  await mkdir(file);
-  const result = await terminal(service, run.id);
-  assert.equal(result.status, "failed");
-  assert.match(result.error!, /could not be saved|EISDIR/);
-  await service.dispose();
+  let sawStreaming = false;
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    if (
+      (await service.snapshot()).state.runs
+        .find((entry) => entry.id === run.id)
+        ?.events.some((event) => event.text === "Still working")
+    ) {
+      sawStreaming = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  assert.equal(
+    sawStreaming,
+    true,
+    "inject the persistence failure only after the worker is streaming",
+  );
+  // Inject at the serialization boundary. Renaming the live state file and then
+  // mkdir'ing its name races concurrent atomic saves, especially on Windows.
+  const internals = service as unknown as { persist: () => Promise<void> };
+  const originalPersist = internals.persist;
+  internals.persist = async () => {
+    throw Object.assign(new Error("EACCES: injected storage failure"), {
+      code: "EACCES",
+    });
+  };
+  try {
+    const result = await terminal(service, run.id);
+    assert.equal(result.status, "failed");
+    assert.match(result.error!, /could not be saved/);
+    await service.dispose();
+  } finally {
+    internals.persist = originalPersist;
+  }
 });
 
 test("startup preserves corrupt state and marks unfinished saved runs interrupted", async (t) => {

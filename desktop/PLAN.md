@@ -107,6 +107,8 @@ Not in milestone 1: automatic merging, autonomous delegation, native provider-se
 
 Add source-aware retrieval rather than endlessly growing transcripts.
 
+**Version 0.2 implementation:** bounded lexical memory selection, optional source-file digests, freshness warnings and omissions, exact context preview, and stored per-run context summaries. Thread rename/pin/archive/restore is also included. This is the first source-aware layer, not a completed symbol/dependency index or automatic knowledge extraction system. A source digest indicates whether bytes match, not whether a remembered statement is true.
+
 - Repository symbol/dependency index with incremental invalidation when source hashes change.
 - Typed memories: confirmed constraints, observed test outcomes, architectural decisions, and unverified hypotheses.
 - Source file/line or artifact reference, commit/hash, author/provider, timestamps, and supersession links.
@@ -120,6 +122,8 @@ Add source-aware retrieval rather than endlessly growing transcripts.
 ## Milestone 3 — verified execution
 
 Define machine-checkable acceptance criteria before starting a task.
+
+**Version 0.2 implementation:** user-owned command profiles, native execution confirmation, isolated-worktree execution, bounded output/cancellation, recorded command/exit/source evidence, stale-result detection, and persisted recovery locks. A zero exit code with unchanged complete source fingerprints can establish that one check passed for those inputs. It does not establish all task requirements, reproducibility of the external environment, or a domain-specific Unreal/BeamNG acceptance verdict.
 
 - Named verification profiles: typecheck, tests, build, launch, screenshot, performance, or domain-specific checks.
 - Record exact input revision, command/tool, timestamps, exit status, artifact hashes, and results.
@@ -195,9 +199,9 @@ Keep model/version, task revision, tool versions, hardware, and verification cri
 
 ## Immediate development sequence
 
-1. Commit the isolated desktop foundation and its plan, tests, and build instructions.
-2. Run a Windows-native smoke test with each intended CLI, starting with a disposable Git repository and Plan mode.
-3. Verify worktree creation, cancellation, output limits, persistence, and diff review before using important projects.
-4. Add the first independent verification profile and baseline task suite.
-5. Expand shared-memory retrieval with freshness checks.
-6. Add parallel delegation and routing only after the preceding boundaries are measured and reliable.
+1. Validate the version 0.2 desktop, context, and checks implementation in both Linux and Windows CI; inspect rendered review evidence.
+2. Run Windows-native live-provider smoke tests with each intended CLI, starting with a disposable Git repository and Plan mode.
+3. Exercise context/source freshness, worktree reuse, checks, cancellation, persistence, and diff review before using important projects.
+4. Establish repeatable project-specific verification profiles and a baseline task suite, including external dependency/version records.
+5. Expand shared-memory retrieval into incremental repository indexing and explicit context budgets.
+6. Add parallel delegation, routing, and controlled integration only after the preceding boundaries are measured and reliable.

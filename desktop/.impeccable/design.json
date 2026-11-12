@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-12T06:07:52Z",
+  "title": "Design System: Nova Workbench",
+  "extensions": {
+    "colorMeta": {
+      "accent": { "role": "primary", "displayName": "Mint accent" },
+      "accent-surface": {
+        "role": "primary",
+        "displayName": "Mint selected surface"
+      },
+      "light-accent": {
+        "role": "primary",
+        "displayName": "Green accent, light theme"
+      },
+      "bg": { "role": "neutral", "displayName": "Charcoal workspace" },
+      "light-bg": { "role": "neutral", "displayName": "Warm-light workspace" },
+      "secondary": { "role": "neutral", "displayName": "Secondary text" },
+      "warning": { "role": "status", "displayName": "Warning text" },
+      "error": { "role": "status", "displayName": "Error text" }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Welcome heading",
+        "purpose": "Compact welcome-state heading, not a promotional hero."
+      },
+      "body": {
+        "displayName": "Conversation body",
+        "purpose": "Readable message prose; component-specific line heights elsewhere."
+      },
+      "code": {
+        "displayName": "Code and evidence",
+        "purpose": "Code blocks, paths, payloads, and captured command output."
+      }
+    },
+    "shadows": [
+      {
+        "name": "overlay-dark",
+        "value": "0 18px 55px #0007",
+        "purpose": "Default --shadow for dialogs, command palette, and thread menus."
+      },
+      {
+        "name": "overlay-light",
+        "value": "0 18px 55px #172b2026",
+        "purpose": "Light-theme override of --shadow."
+      },
+      {
+        "name": "compact-inspector",
+        "value": "-14px 0 32px #0003",
+        "purpose": "Right-side inspector overlay at widths up to 1100px."
+      }
+    ],
+    "motion": [
+      {
+        "name": "loading-spin",
+        "value": "spin 1.1s linear infinite",
+        "purpose": "Existing loading indicators; spin ends at rotate(360deg)."
+      },
+      {
+        "name": "reduced-motion-duration",
+        "value": "0.01ms",
+        "purpose": "Under prefers-reduced-motion: reduce, animations run once and scroll-behavior is auto."
+      }
+    ],
+    "breakpoints": [
+      { "name": "compact-toolbar-max", "value": "1250px" },
+      { "name": "inspector-overlay-max", "value": "1100px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Compact primary action; extracted from the shared primary-button styling.",
+      "html": "<button type=\"button\" class=\"ds-primary\">Save settings</button>",
+      "css": ".ds-primary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 33px; padding: 7px 11px; border: 0; border-radius: 6px; font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; font-size: 12px; font-weight: 500; background: var(--accent); color: var(--accent-text); cursor: pointer; } .ds-primary:hover:not(:disabled) { filter: brightness(1.06); } .ds-primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .ds-primary:disabled { cursor: not-allowed; opacity: .45; }"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Bordered secondary action, with the existing surface-hover state.",
+      "html": "<button type=\"button\" class=\"ds-secondary\">Cancel</button>",
+      "css": ".ds-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 33px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 6px; font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; font-size: 12px; font-weight: 500; color: var(--secondary); background: var(--surface); cursor: pointer; } .ds-secondary:hover:not(:disabled) { color: var(--text); background: var(--surface-hover); } .ds-secondary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .ds-secondary:disabled { cursor: not-allowed; opacity: .45; }"
+    },
+    {
+      "name": "Text action",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "Unfilled action used for editing, context preview, and other supporting commands.",
+      "html": "<button type=\"button\" class=\"ds-text-action\">Preview context</button>",
+      "css": ".ds-text-action { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: none; color: var(--muted); font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; font-size: 11px; text-align: left; cursor: pointer; } .ds-text-action:hover:not(:disabled) { color: var(--text); text-decoration: underline; text-underline-offset: 3px; } .ds-text-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .ds-text-action:disabled { cursor: not-allowed; opacity: .45; }"
+    },
+    {
+      "name": "Labeled field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Settings-form text field with visible label, placeholder, and supporting note.",
+      "html": "<label class=\"ds-field\"><span>Default local model</span><input placeholder=\"An installed Ollama model name\"><small>No models are downloaded automatically.</small></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 16px; font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; } .ds-field > span { font-size: 11px; color: var(--secondary); font-weight: 500; } .ds-field > input { width: 100%; min-width: 0; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 5px; padding: 9px 10px; font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; font-size: 12px; caret-color: var(--accent); } .ds-field > input::placeholder { color: var(--muted); opacity: 1; } .ds-field > input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .ds-field > small { font-size: 10px; line-height: 1.75; color: var(--muted); }"
+    },
+    {
+      "name": "Inspector tabs",
+      "kind": "nav",
+      "refersTo": "inspector-tab-active",
+      "description": "Static specimen of the implemented tab strip; React owns selection and arrow-key behavior.",
+      "html": "<div class=\"ds-inspector-header\"><div class=\"ds-inspector-tabs\" role=\"tablist\" aria-label=\"Inspector specimen\"><button role=\"tab\" aria-selected=\"false\" tabindex=\"-1\">Changes</button><button role=\"tab\" aria-selected=\"true\" class=\"ds-active\">Context</button><button role=\"tab\" aria-selected=\"false\" tabindex=\"-1\">Memory</button><button role=\"tab\" aria-selected=\"false\" tabindex=\"-1\">Checks</button><button role=\"tab\" aria-selected=\"false\" tabindex=\"-1\">Activity</button></div></div>",
+      "css": ".ds-inspector-header { height: 48px; min-height: 48px; display: flex; align-items: center; border-bottom: 1px solid var(--border-soft); padding: 0 14px; gap: 6px; background: var(--panel); } .ds-inspector-tabs { display: flex; align-items: stretch; justify-content: space-between; flex: 1; height: 100%; gap: 10px; } .ds-inspector-tabs button { padding: 0; border: 0; background: none; position: relative; color: var(--muted); font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; font-size: 11px; cursor: pointer; } .ds-inspector-tabs button.ds-active, .ds-inspector-tabs button:hover { color: var(--text); } .ds-inspector-tabs button.ds-active::after { position: absolute; content: \"\"; height: 2px; background: var(--accent); bottom: 0; left: 0; right: 0; } .ds-inspector-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }"
+    },
+    {
+      "name": "User message",
+      "kind": "card",
+      "refersTo": "user-message",
+      "description": "Conversation prompt container; sample text is illustrative, not an executed request.",
+      "html": "<div class=\"ds-user-message\"><div class=\"ds-message-overline\"><span>You</span><time>10:30</time></div><p>Continue the milestone with the current project constraints.</p></div>",
+      "css": ".ds-user-message { background: var(--surface); color: var(--text); border-radius: 9px; padding: 13px 17px; margin: 0 0 27px; font-family: \"Segoe UI Variable\", \"Segoe UI\", system-ui, sans-serif; } .ds-message-overline { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--secondary); margin-bottom: 8px; } .ds-message-overline time { color: var(--muted); font-size: 10px; } .ds-user-message p { font-size: 13px; line-height: 1.8; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }"
+    },
+    {
+      "name": "Request payload",
+      "kind": "custom",
+      "refersTo": "request-payload",
+      "description": "Focusable, scrollable request-body surface with explicit synthetic sample provenance.",
+      "html": "<pre class=\"ds-request-payload\" aria-label=\"Exact context payload specimen\" tabindex=\"0\">SYNTHETIC UI PREVIEW\n\nCurrent task:\nContinue the milestone with the current project constraints.</pre>",
+      "css": ".ds-request-payload { border: 1px solid var(--border); background: var(--sidebar); color: var(--secondary); border-radius: 5px; padding: 11px; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 460px; font-family: var(--code); font-size: 11px; line-height: 1.75; margin: 0; } .ds-request-payload:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Inspectable coding workspace",
+    "overview": "Nova Workbench extends a familiar Windows coding-workspace convention: compact project navigation, a readable conversation, a bottom-aligned composer, and an optional evidence inspector. Quiet charcoal and warm-light surfaces, system UI type, line icons, and restrained mint states provide Nova's identity without a competing brand treatment.",
+    "keyCharacteristics": [
+      "Compact desktop controls and readable conversation text.",
+      "Tonal surfaces and quiet separators, with lift reserved for overlays.",
+      "Visible source context, run state, and check evidence.",
+      "Keyboard access and persistent, resizable workspace panes."
+    ],
+    "rules": [],
+    "dos": [
+      "Do extend the existing Windows-first sidebar/conversation/inspector convention.",
+      "Do use the semantic theme variables and the existing system-font stacks.",
+      "Do preserve keyboard focus, readable labels, and access to truncated content.",
+      "Do show source freshness, check revision context, and uncertainty in words.",
+      "Do retain synthetic-data labels and provenance on screenshot test evidence."
+    ],
+    "donts": [
+      "Don't add a competing brand, display-font identity, decorative gradients, or copied provider logos.",
+      "Don't add lift to ordinary content panels or turn status text into decorative chips.",
+      "Don't describe a finished agent turn, preview, or isolated passing check as a fully verified engineering result.",
+      "Don't treat this source extraction as completed rendered or native-platform QA."
+    ]
+  }
+}
