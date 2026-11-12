@@ -1,3 +1,16 @@
+## Nova Workbench — this fork
+
+This fork adds **Nova Workbench**, an independent Windows-first desktop client for
+Codex, Claude Code, and local models. The first implementation lives in
+[`desktop/`](desktop/README.md), separate from the upstream Codex engine. Read the
+[implementation plan](desktop/PLAN.md) for the roadmap and the distinction between
+working features and planned capabilities. Nova Workbench is not an official
+OpenAI or Anthropic application.
+
+The upstream Codex README follows unchanged.
+
+---
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />

@@ -1,0 +1,73 @@
+{
+  "name": "nova-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An independent, Windows-first desktop workbench for Codex, Claude Code, and local coding agents.",
+  "author": "Inkform Labs",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/main/main.cjs",
+  "engines": {
+    "node": ">=24.22.1"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:ui": "vite --host 127.0.0.1",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:ui": "playwright test",
+    "check": "npm run typecheck && npm test && npm run build",
+    "start": "electron .",
+    "pack:win": "npm run build && electron-builder --win --x64 --publish never",
+    "pack:dir": "npm run build && electron-builder --dir --publish never"
+  },
+  "dependencies": {
+    "lucide-react": "1.72.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "electron": "45.3.1",
+    "electron-builder": "26.18.0",
+    "esbuild": "^0.28.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  },
+  "build": {
+    "appId": "ca.inkformlabs.nova-workbench",
+    "productName": "Nova Workbench",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "LICENSE",
+      "NOTICE"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Nova-Workbench-${version}-${arch}-setup.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "Nova-Workbench-${version}-${arch}-portable.${ext}"
+    }
+  }
+}

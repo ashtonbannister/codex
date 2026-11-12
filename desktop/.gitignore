@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+artifacts/
+test-results/
+playwright-report/
+*.log
+*.tsbuildinfo
+.nova/
+.env*
+!.env.example

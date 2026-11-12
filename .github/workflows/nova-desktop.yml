@@ -1,0 +1,72 @@
+name: Nova Workbench
+
+on:
+  push:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/nova-desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/nova-desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nova-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24.22.1"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck, unit tests and production build
+        run: npm run check
+      - name: Install browser for UI tests
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - name: UI integration tests
+        if: runner.os == 'Linux'
+        run: npm run test:ui
+      - name: Package unsigned Windows installers
+        if: runner.os == 'Windows'
+        run: npm run pack:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Upload Windows test builds
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: Nova-Workbench-Windows-unsigned
+          path: desktop/release/*.exe
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload failed browser traces
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: Nova-Workbench-UI-test-results
+          path: desktop/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
