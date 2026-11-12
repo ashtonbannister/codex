@@ -1,5 +1,21 @@
+import type {
+  CodexHistoryPage,
+  CodexHistoryQuery,
+  CodexImportRequest,
+  CodexInstallation,
+  CodexMemoryImportRequest,
+  CodexMemorySource,
+  CodexResourcePage,
+  CodexResourcePreview,
+  CodexResourceQuery,
+  CodexResourceRequest,
+  CodexThreadLink,
+  CodexThreadPage,
+  CodexThreadQuery,
+} from "./compatibility";
+
 export type ProviderId = "codex" | "claude" | "ollama";
-export const APP_VERSION = "0.2.0";
+export const APP_VERSION = "0.3.0";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -16,6 +32,8 @@ export interface Project {
   path: string;
   branch: string;
   createdAt: string;
+  /** Legacy projects are Git repositories. Folder projects support Plan only. */
+  kind?: "git" | "folder";
 }
 
 export interface Thread {
@@ -29,6 +47,9 @@ export interface Thread {
   baseCommit?: string;
   pinned?: boolean;
   archivedAt?: string;
+  codex?: CodexThreadLink;
+  /** Canonical storage base containing worktrees/<thread-id>. Pinned per thread. */
+  worktreeStoragePath?: string;
 }
 
 export interface RunEvent {
@@ -89,6 +110,7 @@ export interface MemoryEntry {
   /** Optional project-relative source; only its digest is captured automatically. */
   filePath?: string;
   fileSha256?: string;
+  codexSource?: CodexMemorySource;
 }
 
 export interface Settings {
@@ -98,6 +120,10 @@ export interface Settings {
   timeoutMinutes: number;
   maxOutputKb: number;
   theme: "dark" | "light" | "system";
+  /** Empty uses the installed CLI's normal CODEX_HOME/default. */
+  codexHome?: string;
+  /** Storage base for NEW Nova worktrees; never relocates existing worktrees. */
+  worktreeStoragePath?: string;
 }
 
 export interface WorkspaceState {
@@ -109,6 +135,8 @@ export interface WorkspaceState {
   settings: Settings;
   verificationProfiles: VerificationProfile[];
   verifications: VerificationResult[];
+  /** Native history workers whose exit could not be confirmed; no automatic retry. */
+  codexRecoveryHomes?: string[];
 }
 
 export interface ProviderStatus {
@@ -263,6 +291,18 @@ export interface DiffSnapshot {
 
 /** Narrow, validated bridge. The renderer never receives Node, IPC, or credentials. */
 export interface WorkbenchAPI {
+  inspectCodexInstallation(): Promise<CodexInstallation>;
+  chooseStorageDirectory(
+    kind: "codex-home" | "worktrees",
+  ): Promise<string | null>;
+  listCodexThreads(query: CodexThreadQuery): Promise<CodexThreadPage>;
+  readCodexHistory(query: CodexHistoryQuery): Promise<CodexHistoryPage>;
+  importCodexThread(request: CodexImportRequest): Promise<Thread>;
+  listCodexResources(query: CodexResourceQuery): Promise<CodexResourcePage>;
+  previewCodexResource(
+    request: CodexResourceRequest,
+  ): Promise<CodexResourcePreview>;
+  importCodexMemory(request: CodexMemoryImportRequest): Promise<MemoryEntry>;
   getSnapshot(): Promise<WorkspaceSnapshot>;
   refreshProviderStatus(): Promise<WorkspaceSnapshot>;
   updateThread(input: ThreadUpdate): Promise<Thread>;

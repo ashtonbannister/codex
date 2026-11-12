@@ -1,4 +1,5 @@
 import { APP_VERSION, emptyWorkspace } from "../shared/types";
+import { createPreviewLibrary } from "./codex-preview";
 import type {
   MemoryEntry,
   ContextMemory,
@@ -172,6 +173,7 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
   }
 
   return {
+    ...createPreviewLibrary(state, publish),
     async updateThread(input) {
       const thread = state.threads.find((item) => item.id === input.id);
       if (!thread) throw new Error("The example conversation was not found.");
@@ -191,13 +193,15 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
           entry.projectId === request.projectId && entry.status === "active",
       );
       const memories: ContextMemory[] = entries.map((entry) => {
-        const freshness = !entry.filePath
-          ? "unlinked"
-          : entry.fileSha256 === "synthetic-current-source"
-            ? "current"
-            : entry.fileSha256 === "synthetic-changed-source"
-              ? "changed"
-              : "unavailable";
+        const freshness = entry.codexSource
+          ? "current"
+          : !entry.filePath
+            ? "unlinked"
+            : entry.fileSha256 === "synthetic-current-source"
+              ? "current"
+              : entry.fileSha256 === "synthetic-changed-source"
+                ? "changed"
+                : "unavailable";
         const included = freshness === "current" || freshness === "unlinked";
         return {
           id: entry.id,
@@ -210,11 +214,13 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
           reason:
             freshness === "unavailable"
               ? "The browser preview cannot read or fingerprint local files."
-              : freshness === "changed"
-                ? "Synthetic example: the source changed after the note was saved."
-                : freshness === "unlinked"
-                  ? "Unlinked reference; no source freshness check is possible."
-                  : "Synthetic example: source bytes match the saved fingerprint.",
+              : entry.codexSource
+                ? "Synthetic example: the external Codex resource matches its saved fingerprint."
+                : freshness === "changed"
+                  ? "Synthetic example: the source changed after the note was saved."
+                  : freshness === "unlinked"
+                    ? "Unlinked reference; no source freshness check is possible."
+                    : "Synthetic example: source bytes match the saved fingerprint.",
         };
       });
       const includedMemoryIds = memories
@@ -223,6 +229,9 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
       const history = state.runs
         .filter((run) => run.threadId === request.threadId)
         .slice(-4);
+      const importedHistory =
+        state.threads.find((thread) => thread.id === request.threadId)?.codex
+          ?.history ?? [];
       const prompt = [
         "[SYNTHETIC UI PREVIEW — no provider request is sent]",
         "\nPROJECT MEMORY",
@@ -233,6 +242,10 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
               `${entry.title}\n${entry.content}\nSource: ${entry.source}`,
           ),
         "\nCONVERSATION",
+        ...importedHistory.map(
+          (message) =>
+            `${message.role === "user" ? "User" : "Agent"}: ${message.text}`,
+        ),
         ...history.map(
           (run) =>
             `User: ${run.prompt}\nAgent: ${run.events

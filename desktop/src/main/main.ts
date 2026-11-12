@@ -10,6 +10,7 @@ import {
   shell,
 } from "electron";
 import path from "node:path";
+import { realpath } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import type {
   MemoryInput,
@@ -21,6 +22,18 @@ import type {
   WorkspaceState,
 } from "../shared/types";
 import { WorkspaceService } from "./services/workspace-service";
+import {
+  inspectCodexInstallation,
+  resolveCodexHome,
+} from "./services/codex-installation";
+import type {
+  CodexHistoryQuery,
+  CodexImportRequest,
+  CodexMemoryImportRequest,
+  CodexResourceQuery,
+  CodexResourceRequest,
+  CodexThreadQuery,
+} from "../shared/compatibility";
 import { confirmationValue } from "./confirmation";
 import {
   APP_URL,
@@ -116,6 +129,157 @@ function handle(
 }
 
 function registerHandlers(service: WorkspaceService) {
+  const connectedProfiles = new Set<string>();
+  const approvedHandoffs = new Set<string>();
+  let connectionPrompt: Promise<void> | undefined;
+  const connectionIdentity = async () => {
+    const settings = (await service.snapshot()).state.settings;
+    return {
+      codexPath: settings.codexPath,
+      home: await resolveCodexHome(settings.codexHome),
+    };
+  };
+  const connectionKey = (identity: { codexPath: string; home: string }) =>
+    `${identity.codexPath}\0${identity.home}`;
+  const confirmConnection = async (): Promise<{
+    codexPath: string;
+    home: string;
+  }> => {
+    const identity = await connectionIdentity();
+    const key = connectionKey(identity);
+    if (connectedProfiles.has(key)) return identity;
+    if (connectionPrompt) {
+      await connectionPrompt;
+      if (
+        !connectedProfiles.has(key) ||
+        connectionKey(await connectionIdentity()) !== key
+      )
+        throw new Error("Codex connection changed. Open the library again.");
+      return identity;
+    }
+    connectionPrompt = (async () => {
+      const result = await dialog.showMessageBox(window!, {
+        type: "question",
+        buttons: ["Cancel", "Connect to Codex"],
+        defaultId: 0,
+        cancelId: 0,
+        title: "Connect to your existing Codex installation?",
+        message: "Load saved Codex conversations into this library?",
+        detail: `Codex home: ${confirmationValue(identity.home)}\nExecutable: ${confirmationValue(identity.codexPath)}\n\nNova starts the installed Codex app-server to read history. Codex manages its own authentication, logs, databases, and migrations; this is not an immutable filesystem scan. Browsing sends no model turn. Nova does not copy credentials or directly edit Codex databases. Conversations and references are only added to Nova when you choose them.`,
+      });
+      if (result.response !== 1)
+        throw new Error(
+          "Codex connection cancelled. No app-server was started.",
+        );
+      if (connectionKey(await connectionIdentity()) !== key)
+        throw new Error(
+          "Codex settings changed during confirmation. Connect again.",
+        );
+      connectedProfiles.add(key);
+    })();
+    try {
+      await connectionPrompt;
+    } finally {
+      connectionPrompt = undefined;
+    }
+    return identity;
+  };
+  handle("codex:installation", async () =>
+    inspectCodexInstallation(
+      (await service.snapshot()).state.settings.codexHome,
+      {
+        documents: app.getPath("documents"),
+        appData: app.getPath("appData"),
+      },
+    ),
+  );
+  handle("storage:choose", async (payload) => {
+    if (payload !== "codex-home" && payload !== "worktrees")
+      throw new Error("Unknown storage location.");
+    const settings = (await service.snapshot()).state.settings;
+    const result = await dialog.showOpenDialog(window!, {
+      title:
+        payload === "codex-home"
+          ? "Choose the existing Codex home folder"
+          : "Choose storage for new Nova worktrees",
+      buttonLabel: "Use folder",
+      properties: ["openDirectory"],
+      defaultPath:
+        (payload === "codex-home"
+          ? settings.codexHome
+          : settings.worktreeStoragePath) || app.getPath("documents"),
+    });
+    return result.canceled || !result.filePaths[0]
+      ? null
+      : realpath(result.filePaths[0]);
+  });
+  handle("codex:threads", async (payload) => {
+    const query = objectPayload(payload) as unknown as CodexThreadQuery;
+    const identity = await confirmConnection();
+    return service.listCodexThreads(query, identity);
+  });
+  handle("codex:history", async (payload) => {
+    const query = objectPayload(payload) as unknown as CodexHistoryQuery;
+    const identity = await confirmConnection();
+    return service.readCodexHistory(query, identity);
+  });
+  handle("codex:import-thread", async (payload) => {
+    const request = objectPayload(payload) as unknown as CodexImportRequest;
+    identifier(request.threadId);
+    const identity = await confirmConnection();
+    const result = await dialog.showMessageBox(window!, {
+      type: "question",
+      buttons: ["Cancel", "Open in Nova"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Add this conversation to Nova?",
+      message:
+        "Keep a visible-history snapshot and a link to the original Codex conversation?",
+      detail:
+        "Importing sends no model turn. Codex Plan can continue the original native conversation; isolated Build forks native history into a Nova-owned worktree. Archived originals are forked, never automatically unarchived. Claude and local models use an explicitly bounded visible-history handoff in this Nova thread, not hidden provider state. Original conversation files are not rewritten by the importer.",
+    });
+    if (result.response !== 1)
+      throw new Error("Conversation import cancelled.");
+    return service.importCodexThread(request, identity);
+  });
+  handle("codex:resources", (payload) =>
+    service.listCodexResources(
+      objectPayload(payload) as unknown as CodexResourceQuery,
+    ),
+  );
+  handle("codex:preview-resource", (payload) =>
+    service.previewCodexResource(
+      objectPayload(payload) as unknown as CodexResourceRequest,
+    ),
+  );
+  handle("codex:import-memory", async (payload) => {
+    const request = objectPayload(
+      payload,
+    ) as unknown as CodexMemoryImportRequest;
+    const projectId = identifier(request.projectId);
+    const project = (await service.snapshot()).state.projects.find(
+      (entry) => entry.id === projectId,
+    );
+    if (!project)
+      throw new Error("Select a project before importing a reference.");
+    const preview = await service.previewCodexResource(request);
+    if (preview.sha256 !== request.expectedSha256)
+      throw new Error(
+        "This reference changed. Preview it again before importing.",
+      );
+    const result = await dialog.showMessageBox(window!, {
+      type: "question",
+      buttons: ["Cancel", "Import shared reference"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Share this reference with the project's agents?",
+      message: `Import ${confirmationValue(preview.path)} into ${confirmationValue(project.name)}?`,
+      detail:
+        "Nova saves up to 8000 characters of the previewed text with its source fingerprint. It can be included in later requests to Codex, Claude Code, or your selected local model for this project. Review private information before sharing. Importing a skill or instructions makes reference text available; it does not install a plugin, execute code, or grant permissions. The original file is preserved.",
+    });
+    if (result.response !== 1) throw new Error("Reference import cancelled.");
+    return service.importCodexMemory(request, preview.home);
+  });
   handle("workspace:snapshot", () => service.snapshot());
   handle("workspace:refresh-providers", () => service.refreshProviderStatus());
   handle("thread:update", (payload) =>
@@ -135,6 +299,38 @@ function registerHandlers(service: WorkspaceService) {
   });
   handle("run:start", async (payload) => {
     const input = objectPayload(payload) as unknown as RunRequest;
+    const before = await service.snapshot();
+    const linked = before.state.threads.find(
+      (entry) => entry.id === input.threadId,
+    )?.codex;
+    const expectedNativeConnection =
+      linked && input.provider === "codex"
+        ? await confirmConnection()
+        : undefined;
+    if (
+      linked &&
+      (input.provider === "claude" || input.provider === "ollama")
+    ) {
+      const handoffKey = `${input.threadId}\0${input.provider}`;
+      if (!approvedHandoffs.has(handoffKey)) {
+        const result = await dialog.showMessageBox(window!, {
+          type: "question",
+          buttons: ["Cancel", "Continue with selected agent"],
+          defaultId: 0,
+          cancelId: 0,
+          title: "Share this conversation's visible context?",
+          message:
+            input.provider === "claude"
+              ? "Continue this Nova thread with Claude Code?"
+              : "Continue this Nova thread with the configured local model?",
+          detail:
+            "A bounded selection of imported visible messages, Nova turns, and selected project memories will be sent to this provider when you continue. Private reasoning, credentials, native session state, and binary attachments are not transferred. Original Codex history is preserved. The Context inspector shows Nova's reference selection and omissions.",
+        });
+        if (result.response !== 1)
+          throw new Error("Provider handoff cancelled before execution.");
+        approvedHandoffs.add(handoffKey);
+      }
+    }
     if (input.mode === "build") {
       const projectId = identifier(input.projectId);
       const snapshot = await service.snapshot();
@@ -157,7 +353,7 @@ function registerHandlers(service: WorkspaceService) {
       if (confirmation.response !== 1)
         throw new Error("Build cancelled before execution.");
     }
-    return service.startRun(input);
+    return service.startRun(input, expectedNativeConnection);
   });
   handle("run:cancel", (value) => service.cancelRun(identifier(value)));
   handle("run:diff", (value) => service.getDiff(identifier(value)));

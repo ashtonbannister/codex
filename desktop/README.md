@@ -4,7 +4,7 @@ A Windows-first, multi-provider development workbench built alongside the open-s
 
 Nova uses the familiar **projects → conversation → changes** workflow of Codex and Claude Code, with its own interface and branding. It is an independent project, not an official OpenAI or Anthropic desktop application, and does not contain either company's proprietary desktop UI.
 
-**Status: development alpha, version 0.2.0.** The foundation now includes inspectable context, thread organization, and revision-bound command checks. It is not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
+**Status: development alpha, version 0.3.0.** The foundation now includes existing Codex installation/history integration, inspectable shared context, thread organization, and revision-bound command checks. It is not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
 
 ## What's in this milestone
 
@@ -19,6 +19,10 @@ Nova uses the familiar **projects → conversation → changes** workflow of Cod
 - Thread rename, pin, archive, and restore without deleting conversations or worktrees.
 - Inspectable context packs with inclusion/omission reasons and optional file-linked memory fingerprints.
 - Saved verification command profiles with explicit native confirmation, bounded output, cancellation, and source-revision evidence.
+- A Codex library with resolved installation locations, active/archived conversation browsing, visible-history previews, and explicit imports into Nova.
+- Native Codex continuation through the installed app-server, with preserved original history and isolated native forks for Build; bounded Claude/local handoffs in the same Nova thread.
+- Selective Markdown memory, instructions, skill-reference, and plan import with source fingerprints and stale-content omission.
+- Configurable existing Codex home and storage for new Nova worktrees; existing locations are not moved.
 
 The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventions are recorded in [DESIGN.md](DESIGN.md). Automatic model routing, unattended agent teams, automatic knowledge extraction, repository-wide symbol indexing, a general MCP manager, and semantic Unreal/BeamNG validation are **not implemented**. The new checks establish which command ran against which source, not whether every engineering requirement is correct.
 
@@ -65,6 +69,17 @@ After installing or updating a CLI, use **Refresh agent availability** to rerun 
 
 Changing the provider within a thread passes a bounded transcript and selected project memories to the next worker. This is **not** a transfer of private reasoning, provider-native hidden state, or an unlimited conversation context. Providers retain their own model limits, account access, and billing rules.
 
+### Connect an existing Codex installation
+
+1. In Settings, leave **Codex home** blank to use `CODEX_HOME` or your normal `.codex` folder, or select the existing folder explicitly. Do not select `auth.json` or a database file.
+2. Open **Codex library**. The location inventory resolves Windows Documents redirection and existing junctions, including folders stored on another drive. This does not move or migrate anything.
+3. Connect to the installed Codex app-server when prompted. Browsing starts no model turn, but the installed engine still owns its authentication, logs, and state migrations. A compatible installed Codex executable is required; the Windows app package alone is not a guarantee that `codex` is on PATH.
+4. Browse active or archived conversations, inspect the visible messages, then choose **Open in Nova**. Native projectless folders can be imported for Plan; Build requires a Git project.
+5. Keep Codex selected for native continuation, or explicitly choose Claude/local to hand off a bounded visible transcript and project references. Those providers do not acquire Codex's native session, account, private reasoning, or binary attachments.
+6. Preview selected references before importing them into a project. Imported skills are reference text, not installed or automatically executed tools.
+
+See [Codex compatibility and storage boundaries](docs/codex-compatibility.md) for exact folder handling, conversation lifecycle, limits, and recovery behavior. This is an integration with the open-source engine, not a clone of every proprietary desktop feature.
+
 ### Inspect context and organize ongoing work
 
 Use the Context inspector before sending a request to see the bounded prompt, included/omitted memories, history selection, and warnings. The token figure is a character-based estimate, not the provider's tokenizer, bill, or context-window limit. Previewing never launches a model or creates a worktree. Before a thread's first Build, its preview is explicitly provisional: it inspects the original checkout, while the new worktree can lack ignored files or have different checkout bytes. A later run rebuilds context against its actual working files at launch; the preview is not a frozen promise that external edits cannot change it.
@@ -102,20 +117,20 @@ If worker termination cannot be confirmed, Nova reports a failure and locks furt
 
 Unsupported safety capabilities must fail with an actionable error rather than falling back to an unrestricted invocation. Nova does not use permission-bypass or no-sandbox modes. Inherited hooks, plugins, and MCP integrations are deliberately not part of this initial adapter contract; explicit integration management is a later milestone.
 
-In particular, the Codex adapter ignores ordinary user configuration rather than inheriting custom profiles, hooks, or trusted project settings; normal CLI authentication remains separate. Managed/system policy can still apply. Claude's adapter requires its safe/restricted CLI capabilities and limits built-in tools; this is not an operating-system sandbox. An older installed CLI may need an update before Nova will run it.
+Fresh Codex/Local CLI runs ignore ordinary user configuration rather than inheriting custom profiles, hooks, or trusted project settings; normal CLI authentication remains separate. The native-history app-server has no equivalent ignore-config switch: Nova uses supported restrictive overrides, internally discovers only MCP server names to disable each server before loading a thread, and denies server-side tool/approval requests. Raw configuration is not returned to the renderer, logged, saved, or shared with another provider. Managed/system policy can still apply. Claude's adapter requires its safe/restricted CLI capabilities and limits built-in tools; this is not an operating-system sandbox. An older installed CLI may need an update before Nova will run it.
 
 Worktree creation deliberately avoids running repository hooks or checkout filters. Projects using Git LFS or other smudge filters can therefore contain pointer files instead of materialized assets. Check those requirements before attempting an Unreal or BeamNG build; a worktree existing is not proof that all large assets are present.
 
 ## Local data and privacy
 
-Application state is written atomically to `workspace/workspace.json` under Electron's per-user application-data directory. On a typical Windows installation the file is `%APPDATA%\Nova Workbench\workspace\workspace.json`, and worktrees are kept in the neighboring `workspace\worktrees\<thread-id>` directories. Electron or operating-system configuration can change the base location.
+Application state is written atomically to `workspace/workspace.json` under Electron's per-user application-data directory. On a typical Windows installation the file is `%APPDATA%\Nova Workbench\workspace\workspace.json`, and worktrees are kept in the neighboring `workspace\worktrees\<thread-id>` directories. An optional **new worktree storage** folder changes the base for future worktrees, which remain under `<selected-base>\worktrees\<thread-id>`. Existing threads retain their original canonical storage base. Electron or operating-system configuration can change the default location.
 
 - Projects, runs, messages, memory entries, and settings are stored locally in plaintext. This is not an encrypted secrets vault.
 - Verification commands, arguments, and output are also stored locally. Commands can print sensitive data; review what a check emits before sharing logs.
 - Do not put API keys, passwords, or other secrets in project memory.
 - A cloud provider receives the prompt and context passed to it and any project content its tools read. Local persistence does not make cloud execution private or offline.
 - The Local adapter uses a local model through Codex/Ollama; it is not a blanket guarantee that every external tool or provider configuration is offline.
-- No project-memory export to the repository is automatic. Memory is separate from Codex's own internal memory store.
+- No project-memory export to the repository is automatic. Nova memory is separate from Codex's internal store; explicitly imported reference text is a source-linked copy, not a synchronized write into that store.
 - Provider credentials remain with the official provider tooling. Nova does not copy, exchange, or share authentication between providers.
 
 Only use trusted repositories and executables. A malicious project can influence an agent through its contents; context delimiters and worktrees are not a complete prompt-injection defense.
@@ -143,7 +158,7 @@ npm run test:ui
 
 Playwright starts the renderer development server when needed. These checks exercise the interface and explicit browser-preview behavior, not native Electron privileges or a live model. The `Nova Workbench` GitHub Actions workflow runs typechecking, unit/integration tests, and production builds on Linux and Windows; browser interaction checks and review screenshots run on Linux. Windows additionally runs a native Electron startup/preload/IPC/restart smoke test before unsigned installer packaging. Inspect the actual workflow result before treating either platform as validated.
 
-After `npm run build`, `npm run test:electron` runs that native smoke test using an isolated temporary user-data directory. It does not choose a project, run inference, or execute a saved command profile. It tests the compiled development application, not installer installation/uninstallation or every Windows sandbox capability.
+After `npm run build`, `npm run test:electron` runs that native smoke test using an isolated temporary user-data directory and synthetic Codex reference folder. It tests installation inventory and allowlisted reference-preview IPC, but does not open a real history server, choose a project, run inference, or execute a saved command profile. It tests the compiled development application, not installer installation/uninstallation or every Windows sandbox capability.
 
 For renderer-only development:
 

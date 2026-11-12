@@ -1,4 +1,11 @@
-import { Folder, MessageSquare, Plus, Search, Settings2 } from "lucide-react";
+import {
+  Folder,
+  Library,
+  MessageSquare,
+  Plus,
+  Search,
+  Settings2,
+} from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Project, Thread } from "../../shared/types";
 import { Modal } from "./primitives";
@@ -12,6 +19,7 @@ export function CommandPalette({
   onNewThread,
   onOpenProject,
   onSettings,
+  onLibrary,
   onClose,
 }: {
   projects: Project[];
@@ -22,6 +30,7 @@ export function CommandPalette({
   onNewThread: () => void;
   onOpenProject: () => void;
   onSettings: () => void;
+  onLibrary: () => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -44,9 +53,16 @@ export function CommandPalette({
         {
           id: "open",
           label: "Open project",
-          detail: "Choose a Git repository",
+          detail: "Choose a project folder",
           icon: Folder,
           action: onOpenProject,
+        },
+        {
+          id: "library",
+          label: "Codex library",
+          detail: "Existing conversations and resources",
+          icon: Library,
+          action: onLibrary,
         },
         {
           id: "settings",
@@ -88,6 +104,7 @@ export function CommandPalette({
       onNewThread,
       onOpenProject,
       onSettings,
+      onLibrary,
       onProject,
       onThread,
     ],

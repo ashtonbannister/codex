@@ -49,3 +49,46 @@ be described as a live provider or native operating-system sandbox test.
 The initial interface does not imply completed autonomous agent teams, complete
 MCP administration, automatic routing, or semantic verification of engineering
 requirements.
+
+## v0.3 Codex library extension
+
+The existing sidebar gains one quiet `Codex library` destination, also available
+through command search. It opens inside the main workspace, not as a blocking
+modal. The established type, color, spacing, sidebar, and inspector tokens remain
+unchanged. The library uses a compact list/detail layout with Conversations,
+Resources, and Locations sections; the normal composer returns when a conversation
+is opened in Nova.
+
+The conversation list supports active/archived state, search, and opaque cursor
+pagination. History starts with recent visible messages; older pages are prepended
+in chronological order using the combined turn and item identity. Loading older
+preview pages does not silently enlarge the bounded imported snapshot. Source and
+truncation labels stay with the retained transcript, which is never displayed as a
+new agent run or new verification evidence.
+
+Codex Plan resumes native engine history, or an owned fork once one exists. An
+archived source is forked before continuing. Isolated Build uses a Nova worktree;
+non-Git folders remain Plan-only. Claude and local providers share the same Nova
+thread and its bounded visible context, not Codex hidden state. Native consent and
+provider execution remain main-process responsibilities.
+
+Resources are previewed as literal text and imported only into a selected project
+with the exact reviewed digest. Memories, memories v2, instructions, skills, and
+plans become reference notes—not installed instructions or executable skills.
+Credentials and raw configuration are excluded. An imported note retains its
+external source fingerprint; manual editing explicitly removes that link. Returning
+to a note's resource preview does not start the native conversation engine. If its
+source home differs from the configured library, the UI warns before offering
+current-library resources instead of silently substituting another source.
+
+Settings expose optional Codex home and worktree-storage locations through the
+native picker contract. Empty values preserve configured defaults. A worktree
+location change applies only to future worktrees; existing thread folders are not
+moved.
+
+New deterministic browser capture cases cover dark desktop conversation browsing,
+light desktop resource preview, compact 980px browsing, and an imported transcript
+with cross-provider Context. All screenshot data is explicitly synthetic. Local
+browser execution remains unavailable in this environment; CI artifacts, not a
+simulated local render, supply visual-review evidence. These cases do not validate
+live provider accounts or Windows-native sandbox behavior.

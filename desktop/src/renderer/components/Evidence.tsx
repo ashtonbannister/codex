@@ -163,12 +163,14 @@ export function MemoryCard({
   checking,
   onEdit,
   onArchive,
+  onCodexSource,
 }: {
   entry: MemoryEntry;
   context?: ContextMemory;
   checking: boolean;
   onEdit: () => void;
   onArchive: () => void;
+  onCodexSource?: () => void;
 }) {
   const [confirm, setConfirm] = useState(false);
   return (
@@ -177,7 +179,7 @@ export function MemoryCard({
         <span className="memory-kind">{entry.kind}</span>
         <div className="memory-card-actions">
           <button className="text-button" onClick={onEdit}>
-            Edit
+            {entry.codexSource ? "Edit as manual note" : "Edit"}
           </button>
           <button
             className="text-button"
@@ -200,7 +202,7 @@ export function MemoryCard({
           ? "Checking source…"
           : context
             ? freshnessLabels[context.freshness]
-            : entry.filePath
+            : entry.filePath || entry.codexSource
               ? "Source not checked"
               : "No file link"}
         {context && !checking && (
@@ -212,6 +214,23 @@ export function MemoryCard({
         )}
       </div>
       {entry.filePath && <code className="memory-path">{entry.filePath}</code>}
+      {entry.codexSource && (
+        <>
+          <code className="memory-path">{entry.codexSource.path}</code>
+          <p className="memory-reason">
+            Codex resource · {entry.codexSource.section}. The saved fingerprint
+            tracks the external resource, not a project file.
+          </p>
+          {onCodexSource && (
+            <button
+              className="text-button reconfirm-memory"
+              onClick={onCodexSource}
+            >
+              Preview source in Codex library
+            </button>
+          )}
+        </>
+      )}
       {context?.reason && <p className="memory-reason">{context.reason}</p>}
       <div className="memory-source">
         <FileCode2 size={12} />

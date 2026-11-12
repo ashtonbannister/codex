@@ -11,6 +11,17 @@ import type {
 } from "../shared/types";
 
 const bridge: WorkbenchAPI = {
+  inspectCodexInstallation: () => ipcRenderer.invoke("codex:installation"),
+  chooseStorageDirectory: (kind) => ipcRenderer.invoke("storage:choose", kind),
+  listCodexThreads: (query) => ipcRenderer.invoke("codex:threads", query),
+  readCodexHistory: (query) => ipcRenderer.invoke("codex:history", query),
+  importCodexThread: (request) =>
+    ipcRenderer.invoke("codex:import-thread", request),
+  listCodexResources: (query) => ipcRenderer.invoke("codex:resources", query),
+  previewCodexResource: (request) =>
+    ipcRenderer.invoke("codex:preview-resource", request),
+  importCodexMemory: (request) =>
+    ipcRenderer.invoke("codex:import-memory", request),
   getSnapshot: () => ipcRenderer.invoke("workspace:snapshot"),
   refreshProviderStatus: () =>
     ipcRenderer.invoke("workspace:refresh-providers"),

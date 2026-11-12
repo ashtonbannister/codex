@@ -60,7 +60,7 @@ The first adapter layer launches separately installed, unmodified provider CLIs 
 
 Local inference initially reuses **the Codex agent engine with a loopback Ollama provider**. The exact locally installed model is checked before a run; Nova must not automatically download a model or silently route it to a cloud service. It is not a new inference engine and does not make an unsuitable local model capable of frontier-level work.
 
-The long-term Codex adapter should use the app-server protocol for richer persistent sessions, interactive approvals, and lifecycle control. This is a planned migration, not a claim about the first CLI-based milestone.
+Version 0.3 adds the installed Codex app-server for native conversation listing, paginated visible history, resume/fork, and bounded turn lifecycle. It does not replace fresh Codex/Local exec workers or implement an interactive approval center: server-side tool/approval requests are denied. Native state remains owned by Codex; Claude and local models receive a bounded visible-history handoff, not a transplanted native session.
 
 ### Shared memory boundary
 
@@ -69,6 +69,16 @@ The initial shared-memory store is Nova-owned, local, and project-scoped. User-a
 This does **not** expose or migrate private model reasoning, implicitly import ChatGPT memory, or modify Codex's internal memory pipeline. It also does not extend the selected model's native context window.
 
 Later memory services should be accessible through a consistent local API/MCP interface so multiple workers can retrieve the same evidence without directly editing each other's private stores.
+
+### Existing installation compatibility (version 0.3)
+
+Use the installed engine's protocol for its conversations, not direct SQLite mutations or a speculative parser for every private database. Canonical folder discovery respects Windows Documents redirection and existing junctions. The user explicitly connects before launching the history server, and explicitly imports a selected thread or Markdown reference. Engine startup can run its own migrations even when Nova only requests history metadata; the UI must not call that an immutable read-only scan.
+
+Native Codex Plan initially resumes the original conversation at its original working directory. Isolated Build forks its native history into a Nova-owned worktree; archived originals are forked instead of automatically unarchived. Follow-ups use the persisted native fork and working directory. Existing external Codex worktrees are not silently relabeled as Nova-owned. Non-Git projectless folders remain Plan-only.
+
+Claude/local handoffs use the same Nova project, thread, managed worktree, selected references, and bounded visible messages. No credentials, hidden reasoning, native tool state, binary attachments, queues, or automations are silently copied. Import does not create fake successful Runs. New-worktree storage is configurable without moving existing worktrees or changing their ownership checks.
+
+See [the integration contract](docs/codex-compatibility.md) for resource allowlists, bounds, and fail-closed lifecycle recovery. Actual installed CLI versions and the user's live conversation store still require an observed Windows smoke test.
 
 ### Change ownership
 
@@ -199,9 +209,9 @@ Keep model/version, task revision, tool versions, hardware, and verification cri
 
 ## Immediate development sequence
 
-1. Validate the version 0.2 desktop, context, and checks implementation in both Linux and Windows CI; inspect rendered review evidence.
-2. Run Windows-native live-provider smoke tests with each intended CLI, starting with a disposable Git repository and Plan mode.
-3. Exercise context/source freshness, worktree reuse, checks, cancellation, persistence, and diff review before using important projects.
+1. Validate the version 0.3 installation/history integration alongside desktop, context, and checks in Linux and Windows CI; inspect rendered review evidence.
+2. Run Windows-native live-provider smoke tests with each intended CLI, starting with a disposable Git repository and Plan mode. Connect the user's actual Codex history only after native confirmation.
+3. Exercise native resume/fork, archived-source preservation, folder-only Plan, explicit Claude/local handoffs, source freshness, worktree relocation settings, checks, cancellation, and restart before using important projects.
 4. Establish repeatable project-specific verification profiles and a baseline task suite, including external dependency/version records.
 5. Expand shared-memory retrieval into incremental repository indexing and explicit context budgets.
 6. Add parallel delegation, routing, and controlled integration only after the preceding boundaries are measured and reliable.

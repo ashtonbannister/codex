@@ -8,6 +8,8 @@ import {
   Terminal,
 } from "lucide-react";
 import type { Run } from "../../shared/types";
+import type { CodexThreadLink } from "../../shared/compatibility";
+import { memo } from "react";
 import { MessageText } from "./MessageText";
 import {
   formatTime,
@@ -16,6 +18,91 @@ import {
   providerNames,
   statusLabel,
 } from "./primitives";
+
+export const ImportedHistory = memo(function ImportedHistory({
+  source,
+}: {
+  source: CodexThreadLink;
+}) {
+  return (
+    <section className="imported-history" aria-label="Imported visible history">
+      <header className="imported-history-heading">
+        <h2>Imported from Codex</h2>
+        <span>Visible transcript · not a new agent run</span>
+        <p>
+          {source.history.length} retained messages
+          {source.historyTruncated ? " · snapshot truncated" : ""}. Claude and
+          local models use a bounded subset of this visible history.
+        </p>
+        <details>
+          <summary>Source and import details</summary>
+          <dl>
+            <div>
+              <dt>Source folder</dt>
+              <dd>
+                <code>{source.sourceCwd}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Codex home</dt>
+              <dd>
+                <code>{source.home}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Source conversation</dt>
+              <dd>
+                <code>{source.sourceThreadId}</code>
+              </dd>
+            </div>
+          </dl>
+          <p>
+            Imported {formatTime(source.importedAt)}
+            {source.sourceArchived ? " from an archived source" : ""}. Hidden
+            reasoning and tool payloads are not included.
+          </p>
+          {source.warnings.map((warning, index) => (
+            <p key={index}>{warning}</p>
+          ))}
+        </details>
+      </header>
+      {source.history.map((message) =>
+        message.role === "user" ? (
+          <div
+            className="user-message"
+            key={JSON.stringify([message.turnId, message.id])}
+          >
+            <div className="message-overline">
+              <span>You · imported</span>
+            </div>
+            <p>{message.text}</p>
+          </div>
+        ) : (
+          <div
+            className="agent-message"
+            key={JSON.stringify([message.turnId, message.id])}
+          >
+            <div className="agent-heading">
+              <ProviderMark provider="codex" />
+              <strong>Codex</strong>
+              <span className="agent-model">Imported visible response</span>
+            </div>
+            <MessageText text={message.text} />
+          </div>
+        ),
+      )}
+      {!source.history.length && (
+        <p className="muted">
+          No visible text was retained. Native Codex history remains
+          engine-managed.
+        </p>
+      )}
+      <div className="imported-history-end">
+        End of retained history · continue below
+      </div>
+    </section>
+  );
+});
 
 export function RunCard({ run, onMemory }: { run: Run; onMemory: () => void }) {
   const messages = run.events.filter((event) => event.kind === "message");

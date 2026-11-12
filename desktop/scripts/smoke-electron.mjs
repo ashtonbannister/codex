@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { _electron as electron } from "playwright";
@@ -7,6 +14,13 @@ import { _electron as electron } from "playwright";
 // Native Electron validation, not the browser's synthetic bridge. No inference,
 // project selection, external command profile, or account sign-in is performed.
 const userData = await mkdtemp(path.join(os.tmpdir(), "nova-native-smoke-"));
+const codexFixture = path.join(userData, "synthetic Codex home");
+await mkdir(codexFixture);
+await writeFile(
+  path.join(codexFixture, "AGENTS.md"),
+  "Synthetic native-bridge reference.\n",
+);
+const codexHome = await realpath(codexFixture);
 const errors = [];
 let application;
 const launch = async () => {
@@ -50,13 +64,50 @@ try {
   assert.equal(snapshot.state.projects.length, 0);
   assert.equal(snapshot.state.runs.length, 0);
   assert.equal(snapshot.state.verifications.length, 0);
-  await page.evaluate(async () => {
+  await page.evaluate(async (home) => {
     const value = await window.workbench.getSnapshot();
     await window.workbench.updateSettings({
       ...value.state.settings,
       theme: "light",
+      codexHome: home,
     });
+  }, codexHome);
+  const installation = await page.evaluate(() =>
+    window.workbench.inspectCodexInstallation(),
+  );
+  assert.equal(installation.home, codexHome);
+  assert.equal(installation.exists, true);
+  const references = await page.evaluate(() =>
+    window.workbench.listCodexResources({ section: "instructions" }),
+  );
+  assert.deepEqual(
+    references.resources.map((entry) => entry.path),
+    ["AGENTS.md"],
+  );
+  const reference = await page.evaluate(() =>
+    window.workbench.previewCodexResource({
+      section: "instructions",
+      path: "AGENTS.md",
+    }),
+  );
+  assert.equal(reference.content, "Synthetic native-bridge reference.\n");
+  assert.match(reference.sha256, /^[a-f0-9]{64}$/);
+  const deniedReference = await page.evaluate(async () => {
+    try {
+      await window.workbench.previewCodexResource({
+        section: "instructions",
+        path: "../auth.json",
+      });
+      return false;
+    } catch {
+      return true;
+    }
   });
+  assert.equal(
+    deniedReference,
+    true,
+    "native reference bridge must reject private/traversal paths",
+  );
   await page.waitForFunction(
     () => document.documentElement.dataset.theme === "light",
   );
@@ -71,12 +122,14 @@ try {
     await readFile(path.join(userData, "workspace", "workspace.json"), "utf8"),
   );
   assert.equal(saved.settings.theme, "light");
+  assert.equal(saved.settings.codexHome, codexHome);
 
   const reopened = await launch();
   const restored = await reopened.evaluate(() =>
     window.workbench.getSnapshot(),
   );
   assert.equal(restored.state.settings.theme, "light");
+  assert.equal(restored.state.settings.codexHome, codexHome);
   const rejected = await reopened.evaluate(async () => {
     try {
       await window.workbench.updateThread({
@@ -91,7 +144,7 @@ try {
   assert.equal(rejected, true, "native bridge must reject invalid identifiers");
   assert.deepEqual(errors, [], "renderer must start without uncaught errors");
   console.log(
-    "Native Electron smoke passed: custom protocol, isolated preload, validated IPC, settings, and restart persistence.",
+    "Native Electron smoke passed: custom protocol, isolated preload, validated IPC, synthetic Codex inventory/reference preview, settings, and restart persistence. No native history server or model was started.",
   );
 } finally {
   if (application) await application.close();

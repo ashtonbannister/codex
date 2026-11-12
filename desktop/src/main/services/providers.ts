@@ -692,6 +692,7 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
+  options: { allowNonGit?: boolean } = {},
 ): string[] {
   if (provider === "claude") {
     return [
@@ -726,6 +727,11 @@ export function providerArguments(
     mode === "plan" ? "read-only" : "workspace-write",
     "--cd",
     cwd,
+    // This only relaxes exec's repository-presence check for explicit folder
+    // Plan tasks. Sandbox/approval restrictions remain unchanged.
+    ...(options.allowNonGit && mode === "plan"
+      ? ["--skip-git-repo-check"]
+      : []),
     "--ignore-user-config",
     "--config",
     'approval_policy="never"',

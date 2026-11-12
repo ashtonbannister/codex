@@ -8,6 +8,7 @@ import {
   Folder,
   FolderOpen,
   GitBranch,
+  Library,
   LoaderCircle,
   MessageSquare,
   MoreHorizontal,
@@ -28,6 +29,7 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { APP_VERSION, emptyWorkspace } from "../shared/types";
+import type { CodexMemorySource } from "../shared/compatibility";
 import type {
   ContextPreview,
   DiffSnapshot,
@@ -40,10 +42,11 @@ import type {
 } from "../shared/types";
 import { api, isPreview } from "./bridge";
 import { CommandPalette } from "./components/CommandPalette";
+import { CodexLibrary } from "./components/CodexLibrary";
 import { ChecksPanel, ContextPanel, MemoryCard } from "./components/Evidence";
 import { MemoryForm, RenameThreadForm, SettingsForm } from "./components/Forms";
 import { ThreadMenu } from "./components/ThreadMenu";
-import { RunCard } from "./components/Transcript";
+import { ImportedHistory, RunCard } from "./components/Transcript";
 import {
   EmptyPanel,
   errorText,
@@ -91,6 +94,10 @@ export function App() {
     platform: "",
   });
   const [loading, setLoading] = useState(true);
+  const [surface, setSurface] = useState<"workspace" | "library">("workspace");
+  const [libraryResource, setLibraryResource] = useState<
+    CodexMemorySource | undefined
+  >();
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [provider, setProvider] = useState<ProviderId>("codex");
@@ -133,6 +140,8 @@ export function App() {
     (item) => item.projectId === projectId && item.status === "active",
   );
   const activeProvider = providers.find((item) => item.id === provider);
+  const folderProject = project?.kind === "folder";
+  const hasTranscript = runs.length > 0 || !!thread?.codex;
   const configuredModel =
     model.trim() || (provider === "ollama" ? state.settings.localModel : "");
   const contextRequest = useMemo<RunRequest | null>(
@@ -195,9 +204,12 @@ export function App() {
     document.documentElement.dataset.theme = state.settings.theme;
   }, [state.settings.theme]);
   useEffect(() => {
+    if (folderProject) setMode("plan");
+  }, [folderProject]);
+  useEffect(() => {
     if (autoScroll && timeline.current)
       timeline.current.scrollTop = timeline.current.scrollHeight;
-  }, [runs, autoScroll]);
+  }, [runs, thread?.codex, autoScroll, surface]);
   useLayoutEffect(() => {
     if (composer.current) {
       composer.current.style.height = "auto";
@@ -220,6 +232,7 @@ export function App() {
     setContextError("");
     if (
       !contextRequest ||
+      surface !== "workspace" ||
       !layout.inspector ||
       (tab !== "context" && tab !== "memory")
     ) {
@@ -251,6 +264,7 @@ export function App() {
     historyVersion,
     tab,
     layout.inspector,
+    surface,
   ]);
   const refreshDiff = async (runId = latestRun?.id) => {
     const requestId = ++diffRequestId.current;
@@ -290,6 +304,7 @@ export function App() {
       const chosen = await api.chooseProject();
       if (chosen) {
         await refreshSnapshot();
+        setSurface("workspace");
         setProjectId(chosen.id);
         setThreadId(null);
         setDraft("");
@@ -300,6 +315,7 @@ export function App() {
     }
   };
   const selectProject = (id: string) => {
+    setSurface("workspace");
     setProjectId(id);
     setThreadId(
       state.threads
@@ -312,6 +328,7 @@ export function App() {
     setAutoScroll(true);
   };
   const selectThread = (next: Thread) => {
+    setSurface("workspace");
     setProjectId(next.projectId);
     setThreadId(next.id);
     setDraft("");
@@ -319,6 +336,7 @@ export function App() {
     setArchived(!!next.archivedAt);
   };
   const newThread = () => {
+    setSurface("workspace");
     setThreadId(null);
     setDraft("");
     setArchived(false);
@@ -331,6 +349,7 @@ export function App() {
     !busy &&
     !activeRun &&
     !thread?.archivedAt &&
+    !(folderProject && mode === "build") &&
     (!!activeProvider?.available || isPreview) &&
     (provider !== "ollama" || !!configuredModel);
   const submit = async () => {
@@ -374,7 +393,7 @@ export function App() {
 
   return (
     <div
-      className={`workbench ${layout.inspector ? "with-inspector" : ""} ${layout.navigation ? "with-navigation" : ""}`}
+      className={`workbench ${layout.inspector && surface === "workspace" ? "with-inspector" : ""} ${layout.navigation ? "with-navigation" : ""}`}
       style={layoutStyle}
     >
       <header className="titlebar">
@@ -430,6 +449,17 @@ export function App() {
                   <span>Search or jump to…</span>
                   <kbd>Ctrl K</kbd>
                 </button>
+                <button
+                  className={`library-nav-button ${surface === "library" ? "selected" : ""}`}
+                  aria-pressed={surface === "library"}
+                  onClick={() => {
+                    setLibraryResource(undefined);
+                    setSurface("library");
+                  }}
+                >
+                  <Library size={15} />
+                  <span>Codex library</span>
+                </button>
               </div>
               <div className="sidebar-section-title">
                 <select
@@ -446,7 +476,7 @@ export function App() {
                   className="icon-button"
                   onClick={() => void addProject()}
                   aria-label="Add project"
-                  title="Open a local Git repository"
+                  title="Open a local project folder"
                 >
                   <Plus size={16} />
                 </button>
@@ -459,7 +489,7 @@ export function App() {
                       className="text-button"
                       onClick={() => void addProject()}
                     >
-                      Open a repository
+                      Open a project
                     </button>
                   </div>
                 )}
@@ -478,7 +508,7 @@ export function App() {
                   return (
                     <div className="project-group" key={item.id}>
                       <button
-                        className={`project-button ${projectId === item.id ? "selected" : ""}`}
+                        className={`project-button ${projectId === item.id && surface === "workspace" ? "selected" : ""}`}
                         onClick={() => selectProject(item.id)}
                       >
                         <Folder size={15} />
@@ -493,7 +523,7 @@ export function App() {
                         <div className="thread-list">
                           {threads.map((entry) => (
                             <div
-                              className={`thread-row ${threadId === entry.id ? "selected" : ""}`}
+                              className={`thread-row ${threadId === entry.id && surface === "workspace" ? "selected" : ""}`}
                               key={entry.id}
                             >
                               <button
@@ -628,51 +658,67 @@ export function App() {
               )}
             </button>
             <div className="toolbar-breadcrumb">
-              <span>{project?.name ?? "Workspace"}</span>
+              <span>
+                {surface === "library"
+                  ? "Workspace"
+                  : (project?.name ?? "Workspace")}
+              </span>
               <ChevronRight size={12} />
-              <strong>{thread?.title ?? "New thread"}</strong>
+              <strong>
+                {surface === "library"
+                  ? "Codex library"
+                  : (thread?.title ?? "New thread")}
+              </strong>
             </div>
-            <div className="toolbar-actions">
-              {project && (
-                <span
-                  className="branch-label"
-                  title={thread?.branch ?? project.branch}
-                >
-                  <GitBranch size={12} />
-                  {thread?.branch ?? project.branch}
-                </span>
-              )}
-              {project && (
+            {surface === "workspace" && (
+              <div className="toolbar-actions">
+                {project && (
+                  <span
+                    className="branch-label"
+                    title={thread?.branch ?? project.branch}
+                  >
+                    {folderProject ? (
+                      <Folder size={12} />
+                    ) : (
+                      <GitBranch size={12} />
+                    )}
+                    {folderProject
+                      ? "Folder · Plan only"
+                      : (thread?.branch ?? project.branch)}
+                  </span>
+                )}
+                {project && (
+                  <button
+                    className="icon-button"
+                    aria-label="Open project folder"
+                    title="Open project folder"
+                    onClick={() =>
+                      void runAction(() => api.openProject(project.id))
+                    }
+                  >
+                    <FolderOpen size={16} />
+                  </button>
+                )}
                 <button
                   className="icon-button"
-                  aria-label="Open project folder"
-                  title="Open project folder"
+                  aria-label={
+                    layout.inspector ? "Hide inspector" : "Show inspector"
+                  }
                   onClick={() =>
-                    void runAction(() => api.openProject(project.id))
+                    setLayout((current) => ({
+                      ...current,
+                      inspector: !current.inspector,
+                    }))
                   }
                 >
-                  <FolderOpen size={16} />
+                  {layout.inspector ? (
+                    <PanelRightClose size={17} />
+                  ) : (
+                    <PanelRightOpen size={17} />
+                  )}
                 </button>
-              )}
-              <button
-                className="icon-button"
-                aria-label={
-                  layout.inspector ? "Hide inspector" : "Show inspector"
-                }
-                onClick={() =>
-                  setLayout((current) => ({
-                    ...current,
-                    inspector: !current.inspector,
-                  }))
-                }
-              >
-                {layout.inspector ? (
-                  <PanelRightClose size={17} />
-                ) : (
-                  <PanelRightOpen size={17} />
-                )}
-              </button>
-            </div>
+              </div>
+            )}
           </div>
           {error && (
             <div className="error-banner" role="alert">
@@ -687,275 +733,335 @@ export function App() {
               </button>
             </div>
           )}
-          {thread?.archivedAt && (
-            <div className="archived-banner">
-              <span>This conversation is archived.</span>
-              <button
-                className="text-button"
-                onClick={() =>
-                  void runAction(async () => {
-                    await api.updateThread({ id: thread.id, archived: false });
-                    setArchived(false);
-                  })
-                }
-              >
-                Restore to continue
-              </button>
-            </div>
-          )}
-          <div
-            className={`conversation-scroll ${runs.length ? "has-runs" : ""}`}
-            ref={timeline}
-            onScroll={() => {
-              const element = timeline.current;
-              if (element)
-                setAutoScroll(
-                  element.scrollHeight -
-                    element.scrollTop -
-                    element.clientHeight <
-                    80,
-                );
-            }}
-          >
-            {loading ? (
-              <div className="loading-state" role="status">
-                <div className="skeleton-line" />
-                <div className="skeleton-line short" />
-                <span>Opening workspace…</span>
-              </div>
-            ) : runs.length ? (
-              <div className="conversation-content">
-                {runs.map((run) => (
-                  <RunCard
-                    key={run.id}
-                    run={run}
-                    onMemory={() => showPanel("memory")}
-                  />
-                ))}
-              </div>
-            ) : (
-              <section className="welcome">
-                <h1>
-                  {project ? "What are we working on?" : "Start with a project"}
-                </h1>
-                <p className="welcome-description">
-                  {project
-                    ? "Describe a change, ask a question, or plan the next step."
-                    : "Open a local Git repository to work with Codex, Claude, or a local model."}
-                </p>
-                {project ? (
-                  <div className="welcome-project">
-                    <Folder size={14} />
-                    <span>{project.name}</span>
-                    <span className="welcome-project-path">{project.path}</span>
-                  </div>
-                ) : (
-                  <button
-                    className="primary-button open-project-cta"
-                    onClick={() => void addProject()}
-                  >
-                    <FolderOpen size={16} />
-                    {isPreview ? "Open example project" : "Open a project"}
-                  </button>
-                )}
-                <div className="starter-list">
-                  {starters.map((starter) => (
-                    <button
-                      key={starter.title}
-                      onClick={() => {
-                        setDraft(starter.prompt);
-                        setMode("plan");
-                        composer.current?.focus();
-                      }}
-                    >
-                      <span>{starter.title}</span>
-                      <ChevronRight size={14} />
-                    </button>
-                  ))}
-                </div>
-                <p className="welcome-safety">
-                  Plan first. Build in a separate worktree. Review the evidence
-                  before integrating.
-                </p>
-              </section>
-            )}
-          </div>
-          {!autoScroll && runs.length > 0 && (
-            <button
-              className="scroll-bottom"
-              aria-label="Scroll to latest message"
-              onClick={() => {
-                setAutoScroll(true);
-                timeline.current?.scrollTo({
-                  top: timeline.current.scrollHeight,
-                  behavior: "smooth",
-                });
+          {surface === "library" ? (
+            <CodexLibrary
+              projects={state.projects}
+              selectedProjectId={projectId}
+              codexHome={state.settings.codexHome}
+              initialResource={libraryResource}
+              onOpenThread={async (next) => {
+                await refreshSnapshot();
+                selectThread(next);
+                setProvider("codex");
+                setModel("");
+                setMode("plan");
               }}
-            >
-              <ArrowDown size={15} />
-            </button>
-          )}
-          <form
-            className="composer-area"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submit();
-            }}
-          >
-            {activeRun && (
-              <div className="active-run-line" role="status">
-                <LoaderCircle size={12} className="spin" />
-                <span>
-                  {providerNames[activeRun.provider]} is working
-                  {activeRun.mode === "build"
-                    ? " in a separate worktree"
-                    : " in Plan mode"}
-                </span>
-              </div>
-            )}
-            <div className="composer">
-              <textarea
-                ref={composer}
-                aria-label="Message your coding agent"
-                placeholder={
-                  thread?.archivedAt
-                    ? "Restore this conversation to continue…"
-                    : project
-                      ? "Ask about this project or describe a change…"
-                      : "Open a project to begin…"
-                }
-                disabled={!!thread?.archivedAt}
-                rows={2}
-                value={draft}
-                maxLength={32000}
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (
-                    (event.ctrlKey || event.metaKey) &&
-                    event.key === "Enter"
-                  ) {
-                    event.preventDefault();
-                    void submit();
-                  }
-                }}
-              />
-              <div className="composer-controls">
-                <div className="composer-provider">
-                  <ProviderMark provider={provider} small />
-                  <select
-                    aria-label="Choose agent"
-                    value={provider}
-                    onChange={(event) =>
-                      changeProvider(event.target.value as ProviderId)
+              onMemory={(id) => {
+                selectProject(id);
+                showPanel("memory");
+              }}
+              onSettings={() => setDialog("settings")}
+              onBack={() => setSurface("workspace")}
+            />
+          ) : (
+            <>
+              {folderProject && (
+                <div className="folder-project-note">
+                  Folder project · Plan only. Isolated Build requires a Git
+                  repository; Nova will not initialize or modify this folder
+                  automatically.
+                </div>
+              )}
+              {thread?.archivedAt && (
+                <div className="archived-banner">
+                  <span>This conversation is archived.</span>
+                  <button
+                    className="text-button"
+                    onClick={() =>
+                      void runAction(async () => {
+                        await api.updateThread({
+                          id: thread.id,
+                          archived: false,
+                        });
+                        setArchived(false);
+                      })
                     }
                   >
-                    <option value="codex">Codex</option>
-                    <option value="claude">Claude Code</option>
-                    <option value="ollama">Local · Ollama</option>
-                  </select>
+                    Restore to continue
+                  </button>
                 </div>
-                <input
-                  className="model-input"
-                  aria-label="Model override"
-                  title="Optional model name; leave empty to use the provider default"
-                  placeholder={
-                    provider === "ollama"
-                      ? state.settings.localModel || "Local model name"
-                      : "Provider default"
-                  }
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                />
-                <div className="composer-right">
-                  <div
-                    className="mode-switch"
-                    role="group"
-                    aria-label="Run mode"
-                  >
-                    <button
-                      type="button"
-                      className={mode === "plan" ? "active" : ""}
-                      aria-pressed={mode === "plan"}
-                      onClick={() => setMode("plan")}
-                    >
-                      Plan
-                    </button>
-                    <button
-                      type="button"
-                      className={mode === "build" ? "active" : ""}
-                      aria-pressed={mode === "build"}
-                      onClick={() => setMode("build")}
-                    >
-                      Build
-                    </button>
+              )}
+              <div
+                className={`conversation-scroll ${hasTranscript ? "has-runs" : ""}`}
+                ref={timeline}
+                onScroll={() => {
+                  const element = timeline.current;
+                  if (element)
+                    setAutoScroll(
+                      element.scrollHeight -
+                        element.scrollTop -
+                        element.clientHeight <
+                        80,
+                    );
+                }}
+              >
+                {loading ? (
+                  <div className="loading-state" role="status">
+                    <div className="skeleton-line" />
+                    <div className="skeleton-line short" />
+                    <span>Opening workspace…</span>
                   </div>
-                  {activeRun ? (
-                    <button
-                      type="button"
-                      className="send-button stop-button"
-                      aria-label="Stop current run"
-                      onClick={() =>
-                        void runAction(() => api.cancelRun(activeRun.id))
-                      }
-                    >
-                      <Square size={14} fill="currentColor" />
-                    </button>
-                  ) : (
-                    <button
-                      type="submit"
-                      className="send-button"
-                      aria-label="Send message"
-                      title="Send · Ctrl+Enter"
-                      disabled={!canSend}
-                    >
-                      {busy ? (
-                        <LoaderCircle size={17} className="spin" />
-                      ) : (
-                        <ArrowUp size={17} />
-                      )}
-                    </button>
-                  )}
-                </div>
+                ) : hasTranscript ? (
+                  <div className="conversation-content">
+                    {thread?.codex && <ImportedHistory source={thread.codex} />}
+                    {runs.map((run) => (
+                      <RunCard
+                        key={run.id}
+                        run={run}
+                        onMemory={() => showPanel("memory")}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <section className="welcome">
+                    <h1>
+                      {project
+                        ? "What are we working on?"
+                        : "Start with a project"}
+                    </h1>
+                    <p className="welcome-description">
+                      {project
+                        ? "Describe a change, ask a question, or plan the next step."
+                        : "Open a local project to work with Codex, Claude, or a local model."}
+                    </p>
+                    {project ? (
+                      <div className="welcome-project">
+                        <Folder size={14} />
+                        <span>{project.name}</span>
+                        <span className="welcome-project-path">
+                          {project.path}
+                        </span>
+                      </div>
+                    ) : (
+                      <button
+                        className="primary-button open-project-cta"
+                        onClick={() => void addProject()}
+                      >
+                        <FolderOpen size={16} />
+                        {isPreview ? "Open example project" : "Open a project"}
+                      </button>
+                    )}
+                    <div className="starter-list">
+                      {starters.map((starter) => (
+                        <button
+                          key={starter.title}
+                          onClick={() => {
+                            setDraft(starter.prompt);
+                            setMode("plan");
+                            composer.current?.focus();
+                          }}
+                        >
+                          <span>{starter.title}</span>
+                          <ChevronRight size={14} />
+                        </button>
+                      ))}
+                    </div>
+                    <p className="welcome-safety">
+                      Plan first. Build in a separate worktree. Review the
+                      evidence before integrating.
+                    </p>
+                  </section>
+                )}
               </div>
-            </div>
-            <div className="composer-caption">
-              <span>
-                {!project ? (
-                  "Choose a local Git repository."
-                ) : provider === "ollama" && !configuredModel ? (
-                  "Enter an installed local model name."
-                ) : !activeProvider?.available ? (
+              {!autoScroll && hasTranscript && (
+                <button
+                  className="scroll-bottom"
+                  aria-label="Scroll to latest message"
+                  onClick={() => {
+                    setAutoScroll(true);
+                    timeline.current?.scrollTo({
+                      top: timeline.current.scrollHeight,
+                      behavior: "smooth",
+                    });
+                  }}
+                >
+                  <ArrowDown size={15} />
+                </button>
+              )}
+              <form
+                className="composer-area"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submit();
+                }}
+              >
+                {activeRun && (
+                  <div className="active-run-line" role="status">
+                    <LoaderCircle size={12} className="spin" />
+                    <span>
+                      {providerNames[activeRun.provider]} is working
+                      {activeRun.mode === "build"
+                        ? " in a separate worktree"
+                        : " in Plan mode"}
+                    </span>
+                  </div>
+                )}
+                {thread?.codex && (
+                  <p className="continuation-note">
+                    {provider !== "codex"
+                      ? "Shared handoff · bounded visible history and project memory. No Codex hidden state is transferred."
+                      : mode === "build"
+                        ? "Native Codex · use this thread’s isolated worktree, forking native history if needed; the source conversation stays separate."
+                        : thread.codex.forkedThreadId
+                          ? "Native Codex · continue Nova’s existing fork."
+                          : thread.codex.sourceArchived
+                            ? "Native Codex · fork the archived source to continue; leave the source archived."
+                            : "Native Codex · resume the original conversation with its engine-managed history."}
+                  </p>
+                )}
+                <div className="composer">
+                  <textarea
+                    ref={composer}
+                    aria-label="Message your coding agent"
+                    placeholder={
+                      thread?.archivedAt
+                        ? "Restore this conversation to continue…"
+                        : project
+                          ? "Ask about this project or describe a change…"
+                          : "Open a project to begin…"
+                    }
+                    disabled={!!thread?.archivedAt}
+                    rows={2}
+                    value={draft}
+                    maxLength={32000}
+                    onChange={(event) => setDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (
+                        (event.ctrlKey || event.metaKey) &&
+                        event.key === "Enter"
+                      ) {
+                        event.preventDefault();
+                        void submit();
+                      }
+                    }}
+                  />
+                  <div className="composer-controls">
+                    <div className="composer-provider">
+                      <ProviderMark provider={provider} small />
+                      <select
+                        aria-label="Choose agent"
+                        value={provider}
+                        onChange={(event) =>
+                          changeProvider(event.target.value as ProviderId)
+                        }
+                      >
+                        <option value="codex">Codex</option>
+                        <option value="claude">Claude Code</option>
+                        <option value="ollama">Local · Ollama</option>
+                      </select>
+                    </div>
+                    <input
+                      className="model-input"
+                      aria-label="Model override"
+                      title="Optional model name; leave empty to use the provider default"
+                      placeholder={
+                        provider === "ollama"
+                          ? state.settings.localModel || "Local model name"
+                          : "Provider default"
+                      }
+                      value={model}
+                      onChange={(event) => setModel(event.target.value)}
+                    />
+                    <div className="composer-right">
+                      <div
+                        className="mode-switch"
+                        role="group"
+                        aria-label="Run mode"
+                      >
+                        <button
+                          type="button"
+                          className={mode === "plan" ? "active" : ""}
+                          aria-pressed={mode === "plan"}
+                          onClick={() => setMode("plan")}
+                        >
+                          Plan
+                        </button>
+                        <button
+                          type="button"
+                          className={mode === "build" ? "active" : ""}
+                          aria-pressed={mode === "build"}
+                          disabled={folderProject}
+                          title={
+                            folderProject
+                              ? "Build requires a Git repository for isolated worktrees"
+                              : "Build in a separate worktree"
+                          }
+                          onClick={() => setMode("build")}
+                        >
+                          Build
+                        </button>
+                      </div>
+                      {activeRun ? (
+                        <button
+                          type="button"
+                          className="send-button stop-button"
+                          aria-label="Stop current run"
+                          onClick={() =>
+                            void runAction(() => api.cancelRun(activeRun.id))
+                          }
+                        >
+                          <Square size={14} fill="currentColor" />
+                        </button>
+                      ) : (
+                        <button
+                          type="submit"
+                          className="send-button"
+                          aria-label="Send message"
+                          title="Send · Ctrl+Enter"
+                          disabled={!canSend}
+                        >
+                          {busy ? (
+                            <LoaderCircle size={17} className="spin" />
+                          ) : (
+                            <ArrowUp size={17} />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="composer-caption">
+                  <span>
+                    {!project ? (
+                      "Choose a local project folder."
+                    ) : folderProject ? (
+                      "Folder project · Plan only; Build requires Git."
+                    ) : provider === "ollama" && !configuredModel ? (
+                      "Enter an installed local model name."
+                    ) : !activeProvider?.available ? (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => setDialog("settings")}
+                      >
+                        {isPreview
+                          ? "Preview only — agents are not connected."
+                          : `${providerNames[provider]} not detected. Open settings.`}
+                      </button>
+                    ) : mode === "plan" ? (
+                      "Plan · no source edits requested"
+                    ) : (
+                      "Build · separate worktree, explicit confirmation"
+                    )}
+                  </span>
                   <button
                     type="button"
-                    className="text-button"
-                    onClick={() => setDialog("settings")}
+                    className="text-button context-trigger"
+                    disabled={!project}
+                    onClick={() => showPanel("context")}
                   >
-                    {isPreview
-                      ? "Preview only — agents are not connected."
-                      : `${providerNames[provider]} not detected. Open settings.`}
+                    Preview context
                   </button>
-                ) : mode === "plan" ? (
-                  "Plan · no source edits requested"
-                ) : (
-                  "Build · separate worktree, explicit confirmation"
-                )}
-              </span>
-              <button
-                type="button"
-                className="text-button context-trigger"
-                disabled={!project}
-                onClick={() => showPanel("context")}
-              >
-                Preview context
-              </button>
-              <span className="keyboard-hint">
-                <kbd>Ctrl ↵</kbd>
-              </span>
-            </div>
-          </form>
+                  <span className="keyboard-hint">
+                    <kbd>Ctrl ↵</kbd>
+                  </span>
+                </div>
+              </form>
+            </>
+          )}
         </main>
 
-        {layout.inspector && (
+        {layout.inspector && surface === "workspace" && (
           <>
             <div className="inspector-resize">
               <ResizeHandle
@@ -1183,6 +1289,10 @@ export function App() {
                             )}
                             checking={contextLoading}
                             onEdit={() => editMemory(entry)}
+                            onCodexSource={() => {
+                              setLibraryResource(entry.codexSource);
+                              setSurface("library");
+                            }}
                             onArchive={() =>
                               void runAction(() => api.archiveMemory(entry.id))
                             }
@@ -1314,6 +1424,10 @@ export function App() {
           onThread={selectThread}
           onNewThread={newThread}
           onOpenProject={() => void addProject()}
+          onLibrary={() => {
+            setLibraryResource(undefined);
+            setSurface("library");
+          }}
           onSettings={() => setDialog("settings")}
           onClose={() => setDialog(null)}
         />

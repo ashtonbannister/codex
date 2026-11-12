@@ -3,6 +3,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MessageText } from "./components/MessageText";
 import { createPreviewAPI } from "./preview";
+import { ImportedHistory } from "./components/Transcript";
 
 test("browser preview never advertises a runtime or executes a model/check", async () => {
   const api = createPreviewAPI(false);
@@ -129,4 +130,122 @@ test("Markdown formatting is safe text, with headings/lists and literal HTML/cod
   assert.match(html, /<ol/);
   assert.doesNotMatch(html, /<script|<img/);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test("synthetic Codex library pages recent history and exposes only permitted resource sections", async () => {
+  const api = createPreviewAPI(false);
+  const first = await api.listCodexThreads({ archived: false });
+  assert.equal(first.threads.length, 2);
+  assert.ok(first.nextCursor);
+  const next = await api.listCodexThreads({
+    archived: false,
+    cursor: first.nextCursor,
+  });
+  assert.equal(next.threads.length, 1);
+  assert.match(next.threads[0].title, /notes/);
+  const history = await api.readCodexHistory({ threadId: first.threads[0].id });
+  const older = await api.readCodexHistory({
+    threadId: first.threads[0].id,
+    cursor: history.nextCursor,
+  });
+  assert.equal(history.messages[0].turnId, "synthetic-turn-2");
+  assert.equal(older.messages[0].turnId, "synthetic-turn-1");
+  const inventory = await api.inspectCodexInstallation();
+  assert.match(inventory.home, /Synthetic/);
+  assert.equal(
+    inventory.locations.find((item) => item.id === "credentials")?.access,
+    "excluded",
+  );
+  await assert.rejects(
+    api.previewCodexResource({ section: "instructions", path: "auth.json" }),
+    /not available/,
+  );
+});
+
+test("synthetic conversation import retains recent visible history without a model run", async () => {
+  const api = createPreviewAPI(false);
+  const thread = await api.importCodexThread({ threadId: "sample-codex-city" });
+  assert.equal(thread.codex?.history.length, 2);
+  assert.ok(thread.codex?.historyTruncated);
+  const same = await api.importCodexThread({ threadId: "sample-codex-city" });
+  assert.equal(same.id, thread.id);
+  const context = await api.previewContext({
+    projectId: thread.projectId,
+    threadId: thread.id,
+    provider: "claude",
+    mode: "plan",
+    prompt: "Continue",
+  });
+  assert.match(context.prompt, /bounded|testable city block/);
+  assert.equal((await api.getSnapshot()).state.runs.length, 0);
+  const folderThread = await api.importCodexThread({
+    threadId: "sample-codex-folder",
+  });
+  const folder = (await api.getSnapshot()).state.projects.find(
+    (item) => item.id === folderThread.projectId,
+  );
+  assert.equal(folder?.kind, "folder");
+});
+
+test("preview resource imports require the preview digest and manual edits remove external provenance", async () => {
+  const api = createPreviewAPI(true);
+  const resource = await api.previewCodexResource({
+    section: "instructions",
+    path: "AGENTS.md",
+  });
+  await assert.rejects(
+    api.importCodexMemory({
+      projectId: "preview-project",
+      section: resource.section,
+      path: resource.path,
+      expectedSha256: "different",
+    }),
+    /changed/,
+  );
+  const entry = await api.importCodexMemory({
+    projectId: "preview-project",
+    section: resource.section,
+    path: resource.path,
+    expectedSha256: resource.sha256,
+  });
+  assert.equal(entry.codexSource?.sha256, resource.sha256);
+  assert.equal(entry.filePath, undefined);
+  const manual = await api.saveMemory({
+    id: entry.id,
+    projectId: entry.projectId,
+    title: entry.title,
+    content: "User revised note",
+    kind: "note",
+    source: "User reviewed",
+  });
+  assert.equal(manual.codexSource, undefined);
+  assert.equal((await api.getSnapshot()).state.runs.length, 1);
+});
+
+test("imported history is visibly bounded and escapes literal model HTML", () => {
+  const html = renderToStaticMarkup(
+    <ImportedHistory
+      source={{
+        home: "synthetic",
+        sourceThreadId: "thread",
+        sourceCwd: "project",
+        sourceArchived: false,
+        importedAt: "2026-11-12T00:00:00Z",
+        historyTruncated: true,
+        warnings: ["Synthetic test"],
+        history: [
+          {
+            id: "message",
+            turnId: "turn",
+            role: "assistant",
+            text: "<script>window.injected=true</script>",
+          },
+        ],
+      }}
+    />,
+  );
+  assert.match(html, /snapshot truncated/);
+  assert.match(html, /not a new agent run/);
+  assert.doesNotMatch(html, /<script/);
+  assert.match(html, /&lt;script&gt;/);
 });

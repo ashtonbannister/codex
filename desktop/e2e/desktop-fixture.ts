@@ -1,4 +1,12 @@
 import type { Page } from "@playwright/test";
+import type {
+  CodexHistoryQuery,
+  CodexImportRequest,
+  CodexMemoryImportRequest,
+  CodexResourceRequest,
+  CodexThreadQuery,
+  CodexThreadSummary,
+} from "../src/shared/compatibility";
 import { APP_VERSION, emptyWorkspace } from "../src/shared/types";
 import type {
   ContextMemory,
@@ -22,11 +30,19 @@ export interface FixtureCalls {
   threadUpdates: ThreadUpdate[];
   checks: VerificationRequest[];
   checkCancellations: string[];
+  libraryQueries: CodexThreadQuery[];
+  historyQueries: CodexHistoryQuery[];
+  imports: CodexImportRequest[];
+  resourceImports: CodexMemoryImportRequest[];
+  resourcePreviews: CodexResourceRequest[];
+  directoryPicks: string[];
 }
 export interface FixtureControls {
   setRevision: (fingerprint: string) => void;
   appendCheckOutput: (id: string, text: string) => void;
   finishCheck: (id: string, status: "passed" | "failed") => void;
+  setResourceDigest: (digest: string) => void;
+  setLibraryFailure: (message: string) => void;
 }
 
 /** Renderer-only contract fixture. It cannot invoke Node, Electron, a CLI, or a model. */
@@ -39,6 +55,7 @@ export async function installFakeDesktopBridge(
     seed?: boolean;
     planOnly?: boolean;
     extraThreads?: number;
+    libraryFailure?: string;
   } = {},
 ) {
   const initial = emptyWorkspace();
@@ -181,9 +198,78 @@ export async function installFakeDesktopBridge(
         threadUpdates: [],
         checks: [],
         checkCancellations: [],
+        libraryQueries: [],
+        historyQueries: [],
+        imports: [],
+        resourceImports: [],
+        resourcePreviews: [],
+        directoryPicks: [],
       };
       let available = config.available !== false;
       let fingerprint = "fixture-current";
+      let resourceDigest = "fixture-resource-v1";
+      let libraryFailure = config.libraryFailure ?? "";
+      const codexHome = "C:\\Fixtures\\Codex";
+      const libraryThreads: CodexThreadSummary[] = [
+        {
+          id: "fixture-codex-recent",
+          title: "Existing Codex conversation",
+          cwd: "D:\\Fixtures\\repository",
+          modelProvider: "openai",
+          source: "Synthetic Codex CLI",
+          status: "idle",
+          archived: false,
+          createdAt: "2026-11-11T00:00:00Z",
+          updatedAt: "2026-11-12T00:00:00Z",
+        },
+        {
+          id: "fixture-codex-second",
+          title: "Second Codex conversation",
+          cwd: "D:\\Fixtures\\repository",
+          modelProvider: "openai",
+          source: "Synthetic Codex desktop",
+          status: "idle",
+          archived: false,
+          createdAt: "2026-11-11T00:00:00Z",
+          updatedAt: "2026-11-12T00:00:00Z",
+        },
+        {
+          id: "fixture-codex-folder",
+          title: "Folder notes conversation",
+          cwd: "D:\\Fixtures\\notes",
+          modelProvider: "openai",
+          source: "Synthetic Codex CLI",
+          status: "idle",
+          archived: false,
+          createdAt: "2026-11-11T00:00:00Z",
+          updatedAt: "2026-11-12T00:00:00Z",
+        },
+        {
+          id: "fixture-codex-archived",
+          title: "Archived Codex conversation",
+          cwd: "D:\\Fixtures\\repository",
+          modelProvider: "openai",
+          source: "Synthetic Codex archive",
+          status: "idle",
+          archived: true,
+          createdAt: "2026-11-11T00:00:00Z",
+          updatedAt: "2026-11-12T00:00:00Z",
+        },
+      ];
+      const latestMessages = [
+        {
+          id: "codex-recent-user",
+          turnId: "turn-recent",
+          role: "user" as const,
+          text: "Recent retained question from Codex.",
+        },
+        {
+          id: "codex-recent-assistant",
+          turnId: "turn-recent",
+          role: "assistant" as const,
+          text: "## Recent retained response\n\nThis is visible fixture history.\n\n<script>window.libraryInjected=true</script>",
+        },
+      ];
       const revision = () => ({
         head: "fixture-head",
         fingerprint,
@@ -208,6 +294,192 @@ export async function installFakeDesktopBridge(
         platform: "mock-desktop",
       });
       const bridge: WorkbenchAPI = {
+        async inspectCodexInstallation() {
+          return {
+            home: state.settings.codexHome || codexHome,
+            exists: true,
+            warnings: ["Fixture inventory only; no PC files were read."],
+            locations: [
+              {
+                id: "instructions",
+                name: "Instructions",
+                path: `${codexHome}\\AGENTS.md`,
+                exists: true,
+                access: "content",
+                detail: "Preview selected resources before import.",
+              },
+              {
+                id: "sessions",
+                name: "Conversations",
+                path: `${codexHome}\\sessions`,
+                exists: true,
+                access: "engine-managed",
+                detail:
+                  "Normal installed Codex engine startup can manage its state; no model call is made for reads.",
+              },
+              {
+                id: "auth",
+                name: "Credentials",
+                path: `${codexHome}\\auth.json`,
+                exists: true,
+                access: "excluded",
+                detail: "Never read by this library.",
+              },
+            ],
+          };
+        },
+        async chooseStorageDirectory(kind) {
+          calls.directoryPicks.push(kind);
+          return kind === "codex-home"
+            ? "E:\\Chosen\\Codex"
+            : "E:\\Chosen\\Worktrees";
+        },
+        async listCodexThreads(query) {
+          calls.libraryQueries.push(structuredClone(query));
+          if (libraryFailure) throw new Error(libraryFailure);
+          const found = libraryThreads.filter(
+            (thread) =>
+              thread.archived === !!query.archived &&
+              thread.title
+                .toLowerCase()
+                .includes((query.search ?? "").toLowerCase()),
+          );
+          const offset = query.cursor ? 2 : 0;
+          return {
+            threads: structuredClone(found.slice(offset, offset + 2)),
+            nextCursor:
+              found.length > offset + 2
+                ? "fixture-next-conversations"
+                : undefined,
+            warnings: [],
+          };
+        },
+        async readCodexHistory(query) {
+          calls.historyQueries.push(structuredClone(query));
+          const thread = libraryThreads.find(
+            (item) => item.id === query.threadId,
+          );
+          if (!thread) throw new Error("Fixture Codex conversation missing");
+          return {
+            thread: structuredClone(thread),
+            messages: query.cursor
+              ? [
+                  {
+                    id: "codex-older-user",
+                    turnId: "turn-older",
+                    role: "user",
+                    text: "Older question before the retained snapshot.",
+                  },
+                  {
+                    id: "codex-recent-assistant",
+                    turnId: "turn-older",
+                    role: "assistant",
+                    text: "Older visible answer in the preview.",
+                  },
+                ]
+              : structuredClone(latestMessages),
+            nextCursor: query.cursor ? undefined : "fixture-older-history",
+            truncated: false,
+            warnings: [],
+          };
+        },
+        async importCodexThread(request) {
+          calls.imports.push(structuredClone(request));
+          const source = libraryThreads.find(
+            (item) => item.id === request.threadId,
+          );
+          if (!source) throw new Error("Fixture Codex conversation missing");
+          const existing = state.threads.find(
+            (item) => item.codex?.sourceThreadId === source.id,
+          );
+          if (existing) return structuredClone(existing);
+          const folder = source.id === "fixture-codex-folder";
+          const projectId = folder ? "fixture-folder-project" : "test-project";
+          if (folder && !state.projects.some((item) => item.id === projectId))
+            state.projects.push({
+              id: projectId,
+              name: "Fixture notes folder",
+              path: source.cwd,
+              branch: "",
+              kind: "folder",
+              createdAt: "2026-11-12T00:00:00Z",
+            });
+          const thread = {
+            id: `imported-${source.id}`,
+            projectId,
+            title: source.title,
+            createdAt: "2026-11-12T00:00:00Z",
+            updatedAt: "2026-11-12T00:00:00Z",
+            codex: {
+              home: state.settings.codexHome || codexHome,
+              sourceThreadId: source.id,
+              sourceCwd: source.cwd,
+              sourceArchived: source.archived,
+              importedAt: "2026-11-12T00:00:00Z",
+              history: structuredClone(latestMessages),
+              historyTruncated: true,
+              warnings: [
+                "Fixture snapshot contains recent visible messages only.",
+              ],
+            },
+          };
+          state.threads.push(thread);
+          publish();
+          return structuredClone(thread);
+        },
+        async listCodexResources(query) {
+          return {
+            resources: [
+              {
+                section: query.section,
+                path: `${query.section}/guide.md`,
+                title: `Fixture ${query.section} reference`,
+                bytes: 96,
+              },
+            ],
+            truncated: false,
+            warnings: [],
+          };
+        },
+        async previewCodexResource(request) {
+          calls.resourcePreviews.push(structuredClone(request));
+          return {
+            ...request,
+            title: `Fixture ${request.section} reference`,
+            bytes: 96,
+            home: state.settings.codexHome || codexHome,
+            sha256: resourceDigest,
+            content:
+              "# Fixture reference\n\nKeep checks reproducible.\n<script>window.libraryInjected=true</script>",
+          };
+        },
+        async importCodexMemory(request) {
+          calls.resourceImports.push(structuredClone(request));
+          if (request.expectedSha256 !== resourceDigest)
+            throw new Error(
+              "Resource changed since preview. Preview again before importing.",
+            );
+          const entry = {
+            id: `fixture-imported-memory-${calls.resourceImports.length}`,
+            projectId: request.projectId,
+            title: `Fixture ${request.section} reference`,
+            content: "Keep checks reproducible.",
+            kind: "note" as const,
+            source: `Codex resource: ${request.path}`,
+            status: "active" as const,
+            createdAt: "2026-11-12T00:00:00Z",
+            updatedAt: "2026-11-12T00:00:00Z",
+            codexSource: {
+              home: state.settings.codexHome || codexHome,
+              section: request.section,
+              path: request.path,
+              sha256: resourceDigest,
+            },
+          };
+          state.memories.push(entry);
+          publish();
+          return structuredClone(entry);
+        },
         async getSnapshot() {
           return snapshot();
         },
@@ -240,11 +512,13 @@ export async function installFakeDesktopBridge(
               entry.status === "active",
           );
           const memories: ContextMemory[] = entries.map((entry) => {
-            const freshness = !entry.filePath
-              ? "unlinked"
-              : entry.fileSha256 === "current"
-                ? "current"
-                : "changed";
+            const freshness = entry.codexSource
+              ? "current"
+              : !entry.filePath
+                ? "unlinked"
+                : entry.fileSha256 === "current"
+                  ? "current"
+                  : "changed";
             return {
               id: entry.id,
               title: entry.title,
@@ -267,12 +541,18 @@ export async function installFakeDesktopBridge(
           const history = state.runs.filter(
             (run) => run.threadId === request.threadId,
           );
+          const imported =
+            state.threads.find((thread) => thread.id === request.threadId)
+              ?.codex?.history ?? [];
           const prompt = [
             "FIXTURE EXACT REQUEST",
             ...entries
               .filter((entry) => includedMemoryIds.includes(entry.id))
               .map((entry) => `${entry.title}: ${entry.content}`),
             ...history.map((run) => `History: ${run.prompt}`),
+            ...imported.map(
+              (message) => `Imported ${message.role}: ${message.text}`,
+            ),
             `Task: ${request.prompt}`,
           ].join("\n");
           return {
@@ -460,6 +740,12 @@ export async function installFakeDesktopBridge(
         },
       };
       const controls: FixtureControls = {
+        setResourceDigest(value) {
+          resourceDigest = value;
+        },
+        setLibraryFailure(value) {
+          libraryFailure = value;
+        },
         setRevision(value) {
           fingerprint = value;
           publish();

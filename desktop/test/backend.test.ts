@@ -278,6 +278,29 @@ test("provider argument lists never use bypasses or shell interpolation", () => 
   assert.ok(claude.includes("--restricted"));
   assert.ok(claude.includes("Read,Grep,Glob,Edit,Write"));
   assert.ok(!claude.some((arg) => /Bash|skip-permissions/.test(arg)));
+  for (const provider of ["codex", "ollama"] as const) {
+    const folderPlan = providerArguments(provider, cwd, "plan", "", {
+      allowNonGit: true,
+    });
+    assert.ok(folderPlan.includes("--skip-git-repo-check"));
+    assert.equal(folderPlan[folderPlan.indexOf("--sandbox") + 1], "read-only");
+    assert.ok(folderPlan.includes('approval_policy="never"'));
+    assert.ok(
+      !providerArguments(provider, cwd, "plan", "").includes(
+        "--skip-git-repo-check",
+      ),
+    );
+    assert.ok(
+      !providerArguments(provider, cwd, "build", "", {
+        allowNonGit: true,
+      }).includes("--skip-git-repo-check"),
+    );
+  }
+  assert.ok(
+    !providerArguments("claude", cwd, "plan", "", {
+      allowNonGit: true,
+    }).includes("--skip-git-repo-check"),
+  );
 });
 
 test("event normalization distinguishes terminal errors from successful process exits", () => {

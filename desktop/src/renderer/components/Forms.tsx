@@ -27,7 +27,26 @@ export function SettingsForm({
 }) {
   const [values, setValues] = useState({ ...settings });
   const [saving, setSaving] = useState(false);
+  const [choosing, setChoosing] = useState<"codex-home" | "worktrees" | null>(
+    null,
+  );
   const [error, setError] = useState("");
+  const chooseDirectory = async (kind: "codex-home" | "worktrees") => {
+    setChoosing(kind);
+    setError("");
+    try {
+      const path = await api.chooseStorageDirectory(kind);
+      if (path)
+        setValues((current) => ({
+          ...current,
+          [kind === "codex-home" ? "codexHome" : "worktreeStoragePath"]: path,
+        }));
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setChoosing(null);
+    }
+  };
   const save = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -111,6 +130,85 @@ export function SettingsForm({
           </label>
         </section>
         <section>
+          <h3>Local storage</h3>
+          <div className="field">
+            <label htmlFor="settings-codex-home">
+              Codex home <small>optional</small>
+            </label>
+            <div className="directory-field">
+              <input
+                id="settings-codex-home"
+                aria-label="Codex home"
+                value={values.codexHome ?? ""}
+                onChange={(event) =>
+                  setValues({ ...values, codexHome: event.target.value })
+                }
+                placeholder="Use the installed CLI’s configured home"
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                aria-label="Choose Codex home folder"
+                disabled={!!choosing}
+                onClick={() => void chooseDirectory("codex-home")}
+              >
+                {choosing === "codex-home" ? (
+                  <LoaderCircle size={14} className="spin" />
+                ) : (
+                  "Browse"
+                )}
+              </button>
+            </div>
+            <small>
+              Choose an existing Codex data folder. Empty uses the CLI’s
+              CODEX_HOME or default. Nova does not copy credentials or import
+              raw configuration.
+            </small>
+          </div>
+          <div className="field">
+            <label htmlFor="settings-worktrees">
+              Worktree storage <small>optional</small>
+            </label>
+            <div className="directory-field">
+              <input
+                id="settings-worktrees"
+                aria-label="Worktree storage"
+                value={values.worktreeStoragePath ?? ""}
+                onChange={(event) =>
+                  setValues({
+                    ...values,
+                    worktreeStoragePath: event.target.value,
+                  })
+                }
+                placeholder="Use Nova’s default worktree directory"
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                aria-label="Choose worktree storage folder"
+                disabled={!!choosing}
+                onClick={() => void chooseDirectory("worktrees")}
+              >
+                {choosing === "worktrees" ? (
+                  <LoaderCircle size={14} className="spin" />
+                ) : (
+                  "Browse"
+                )}
+              </button>
+            </div>
+            <small>
+              Applies only to newly created worktrees. Existing threads keep
+              their current location; nothing is moved.
+            </small>
+          </div>
+          {isPreview && (
+            <p className="field-hint">
+              Preview browsing selects synthetic example paths; no system folder
+              picker or file access is used.
+            </p>
+          )}
+        </section>
+        <section>
           <h3>Run boundaries</h3>
           <div className="field-row">
             <label className="field">
@@ -178,7 +276,11 @@ export function SettingsForm({
           <button type="button" className="secondary-button" onClick={onClose}>
             Cancel
           </button>
-          <button className="primary-button" disabled={saving} type="submit">
+          <button
+            className="primary-button"
+            disabled={saving || !!choosing}
+            type="submit"
+          >
             {saving && <LoaderCircle className="spin" size={15} />}Save settings
           </button>
         </div>
@@ -230,6 +332,13 @@ export function MemoryForm({
       onClose={onClose}
     >
       <form onSubmit={save}>
+        {entry?.codexSource && (
+          <p className="source-conversion-note">
+            Saving this edit removes the Codex resource link and creates a
+            manually maintained note. To keep the external fingerprint, cancel
+            and preview/re-import the resource from Codex library instead.
+          </p>
+        )}
         <label className="field">
           <span>Title</span>
           <input
@@ -314,7 +423,8 @@ export function MemoryForm({
             Cancel
           </button>
           <button className="primary-button" type="submit" disabled={saving}>
-            {saving && <LoaderCircle size={15} className="spin" />}Save memory
+            {saving && <LoaderCircle size={15} className="spin" />}
+            {entry?.codexSource ? "Save as manual memory" : "Save memory"}
           </button>
         </div>
       </form>
