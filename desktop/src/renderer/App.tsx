@@ -21,6 +21,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Share2,
   Settings2,
   ShieldCheck,
   Square,
@@ -49,6 +50,7 @@ import { MemoryForm, RenameThreadForm, SettingsForm } from "./components/Forms";
 import { ThreadMenu } from "./components/ThreadMenu";
 import { ImportedHistory, RunCard } from "./components/Transcript";
 import { WorktreeActions } from "./components/WorktreeActions";
+import { SharedMemory } from "./components/SharedMemory";
 import {
   EmptyPanel,
   errorText,
@@ -121,6 +123,7 @@ export function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [diff, setDiff] = useState<DiffSnapshot | null>(null);
@@ -144,6 +147,7 @@ export function App() {
   );
   const latestRun = runs.at(-1);
   const activeRun = runs.find(isActive);
+  const workActive = state.runs.some(isActive) || state.verifications.some((item) => item.status === "running");
   const activeMemories = state.memories.filter(
     (item) => item.projectId === projectId && item.status === "active",
   );
@@ -351,6 +355,7 @@ export function App() {
     !!project &&
     !!draft.trim() &&
     !busy &&
+    !sharing &&
     !activeRun &&
     !thread?.archivedAt &&
     !(folderProject && mode === "build") &&
@@ -395,6 +400,22 @@ export function App() {
       setNotice(isPreview ? "Preview only — no conversation file is written. Export is available in the desktop app." : result.saved ? `Conversation exported as Markdown${result.path ? `: ${result.path}` : "."}` : "Export cancelled. No file was written.");
     } catch (reason) { setError(errorText(reason)); }
     finally { setExporting(false); }
+  };
+  const shareThread = async (id: string, action: "refresh" | "publish") => {
+    if (sharing || workActive) return;
+    setSharing(true); setError(""); setNotice(""); setThreadMenu(null);
+    try {
+      if (action === "refresh") {
+        await api.refreshCodexThread(id);
+        setNotice(isPreview ? "Synthetic Codex history refreshed. No official conversation was read." : "Codex visible history refreshed. Existing Nova runs and project memory were preserved.");
+      } else {
+        const result = await api.publishCodexHandoff(id);
+        setNotice(isPreview ? "Synthetic handoff only. No official Codex thread was created." : `${result.unchanged ? "This handoff is already saved" : "Handoff saved"} in Codex as “${result.title}” (${result.nativeThreadId}). No model turn was started.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`);
+      }
+      await refreshSnapshot();
+      setContextRefresh((value) => value + 1);
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setSharing(false); }
   };
   const menuAction = (action: () => Promise<unknown>) => {
     setThreadMenu(null);
@@ -689,6 +710,8 @@ export function App() {
             {surface === "workspace" && (
               <div className="toolbar-actions">
                 {thread && <button className="icon-button" aria-label="Export conversation as Markdown" title="Export conversation as Markdown" disabled={exporting} onClick={() => void exportThread(thread.id)}>{exporting ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}</button>}
+                {thread?.codex && <button className="icon-button" aria-label="Refresh conversation from Codex" title="Refresh retained visible history from the official Codex thread" disabled={sharing || workActive} onClick={() => void shareThread(thread.id, "refresh")}><RefreshCw size={16} className={sharing ? "spin" : ""} /></button>}
+                {thread && <button className="icon-button" aria-label="Publish handoff to Codex" title="Save bounded visible context as a native Codex handoff; no model turn" disabled={sharing || workActive} onClick={() => void shareThread(thread.id, "publish")}><Share2 size={16} /></button>}
                 {project && (
                   <span
                     className="branch-label"
@@ -1292,6 +1315,7 @@ export function App() {
                       unchanged means the file matches its saved fingerprint,
                       not that the note is proven true.
                     </p>
+                    {project && <SharedMemory key={project.id} projectId={project.id} memoryVersion={memoryVersion} enabled={state.sharedMemoryProjects?.includes(project.id) ?? false} busy={workActive || sharing} onPublished={() => setContextRefresh((value) => value + 1)} />}
                     {contextError && (
                       <p className="form-error">{contextError}</p>
                     )}
@@ -1415,6 +1439,7 @@ export function App() {
         <SettingsForm
           settings={state.settings}
           providers={providers}
+          workActive={workActive}
           onClose={() => setDialog(null)}
           onSaved={refreshSnapshot}
         />
@@ -1456,6 +1481,9 @@ export function App() {
           onClose={() => setThreadMenu(null)}
           onExport={() => void exportThread(threadMenu.thread.id)}
           exporting={exporting}
+          sharing={sharing || workActive}
+          onRefreshCodex={() => void shareThread(threadMenu.thread.id, "refresh")}
+          onPublishCodex={() => void shareThread(threadMenu.thread.id, "publish")}
           onRename={() => {
             setEditingThread(threadMenu.thread);
             setThreadMenu(null);

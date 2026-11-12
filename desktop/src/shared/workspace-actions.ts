@@ -39,7 +39,7 @@ export interface WorktreeActionResult {
 
 export interface RecoveryItem {
   id: string;
-  kind: "project" | "codex-home";
+  kind: "project" | "codex-home" | "accounts";
   label: string;
   detail: string;
   token: string;

@@ -1,5 +1,6 @@
 import { APP_VERSION, emptyWorkspace } from "../shared/types";
 import { createPreviewLibrary } from "./codex-preview";
+import type { ProviderLoginStatus } from "../shared/provider-auth";
 import type {
   MemoryEntry,
   ContextMemory,
@@ -16,6 +17,8 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
   let previewCommitted = false;
   let previewIntegrated = false;
   let recoveryAcknowledged = false;
+  let login: ProviderLoginStatus | null = null;
+  const sharedProjects = new Set<string>();
   const exampleProject: Project = {
     id: "preview-project",
     name: "Henday Heat",
@@ -177,6 +180,50 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
 
   return {
     ...createPreviewLibrary(state, publish),
+    async getAccountStatus(provider) {
+      return { provider, state: "unknown", checkedAt: new Date().toISOString(), message: "Synthetic preview only. No account or credential store was checked." };
+    },
+    async startProviderLogin(provider) {
+      login = { id: "synthetic-login", provider, state: "waiting", message: "Synthetic sign-in progress. The desktop app delegates sign-in to the official tool; this preview opens no browser or account connection." };
+      return structuredClone(login);
+    },
+    async getProviderLogin() { return structuredClone(login); },
+    async cancelProviderLogin() {
+      if (login) login = { ...login, state: "cancelled", message: "Synthetic sign-in cancelled. No account was changed." };
+    },
+    async previewSharedMemory(projectId) {
+      const project = state.projects.find((item) => item.id === projectId);
+      if (!project) throw new Error("Open a preview project first.");
+      const memory = `# Shared project memory\n\nSynthetic preview only. No real files are read or written.\n\n${state.memories.filter((item) => item.projectId === projectId && item.status === "active").map((item) => `## ${item.title}\n${item.content}`).join("\n\n")}\n`;
+      return { projectId, projectPath: project.path, enabled: sharedProjects.has(projectId), fingerprint: "synthetic-shared-memory", files: [
+        { path: ".nova/MEMORY.md", before: null, after: memory, sha256: null, changed: true },
+        { path: "AGENTS.md", before: "# Example project instructions\n", after: "# Example project instructions\n\nRead .nova/MEMORY.md for shared project notes.\n", sha256: "synthetic-agents", changed: true },
+        { path: "CLAUDE.md", before: null, after: "Read .nova/MEMORY.md for shared project notes.\n", sha256: null, changed: true },
+      ], warnings: ["Synthetic file preview, not actual project contents."] };
+    },
+    async publishSharedMemory(request) {
+      sharedProjects.add(request.projectId);
+      state.sharedMemoryProjects = [...sharedProjects];
+      publish();
+      return { projectId: request.projectId, paths: [".nova/MEMORY.md", "AGENTS.md", "CLAUDE.md"], enabled: true, message: "Synthetic sharing enabled for this preview only. No files were written." };
+    },
+    async disableSharedMemory(projectId) {
+      sharedProjects.delete(projectId);
+      state.sharedMemoryProjects = [...sharedProjects];
+      publish();
+    },
+    async refreshCodexThread(threadId) {
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread?.codex) throw new Error("Select an imported synthetic conversation first.");
+      thread.codex.importedAt = new Date().toISOString();
+      publish();
+      return structuredClone(thread);
+    },
+    async publishCodexHandoff(threadId) {
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread) throw new Error("Select a preview conversation first.");
+      return { threadId, nativeThreadId: "synthetic-native-handoff", title: `${thread.title} · Nova handoff`, createdAt: new Date().toISOString(), unchanged: false, warnings: ["Synthetic handoff only. No native thread or model turn was created."] };
+    },
     async chooseExecutable(provider) {
       return `C:\\Example runtimes (synthetic)\\${provider}.exe`;
     },

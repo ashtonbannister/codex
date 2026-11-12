@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil } from "lucide-react";
+import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil, RefreshCw, Share2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { Thread } from "../../shared/types";
 
@@ -11,6 +11,9 @@ export function ThreadMenu({
   onArchive,
   onExport,
   exporting,
+  onRefreshCodex,
+  onPublishCodex,
+  sharing,
 }: {
   thread: Thread;
   anchor: { x: number; y: number };
@@ -20,6 +23,9 @@ export function ThreadMenu({
   onArchive: () => void;
   onExport: () => void;
   exporting: boolean;
+  onRefreshCodex: () => void;
+  onPublishCodex: () => void;
+  sharing: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -33,7 +39,7 @@ export function ThreadMenu({
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         const buttons = Array.from(
-          ref.current?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+          ref.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [],
         );
         const index = buttons.indexOf(
           document.activeElement as HTMLButtonElement,
@@ -63,7 +69,7 @@ export function ThreadMenu({
       aria-label={`Actions for ${thread.title}`}
       style={{
         left: Math.min(anchor.x, window.innerWidth - 218),
-        top: Math.min(anchor.y, window.innerHeight - 185),
+        top: Math.max(8, Math.min(anchor.y, window.innerHeight - (thread.codex ? 265 : 230))),
       }}
     >
       <button role="menuitem" onClick={onRename}>
@@ -85,6 +91,12 @@ export function ThreadMenu({
       <button role="menuitem" onClick={onExport} disabled={exporting}>
         <Download size={14} />
         Export as Markdown…
+      </button>
+      {thread.codex && <button role="menuitem" onClick={onRefreshCodex} disabled={sharing}>
+        <RefreshCw size={14} />Refresh from Codex
+      </button>}
+      <button role="menuitem" onClick={onPublishCodex} disabled={sharing}>
+        <Share2 size={14} />Publish handoff to Codex…
       </button>
     </div>
   );

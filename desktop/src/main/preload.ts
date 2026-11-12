@@ -11,6 +11,15 @@ import type {
 } from "../shared/types";
 
 const bridge: WorkbenchAPI = {
+  getAccountStatus: (provider) => ipcRenderer.invoke("provider:account-status", provider),
+  startProviderLogin: (provider) => ipcRenderer.invoke("provider:login-start", provider),
+  getProviderLogin: () => ipcRenderer.invoke("provider:login-state"),
+  cancelProviderLogin: () => ipcRenderer.invoke("provider:login-cancel"),
+  previewSharedMemory: (projectId) => ipcRenderer.invoke("memory:shared-preview", projectId),
+  publishSharedMemory: (request) => ipcRenderer.invoke("memory:shared-publish", request),
+  disableSharedMemory: (projectId) => ipcRenderer.invoke("memory:shared-disable", projectId),
+  refreshCodexThread: (threadId) => ipcRenderer.invoke("codex:refresh-thread", threadId),
+  publishCodexHandoff: (threadId) => ipcRenderer.invoke("codex:publish-handoff", threadId),
   chooseExecutable: (provider) => ipcRenderer.invoke("provider:choose-executable", provider),
   openProviderHelp: (provider) => ipcRenderer.invoke("provider:help", provider),
   listLocalModels: (connection) => ipcRenderer.invoke("provider:local-models", connection),

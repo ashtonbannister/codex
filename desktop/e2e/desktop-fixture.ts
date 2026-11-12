@@ -1,5 +1,7 @@
 import type { Page } from "@playwright/test";
 import type { LocalConnection } from "../src/shared/local-models";
+import type { ProviderLoginStatus } from "../src/shared/provider-auth";
+import type { SharedMemoryRequest } from "../src/shared/sharing";
 import type { CommitWorktreeRequest, IntegrateWorktreeRequest, RecoveryRequest } from "../src/shared/workspace-actions";
 import type {
   CodexHistoryQuery,
@@ -46,6 +48,14 @@ export interface FixtureCalls {
   worktreeIntegrations: IntegrateWorktreeRequest[];
   recoveryAcknowledgements: RecoveryRequest[];
   exports: string[];
+  accountChecks: string[];
+  accountLogins: string[];
+  loginCancellations: number;
+  sharedMemoryPreviews: string[];
+  sharedMemoryPublishes: SharedMemoryRequest[];
+  sharedMemoryDisabled: string[];
+  nativeRefreshes: string[];
+  nativePublishes: string[];
 }
 export interface FixtureControls {
   setRevision: (fingerprint: string) => void;
@@ -54,6 +64,8 @@ export interface FixtureControls {
   setResourceDigest: (digest: string) => void;
   setLibraryFailure: (message: string) => void;
   setExportCancelled: (cancelled: boolean) => void;
+  setLoginState: (state: "complete" | "failed") => void;
+  setSharedMemoryFingerprint: (fingerprint: string) => void;
 }
 
 /** Renderer-only contract fixture. It cannot invoke Node, Electron, a CLI, or a model. */
@@ -224,6 +236,14 @@ export async function installFakeDesktopBridge(
         worktreeIntegrations: [],
         recoveryAcknowledgements: [],
         exports: [],
+        accountChecks: [],
+        accountLogins: [],
+        loginCancellations: 0,
+        sharedMemoryPreviews: [],
+        sharedMemoryPublishes: [],
+        sharedMemoryDisabled: [],
+        nativeRefreshes: [],
+        nativePublishes: [],
       };
       let available = config.available !== false;
       let fingerprint = "fixture-current";
@@ -233,6 +253,10 @@ export async function installFakeDesktopBridge(
       let worktreeIntegrated = false;
       let recoveryAcknowledged = false;
       let exportCancelled = false;
+      let login: ProviderLoginStatus | null = null;
+      const signedIn = new Set<string>();
+      let sharedMemoryFingerprint = "fixture-shared-v1";
+      const sharedProjects = new Set<string>();
       const codexHome = "C:\\Fixtures\\Codex";
       const libraryThreads: CodexThreadSummary[] = [
         {
@@ -318,6 +342,57 @@ export async function installFakeDesktopBridge(
         platform: "mock-desktop",
       });
       const bridge: WorkbenchAPI = {
+        async getAccountStatus(provider) {
+          calls.accountChecks.push(provider);
+          return { provider, state: signedIn.has(provider) ? "signed-in" : "signed-out", checkedAt: new Date().toISOString(), label: signedIn.has(provider) ? "fixture-account@example.invalid" : undefined, method: signedIn.has(provider) ? "official-cli-fixture" : undefined, message: "Synthetic account response. No real sign-in state was read." };
+        },
+        async startProviderLogin(provider) {
+          calls.accountLogins.push(provider);
+          login = { id: `fixture-login-${calls.accountLogins.length}`, provider, state: "waiting", message: "Complete the synthetic official-browser sign-in. No real browser or account was opened." };
+          return structuredClone(login);
+        },
+        async getProviderLogin() { return structuredClone(login); },
+        async cancelProviderLogin() {
+          calls.loginCancellations++;
+          if (login) login = { ...login, state: "cancelled", message: "Synthetic sign-in cancelled." };
+        },
+        async previewSharedMemory(projectId) {
+          calls.sharedMemoryPreviews.push(projectId);
+          return { projectId, projectPath: "D:\\Fixtures\\repository", enabled: sharedProjects.has(projectId), fingerprint: sharedMemoryFingerprint, files: [
+            { path: ".nova/MEMORY.md", before: "# Shared notes\n\nExternal note: preserve me.\n", after: "# Shared notes\n\nExternal note: preserve me.\n\n<!-- nova:notes:start -->\nKeep changes focused.\n<!-- nova:notes:end -->\n", sha256: "fixture-memory-digest", changed: true },
+            { path: "AGENTS.md", before: "# Project instructions\n\nDo not remove this rule.\n", after: "# Project instructions\n\nDo not remove this rule.\n\nRead .nova/MEMORY.md for shared notes.\n", sha256: "fixture-agents-digest", changed: true },
+            { path: "CLAUDE.md", before: null, after: "Read .nova/MEMORY.md for shared notes.\n", sha256: null, changed: true },
+          ], warnings: ["Synthetic preview. Existing instructions and notes outside Nova’s managed block are preserved."] };
+        },
+        async publishSharedMemory(request) {
+          calls.sharedMemoryPublishes.push(request);
+          if (request.fingerprint !== sharedMemoryFingerprint) throw new Error("Shared memory files changed after preview. No files were written.");
+          sharedProjects.add(request.projectId);
+          state.sharedMemoryProjects = [...sharedProjects];
+          publish();
+          return { projectId: request.projectId, paths: [".nova/MEMORY.md", "AGENTS.md", "CLAUDE.md"], enabled: true, message: "Shared memory published in the synthetic fixture. No real files were written." };
+        },
+        async disableSharedMemory(projectId) {
+          calls.sharedMemoryDisabled.push(projectId);
+          sharedProjects.delete(projectId);
+          state.sharedMemoryProjects = [...sharedProjects];
+          publish();
+        },
+        async refreshCodexThread(threadId) {
+          calls.nativeRefreshes.push(threadId);
+          const thread = state.threads.find((item) => item.id === threadId);
+          if (!thread?.codex) throw new Error("No imported Codex history.");
+          if (!thread.codex.history.some((item) => item.id === "fixture-refreshed-message")) thread.codex.history.push({ id: "fixture-refreshed-message", turnId: "fixture-refreshed-turn", role: "assistant", text: "New visible message from the synthetic official Codex thread." });
+          thread.codex.importedAt = new Date().toISOString();
+          publish();
+          return structuredClone(thread);
+        },
+        async publishCodexHandoff(threadId) {
+          calls.nativePublishes.push(threadId);
+          const thread = state.threads.find((item) => item.id === threadId);
+          if (!thread) throw new Error("Fixture thread not found.");
+          return { threadId, nativeThreadId: "fixture-native-handoff", title: `${thread.title} · Nova handoff`, createdAt: new Date().toISOString(), unchanged: calls.nativePublishes.length > 1, warnings: ["Visible context only. Native transcript rendering may vary."] };
+        },
         async chooseExecutable(provider) {
           calls.executablePicks.push(provider);
           return `C:\\Fixture runtimes\\${provider}.exe`;
@@ -801,6 +876,12 @@ export async function installFakeDesktopBridge(
       };
       const controls: FixtureControls = {
         setExportCancelled(value) { exportCancelled = value; },
+        setLoginState(value) {
+          if (!login) return;
+          login = { ...login, state: value, message: value === "complete" ? "Synthetic official-tool sign-in complete." : "Synthetic sign-in failed. Try again." };
+          if (value === "complete") signedIn.add(login.provider);
+        },
+        setSharedMemoryFingerprint(value) { sharedMemoryFingerprint = value; },
         setResourceDigest(value) {
           resourceDigest = value;
         },

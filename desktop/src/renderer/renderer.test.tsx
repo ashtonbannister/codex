@@ -4,6 +4,51 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MessageText } from "./components/MessageText";
 import { createPreviewAPI } from "./preview";
 import { ImportedHistory } from "./components/Transcript";
+import { watchLoginProgress } from "./account-polling";
+import type { ProviderLoginStatus } from "../shared/provider-auth";
+
+test("login progress retries transient failures, publishes terminal state and bounds retry without retaining callbacks after close", async () => {
+  const scheduled: Array<{ run: () => Promise<void>; delay: number; cancelled: boolean }> = [];
+  const schedule = (run: () => Promise<void>, delay: number) => {
+    const item = { run, delay, cancelled: false };
+    scheduled.push(item);
+    return () => { item.cancelled = true; };
+  };
+  let reads = 0;
+  let errors = 0;
+  let paused = 0;
+  const updates: Array<ProviderLoginStatus | null> = [];
+  const complete: ProviderLoginStatus = { id: "login-1", provider: "codex", state: "complete", message: "Complete" };
+  const stop = watchLoginProgress({
+    read: async () => { if (++reads === 1) throw new Error("Transient progress failure"); return complete; },
+    onUpdate: (status) => updates.push(status), onError: () => { errors++; }, onPaused: () => { paused++; }, schedule,
+  });
+  assert.equal(scheduled[0]!.delay, 500);
+  await scheduled[0]!.run();
+  assert.equal(errors, 1);
+  assert.equal(scheduled[1]!.delay, 1500);
+  await scheduled[1]!.run();
+  assert.deepEqual(updates, [complete]);
+  assert.equal(scheduled.length, 2);
+  assert.equal(paused, 0);
+  stop();
+
+  const stalled = watchLoginProgress({ read: async () => { throw new Error("Offline"); }, onUpdate: () => assert.fail("No result"), onError: () => {}, onPaused: () => { paused++; }, schedule });
+  await scheduled[2]!.run();
+  await scheduled[3]!.run();
+  await scheduled[4]!.run();
+  assert.equal(scheduled.length, 5);
+  assert.equal(paused, 1);
+  stalled();
+
+  let deliver: (status: ProviderLoginStatus) => void = () => {};
+  const closed = watchLoginProgress({ read: () => new Promise((resolve) => { deliver = resolve; }), onUpdate: () => assert.fail("Closed UI must ignore late progress"), onError: () => assert.fail("Closed UI"), onPaused: () => assert.fail("Closed UI"), schedule });
+  const inFlight = scheduled[5]!.run();
+  closed();
+  deliver(complete);
+  await inFlight;
+  assert.equal(scheduled[5]!.cancelled, true);
+});
 
 test("browser preview never advertises a runtime or executes a model/check", async () => {
   const api = createPreviewAPI(false);
@@ -26,6 +71,36 @@ test("browser preview never advertises a runtime or executes a model/check", asy
     }),
     /UI preview/,
   );
+});
+
+test("preview provider accounts never imply a real login or share credentials", async () => {
+  const api = createPreviewAPI(true);
+  assert.equal((await api.getAccountStatus("codex")).state, "unknown");
+  const progress = await api.startProviderLogin("claude");
+  assert.equal(progress.state, "waiting");
+  assert.match(progress.message, /Synthetic/);
+  assert.equal(progress.verificationUrl, undefined);
+  assert.equal(progress.userCode, undefined);
+  await api.cancelProviderLogin();
+  assert.equal((await api.getProviderLogin())?.state, "cancelled");
+  assert.equal((await api.getAccountStatus("claude")).state, "unknown");
+});
+
+test("preview memory sharing and handoffs retain synthetic provenance and no run evidence", async () => {
+  const api = createPreviewAPI(true);
+  const before = await api.getSnapshot();
+  const preview = await api.previewSharedMemory("preview-project");
+  assert.deepEqual(preview.files.map((file) => file.path), [".nova/MEMORY.md", "AGENTS.md", "CLAUDE.md"]);
+  assert.match(preview.files[0]!.after, /Synthetic preview only/);
+  const publication = await api.publishSharedMemory({ projectId: preview.projectId, fingerprint: preview.fingerprint });
+  assert.match(publication.message, /No files were written/);
+  assert.deepEqual((await api.getSnapshot()).state.sharedMemoryProjects, ["preview-project"]);
+  await api.disableSharedMemory("preview-project");
+  assert.deepEqual((await api.getSnapshot()).state.sharedMemoryProjects, []);
+  const handoff = await api.publishCodexHandoff("preview-thread");
+  assert.equal(handoff.nativeThreadId, "synthetic-native-handoff");
+  assert.match(handoff.warnings.join(" "), /No native thread or model turn/);
+  assert.deepEqual((await api.getSnapshot()).state.runs, before.state.runs);
 });
 
 test("preview context labels synthetic history and excludes changed sources", async () => {

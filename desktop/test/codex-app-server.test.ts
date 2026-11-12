@@ -16,6 +16,7 @@ import {
   CodexStdioClient,
   codexAppServerArguments,
   listCodexThreads,
+  publishNativeHandoff,
   readCodexHistory,
   runNativeCodex,
   type NativeCodexOptions,
@@ -107,13 +108,19 @@ input.on('line', line => {
   const servers={'literal.dot':{command:'PRIVATE_TOOL_COMMAND',env:{TOKEN:'SECRET_CONFIG_VALUE'}},normal:{url:'https://example.invalid',headers:{Authorization:'SECRET_CONFIG_VALUE'}}};
   reply(req,{config:{mcp_servers:servers,api_key:'SECRET_CONFIG_VALUE'},origins:{},layers:null});return;
  }
- if(req.method==='thread/resume'||req.method==='thread/fork'){
+ if(req.method==='thread/resume'||req.method==='thread/fork'||req.method==='thread/start'){
   if(config.archivedAfterRead&&req.method==='thread/resume'){send({id:req.id,error:{code:-32600,message:'session is archived; unarchive it first'}});return}
-  selected=req.method==='thread/fork'?forkId:sourceId;
+  selected=req.method==='thread/resume'?sourceId:forkId;
   const cwd=config.wrongCwd?home:req.params.cwd;
   const sandbox=req.params.sandbox==='read-only'?{type:'readOnly',networkAccess:false}:{type:'workspaceWrite',writableRoots:[cwd],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true};
   if(config.unsafeSandbox)sandbox.networkAccess=true;
   reply(req,{thread:metadata(config.sameFork?sourceId:selected,cwd),cwd,modelProvider:config.sessionProvider??'openai',model:'fixture-model',approvalPolicy:'never',approvalsReviewer:'user',sandbox});return;
+ }
+ if(req.method==='thread/name/set'){reply(req,{});return}
+ if(req.method==='thread/inject_items'){
+  if(config.requirePersist&&!fs.existsSync(path.join(home,'persisted')))throw new Error('injection before persist');
+  if(config.injectError){send({id:req.id,error:{code:-32601,message:'SECRET_RPC_VALUE'}});return}
+  reply(req,{});return;
  }
  if(req.method==='turn/start'){
   if(config.requirePersist&&!fs.existsSync(path.join(home,'persisted')))throw new Error('turn started before persist');
@@ -204,6 +211,43 @@ function nativeOptions(
     ...overrides,
   };
 }
+
+test("publishes a bounded native context handoff without inference or changing an original thread", async (t) => {
+  const f = await fixture(t, { requirePersist: true });
+  const result = await publishNativeHandoff({ ...f.options,
+    title: "Nova · shared work", text: "Visible user and Claude/local reference only.",
+    onThreadCreated: async (id) => {
+      assert.equal(id, FORK_ID);
+      await writeFile(path.join(f.home, "persisted"), id);
+    },
+  });
+  assert.equal(result.nativeThreadId, FORK_ID);
+  const requests = await f.requests();
+  assert.ok(requests.some((entry) => entry.method === "thread/start" && entry.params.ephemeral === false));
+  assert.ok(requests.some((entry) => entry.method === "thread/name/set" && entry.params.threadId === FORK_ID));
+  const injection = requests.find((entry) => entry.method === "thread/inject_items");
+  assert.deepEqual(injection?.params.items, [{ type: "message", role: "user", content: [{ type: "input_text", text: "Visible user and Claude/local reference only." }] }]);
+  assert.ok(!requests.some((entry) => ["turn/start", "thread/resume", "thread/fork"].includes(entry.method)));
+  assert.ok(!JSON.stringify(result).includes("SECRET_CONFIG_VALUE"));
+});
+
+test("handoff records the native ID before an unsupported injection fails and never starts a turn", async (t) => {
+  const f = await fixture(t, { injectError: true });
+  let retainedId: string | undefined;
+  await assert.rejects(publishNativeHandoff({ ...f.options, title: "Handoff", text: "Reference",
+    onThreadCreated: async (id) => { retainedId = id; },
+  }), (error: unknown) => error instanceof CodexAppServerError && !error.message.includes("SECRET_RPC_VALUE"));
+  assert.equal(retainedId, FORK_ID);
+  assert.ok(!(await f.requests()).some((entry) => entry.method === "turn/start"));
+});
+
+test("handoff aborts before injection if its receipt cannot be saved", async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(publishNativeHandoff({ ...f.options, title: "Handoff", text: "Reference",
+    onThreadCreated: async () => { throw new Error("receipt disk failure"); },
+  }), /receipt disk failure/);
+  assert.ok(!(await f.requests()).some((entry) => ["thread/inject_items", "turn/start"].includes(entry.method)));
+});
 
 test("app-server flags constrain supported worker features without pretending empty MCP clears config", () => {
   const args = codexAppServerArguments("win32");

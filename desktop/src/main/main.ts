@@ -38,11 +38,14 @@ import { confirmationValue } from "./confirmation";
 import { listLocalModels, validateLocalConnection } from "./services/local-models";
 import { resolveExecutable } from "./services/providers";
 import { saveMarkdownExport } from "./services/export-file";
+import { ProviderAuthService, officialLoginUrl } from "./services/provider-auth";
+import type { AccountProvider } from "../shared/provider-auth";
 import type {
   CommitWorktreeRequest,
   IntegrateWorktreeRequest,
   RecoveryRequest,
 } from "../shared/workspace-actions";
+import type { SharedMemoryRequest } from "../shared/sharing";
 import {
   APP_URL,
   assetPath,
@@ -73,6 +76,9 @@ protocol.registerSchemesAsPrivileged([
 
 let window: BrowserWindow | null = null;
 let workspace: WorkspaceService | undefined;
+let providerAuth: ProviderAuthService | undefined;
+let accountOperationPending = false;
+let engineSensitiveInFlight = 0;
 let broadcastTimer: NodeJS.Timeout | undefined;
 let latestState: WorkspaceState | undefined;
 let quitting = false;
@@ -126,17 +132,87 @@ function objectPayload(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+// These remain usable while account sign-in is waiting on the browser or a
+// previous worker needs manual recovery. All other IPC participates in the
+// account-operation gate, including future workspace/provider handlers.
+const PASSIVE_DURING_AUTH = new Set([
+  "workspace:snapshot",
+  "provider:help",
+  "provider:login-state",
+  "provider:login-cancel",
+  "workspace:recovery",
+  "workspace:acknowledge-recovery",
+  "run:cancel",
+  "verification:cancel",
+  "project:open",
+  "run:reveal",
+]);
+const ACCOUNT_OPERATIONS = new Set([
+  "provider:account-status",
+  "provider:login-start",
+]);
+
+async function assertAccountIdle(service: WorkspaceService): Promise<void> {
+  const { state } = await service.snapshot();
+  if (state.runs.some((run) => run.status === "queued" || run.status === "running") ||
+    state.verifications.some((check) => check.status === "running"))
+    throw new Error("Finish or stop active agent work and checks before changing or reading provider accounts.");
+  if ((await service.listRecoveryItems()).length)
+    throw new Error("Resolve the listed worker recovery items before connecting provider accounts.");
+}
+
+function accountProvider(value: unknown): AccountProvider {
+  if (value !== "codex" && value !== "claude")
+    throw new Error("Choose Codex or Claude Code for account sign-in.");
+  return value;
+}
+
 function handle(
   name: string,
   callback: (payload: unknown) => Promise<unknown>,
 ) {
   ipcMain.handle(name, async (event, payload: unknown) => {
     assertSender(event);
-    return callback(payload);
+    if (quitting) throw new Error("Nova is shutting down. Wait for owned workers to stop.");
+    if (PASSIVE_DURING_AUTH.has(name)) return callback(payload);
+    if (ACCOUNT_OPERATIONS.has(name)) {
+      // Reserve synchronously before a dialog, snapshot, or filesystem await.
+      // A status read also starts an owned provider process, so it takes the
+      // same gate as login rather than racing a model/history worker.
+      if (accountOperationPending || engineSensitiveInFlight || providerAuth?.busy)
+        throw new Error("Another workspace or account operation is running. Finish or cancel it before connecting an account.");
+      accountOperationPending = true;
+      try {
+        if (!workspace) throw new Error("The workspace is not ready.");
+        await assertAccountIdle(workspace);
+        return await callback(payload);
+      } finally {
+        accountOperationPending = false;
+      }
+    }
+    if (accountOperationPending || providerAuth?.busy || latestState?.accountRecovery)
+      throw new Error("Provider account work is active or needs recovery. Finish or cancel sign-in, or review Settings → Recovery, before continuing workspace operations.");
+    engineSensitiveInFlight++;
+    try {
+      return await callback(payload);
+    } finally {
+      engineSensitiveInFlight--;
+    }
   });
 }
 
 function registerHandlers(service: WorkspaceService) {
+  const accounts = new ProviderAuthService({
+    openExternal: async (url) => {
+      if (!officialLoginUrl("codex", url) && !officialLoginUrl("claude", url))
+        throw new Error("The provider returned a non-official sign-in URL.");
+      await shell.openExternal(url);
+    },
+    onRecoveryRequired: (provider, home) => service.recordAccountRecovery(provider, home),
+    onOperationStart: (provider, home) => service.beginAccountOperation(provider, home),
+    onOperationFinished: (id) => service.finishAccountOperation(id),
+  });
+  providerAuth = accounts;
   handle("provider:choose-executable", async (payload) => {
     if (payload !== "codex" && payload !== "claude")
       throw new Error("Choose Codex or Claude Code.");
@@ -200,8 +276,8 @@ function registerHandlers(service: WorkspaceService) {
         defaultId: 0,
         cancelId: 0,
         title: "Connect to your existing Codex installation?",
-        message: "Load saved Codex conversations into this library?",
-        detail: `Codex home: ${confirmationValue(identity.home)}\nExecutable: ${confirmationValue(identity.codexPath)}\n\nNova starts the installed Codex app-server to read history. Codex manages its own authentication, logs, databases, and migrations; this is not an immutable filesystem scan. Browsing sends no model turn. Nova does not copy credentials or directly edit Codex databases. Conversations and references are only added to Nova when you choose them.`,
+        message: "Connect to Codex for account status and saved conversations?",
+        detail: `Codex home: ${confirmationValue(identity.home)}\nExecutable: ${confirmationValue(identity.codexPath)}\n\nNova starts the installed Codex app-server to read account status and history. Codex manages its own authentication, logs, databases, and migrations; this is not an immutable filesystem scan. Status checks and browsing send no model turn. Nova does not copy credentials or directly edit Codex databases. Conversations and references are only added to Nova when you choose them.`,
       });
       if (result.response !== 1)
         throw new Error(
@@ -220,6 +296,52 @@ function registerHandlers(service: WorkspaceService) {
     }
     return identity;
   };
+  const accountOptions = async (provider: AccountProvider) => {
+    const settings = (await service.snapshot()).state.settings;
+    const cwd = path.join(app.getPath("userData"), "workspace");
+    return {
+      settings,
+      home: provider === "codex" ? await resolveCodexHome(settings.codexHome) : cwd,
+      // Metadata/login commands never start in the selected project. This is
+      // the already-created app-owned workspace data directory, not repo code.
+      cwd,
+    };
+  };
+  const accountIdentity = (options: Awaited<ReturnType<typeof accountOptions>>) =>
+    JSON.stringify([options.settings.codexPath, options.settings.claudePath, options.home]);
+  handle("provider:account-status", async (payload) => {
+    const provider = accountProvider(payload);
+    if (provider === "codex") await confirmConnection();
+    const options = await accountOptions(provider);
+    await assertAccountIdle(service);
+    return accounts.read(provider, options);
+  });
+  handle("provider:login-state", async () => accounts.getLogin());
+  handle("provider:login-cancel", async () => accounts.cancel());
+  handle("provider:login-start", async (payload) => {
+    const provider = accountProvider(payload);
+    const options = await accountOptions(provider);
+    const before = accountIdentity(options);
+    const executable = provider === "codex" ? options.settings.codexPath : options.settings.claudePath;
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "question",
+      buttons: ["Cancel", "Sign in with official tool"],
+      defaultId: 0,
+      cancelId: 0,
+      title: provider === "codex" ? "Sign in to Codex with ChatGPT?" : "Sign in to Claude Code?",
+      message: "Let the installed official tool open its browser sign-in flow?",
+      detail: `Executable: ${confirmationValue(executable)}\n${provider === "codex" ? `Codex home: ${confirmationValue(options.home)}\n\nThis changes the account managed by Codex. The OEM Codex app shares the account when it uses this same home. ` : "\nThis changes the account managed by Claude Code. Claude Desktop maintains a separate sign-in session. "}Credentials remain with the official tool; Nova does not read, copy, or exchange tokens. Signing in makes no model request. Finish any Codex or Claude work running outside Nova before continuing.`,
+      checkboxLabel: "Other Codex and Claude workers are idle.",
+      checkboxChecked: false,
+    });
+    if (confirmation.response !== 1 || !confirmation.checkboxChecked)
+      throw new Error("Sign-in cancelled. The official login process was not started.");
+    const current = await accountOptions(provider);
+    if (accountIdentity(current) !== before)
+      throw new Error("Provider settings changed during confirmation. Review the current installation and sign in again.");
+    await assertAccountIdle(service);
+    return accounts.start(provider, current);
+  });
   handle("codex:installation", async () =>
     inspectCodexInstallation(
       (await service.snapshot()).state.settings.codexHome,
@@ -258,6 +380,25 @@ function registerHandlers(service: WorkspaceService) {
     const query = objectPayload(payload) as unknown as CodexHistoryQuery;
     const identity = await confirmConnection();
     return service.readCodexHistory(query, identity);
+  });
+  handle("codex:refresh-thread", async (payload) => {
+    const threadId = identifier(payload);
+    const identity = await confirmConnection();
+    return service.refreshCodexThread(threadId, identity);
+  });
+  handle("codex:publish-handoff", async (payload) => {
+    const threadId = identifier(payload);
+    const identity = await confirmConnection();
+    const review = await service.reviewCodexHandoff(threadId, identity);
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "question", buttons: ["Cancel", review.unchanged ? "Check existing handoff" : "Share with Codex"],
+      defaultId: 0, cancelId: 0,
+      title: "Publish this conversation's context to Codex?",
+      message: review.unchanged ? "Check the already-published native handoff?" : `Create ${confirmationValue(review.title)} in your installed Codex?`,
+      detail: `Codex home: ${confirmationValue(review.home)}\nWorking folder: ${confirmationValue(review.cwd)}\nShared reference: ${review.characters.toLocaleString()} characters\n\nNova uses the official engine to fork an existing Codex conversation or create a new one, then adds bounded visible messages and selected project memories. Codex keeps its own history; Claude/local hidden state, credentials, and binary attachments are not copied. No model turn starts now. Later Codex requests can send this context to OpenAI. Subsequent Codex work in this Nova thread uses the native handoff. The original native conversation remains untouched.\n\n${review.warnings.slice(0, 6).map((warning) => confirmationValue(warning)).join("\n")}`,
+    });
+    if (confirmation.response !== 1) throw new Error("Codex handoff cancelled before publishing.");
+    return service.publishCodexHandoff(threadId, review.fingerprint, identity);
   });
   handle("codex:import-thread", async (payload) => {
     const request = objectPayload(payload) as unknown as CodexImportRequest;
@@ -316,6 +457,27 @@ function registerHandlers(service: WorkspaceService) {
     if (result.response !== 1) throw new Error("Reference import cancelled.");
     return service.importCodexMemory(request, preview.home);
   });
+  handle("memory:shared-preview", (payload) => service.previewSharedMemory(identifier(payload)));
+  handle("memory:shared-publish", async (payload) => {
+    const request = objectPayload(payload) as unknown as SharedMemoryRequest;
+    identifier(request.projectId);
+    if (typeof request.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(request.fingerprint))
+      throw new Error("Review the shared-memory preview before publishing.");
+    const preview = await service.previewSharedMemory(request.projectId);
+    if (preview.fingerprint !== request.fingerprint)
+      throw new Error("Shared memory or project files changed. Refresh the preview and review it again.");
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "question", buttons: ["Cancel", "Publish shared memory"], defaultId: 0, cancelId: 0,
+      title: "Enable shared project memory?",
+      message: "Write the reviewed common memory and instruction references?",
+      detail: `Project: ${confirmationValue(preview.projectPath)}\n\n${preview.files.map((file) => `${confirmationValue(file.path)} — ${file.changed ? "write reviewed contents" : "unchanged"}`).join("\n")}\n\nThis writes ordinary project files, preserving text outside Nova's managed blocks. Official Codex and Claude Code can read the shared file through their project instructions. Nova includes a fresh, bounded read in future requests to your chosen cloud or local provider. Review private information before sharing. These files appear as normal Git changes; commit them before an isolated Build requiring a clean baseline. Replaced revisions are retained in ignored .nova/.memory-backups folders. No private provider database, credential file, or global instructions are edited. Pause external agents/editors: these independent tools do not share an OS-wide write transaction.`,
+      checkboxLabel: "Other tools are not editing these three project files.",
+      checkboxChecked: false,
+    });
+    if (confirmation.response !== 1 || !confirmation.checkboxChecked) throw new Error("Shared memory publication cancelled. Project files were not changed.");
+    return service.publishSharedMemory(request);
+  });
+  handle("memory:shared-disable", (payload) => service.disableSharedMemory(identifier(payload)));
   handle("workspace:snapshot", () => service.snapshot());
   handle("workspace:refresh-providers", () => service.refreshProviderStatus());
   handle("thread:update", (payload) =>
@@ -457,7 +619,10 @@ function registerHandlers(service: WorkspaceService) {
     });
     if (confirmation.response !== 1 || !confirmation.checkboxChecked)
       throw new Error("Recovery remains locked. Confirm cleanup before unlocking.");
-    return service.acknowledgeRecovery(request);
+    if (request.id === "provider-accounts" && accounts.operationActive)
+      throw new Error("An account operation is still running. Cancel it before acknowledging cleanup.");
+    await service.acknowledgeRecovery(request);
+    if (request.id === "provider-accounts") accounts.acknowledgeRecovery();
   });
   handle("thread:export", async (payload) => {
     const exported = await service.exportConversation(identifier(payload));
@@ -632,6 +797,12 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault();
     quitting = true;
     if (broadcastTimer) clearTimeout(broadcastTimer);
-    void workspace.dispose().finally(() => app.quit());
+    void (async () => {
+      try { await providerAuth?.shutdown(); }
+      finally { await workspace!.dispose(); }
+    })().catch(() => {
+      // Individual services persist cleanup locks. Never print raw provider
+      // diagnostics or credentials while the application is exiting.
+    }).finally(() => app.quit());
   });
 }

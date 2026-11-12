@@ -28,9 +28,12 @@ import type {
   WorktreeActionResult,
   WorktreeReview,
 } from "./workspace-actions";
+import type { ProviderAccountStatus, ProviderLoginStatus } from "./provider-auth";
+import type { SharedMemoryPreview, SharedMemoryRequest, SharedMemoryResult } from "./sharing";
+import type { CodexHandoffReceipt, CodexHandoffResult } from "./native-handoff";
 
 export type ProviderId = "codex" | "claude" | "ollama";
-export const APP_VERSION = "0.4.0";
+export const APP_VERSION = "0.5.0";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -63,6 +66,7 @@ export interface Thread {
   pinned?: boolean;
   archivedAt?: string;
   codex?: CodexThreadLink;
+  codexHandoff?: CodexHandoffReceipt;
   /** Canonical storage base containing worktrees/<thread-id>. Pinned per thread. */
   worktreeStoragePath?: string;
 }
@@ -153,6 +157,12 @@ export interface WorkspaceState {
   runs: Run[];
   memories: MemoryEntry[];
   settings: Settings;
+  /** Explicit per-project permission to include the common Markdown reference. */
+  sharedMemoryProjects?: string[];
+  /** Global lock retained when an account subprocess could not be confirmed stopped. */
+  accountRecovery?: { provider: "codex" | "claude"; home: string; recordedAt: string };
+  /** Cleared only after observed account-process cleanup; a crash becomes a recovery lock. */
+  accountOperation?: { id: string; provider: "codex" | "claude"; home: string; startedAt: string };
   verificationProfiles: VerificationProfile[];
   verifications: VerificationResult[];
   /** Native history workers whose exit could not be confirmed; no automatic retry. */
@@ -313,6 +323,15 @@ export interface DiffSnapshot {
 
 /** Narrow, validated bridge. The renderer never receives Node, IPC, or credentials. */
 export interface WorkbenchAPI {
+  getAccountStatus(provider: "codex" | "claude"): Promise<ProviderAccountStatus>;
+  startProviderLogin(provider: "codex" | "claude"): Promise<ProviderLoginStatus>;
+  getProviderLogin(): Promise<ProviderLoginStatus | null>;
+  cancelProviderLogin(): Promise<void>;
+  previewSharedMemory(projectId: string): Promise<SharedMemoryPreview>;
+  publishSharedMemory(request: SharedMemoryRequest): Promise<SharedMemoryResult>;
+  disableSharedMemory(projectId: string): Promise<void>;
+  refreshCodexThread(threadId: string): Promise<Thread>;
+  publishCodexHandoff(threadId: string): Promise<CodexHandoffResult>;
   chooseExecutable(provider: "codex" | "claude"): Promise<string | null>;
   openProviderHelp(provider: ProviderId | "lmstudio"): Promise<void>;
   listLocalModels(connection: LocalConnection): Promise<LocalModelCatalog>;

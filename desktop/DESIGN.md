@@ -287,3 +287,30 @@ the React behavior.
 - Don't add lift to ordinary content panels or turn status text into decorative chips.
 - Don't describe a finished agent turn, preview, or isolated passing check as a fully verified engineering result.
 - Don't treat this source extraction as completed rendered or native-platform QA.
+
+## v0.5 accounts and shared context
+
+The incumbent Windows workspace remains the visual authority. Provider accounts
+extend Settings → Agents with compact status rows, explicit checks, native-owned
+sign-in progress, cancellation, and actionable failures. Account state is separate
+from executable detection; credentials and browser navigation never belong to the
+renderer. A completed login remains complete if its follow-up account check fails.
+Transient progress failures retry within a bounded window, then expose retry and
+cancel controls without claiming that an unobserved worker stopped.
+
+Memory adds a project-file preview using the existing inspector typography and
+literal-code surfaces. The exact existing/proposed `.nova/MEMORY.md`, `AGENTS.md`,
+and `CLAUDE.md` contents are reviewable before native confirmation. The UI
+distinguishes Nova-managed notes from preserved external text and distinguishes
+disabling Nova reads from deleting the official tools' project references.
+
+Thread toolbar/menu actions refresh retained visible Codex history or publish a
+native handoff without starting a model turn. These are explicit operations, not
+claims of live synchronization, interchangeable hidden state, or full proprietary
+desktop feature parity. Existing neutral colors, mint states, system type, and
+line icons are retained; no raster assets are added.
+
+The four `accounts-sharing.spec.ts` captures are synthetic test evidence for
+desktop sign-in, compact light-theme controls, shared-memory preview, and Codex
+handoff. At this source update the final rendered/native review remains pending
+CI artifact inspection. They cannot certify a real provider login or inference.

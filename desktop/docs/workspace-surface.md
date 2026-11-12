@@ -128,3 +128,31 @@ models, native Git operations, or native export. Automated synthetic coverage is
 separate from actual Windows/provider compatibility, which remains untested for
 this commit. The alpha does not imply completed MCP administration, autonomous
 teams, routing, signed distribution, or every later roadmap milestone.
+
+## v0.5.0 accounts and shared-context extension
+
+Settings → Agents separates saved executable detection from account state.
+Explicit account checks and sign-in run through the official tools. Native
+confirmation, persisted worker/recovery controls, and the selected Codex home
+remain main-process responsibilities. The renderer shows bounded progress and
+cancel/retry states without collecting credentials or opening OAuth URLs itself.
+Transient progress failures do not strand the dialog, and a failed account refresh
+does not change a completed login back to an in-progress state.
+
+The Memory inspector previews complete existing/proposed contents for the common
+project reference and both official-tools' instruction files. Publishing requires
+the exact reviewed fingerprint and a native confirmation. Ordinary project changes
+must be reviewed/committed before an isolated Build; the UI does not imply an
+automatic commit. Opted-in shared-file reads are fresh per request across Nova's
+providers. Disabling them leaves project files and official Codex/Claude references
+intact, as stated next to the action.
+
+Codex refresh and native handoff live beside existing thread actions. Refresh
+preserves Nova runs and notes; publishing saves bounded visible context without
+model inference. Native transcript rendering may differ, and hidden reasoning and
+private memory databases are outside this interchange contract.
+
+Four deterministic, synthetic capture cases cover accounts, compact light-theme
+keyboard use, memory review, and thread refresh/handoff. Final browser/native QA
+is pending CI artifact review at this documentation update. No local browser or
+real provider account was used to claim completion.

@@ -4,7 +4,7 @@ A Windows-first, multi-provider development workbench built alongside the open-s
 
 Nova uses the familiar **projects → conversation → changes** workflow of Codex and Claude Code, with its own interface and branding. It is an independent project, not an official OpenAI or Anthropic desktop application, and does not contain either company's proprietary desktop UI.
 
-**Status: development alpha, version 0.4.0.** This increment adds configurable local servers, reviewed Git commit/integration, explicit recovery, and conversation export to the existing Codex history and shared-context workflows. Live Windows use with the actual installed Codex, Claude, and local providers remains untested for this commit. It is not the completed autonomous engineering system. A finished agent process is explicitly **not** a verified engineering result.
+**Status: development alpha, version 0.5.0.** Nova now exposes official-tool account status and browser sign-in, explicit refresh of linked Codex history, native Codex context handoffs, and reviewed project-memory files shared with the official tools. It also retains local-server connections, isolated builds, Git review/integration, checks, recovery, and conversation export. This is a working application increment, **not full proprietary Codex/Claude desktop parity**. Live sign-in and inference with your installed providers remain real-machine acceptance checks; passing synthetic tests does not establish them. A finished agent process is explicitly **not** a verified engineering result.
 
 ## What's in this milestone
 
@@ -26,8 +26,11 @@ Nova uses the familiar **projects → conversation → changes** workflow of Cod
 - Tabbed Settings with native CLI executable selection and local model discovery, without downloading models or starting inference during discovery.
 - User-confirmed recovery acknowledgement that preserves the original unconfirmed-termination history.
 - Explicit Markdown export of visible conversation text and active project memory, plus device-local per-thread composer drafts.
+- Codex and Claude Code account status and official browser sign-in from Settings, with cancellation, bounded process lifetimes, and no credential import.
+- Explicit refresh of linked official Codex conversation history and publication of bounded cross-provider context into a new native Codex handoff thread, without starting inference.
+- Previewed publishing of `.nova/MEMORY.md` and references in `AGENTS.md`/`CLAUDE.md`, with opt-in fresh reads for subsequent Nova requests and preservation of text outside Nova-managed blocks.
 
-The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventions are recorded in [DESIGN.md](DESIGN.md). Automatic model routing, unattended agent teams, automatic knowledge extraction, repository-wide symbol indexing, a general MCP manager, and semantic Unreal/BeamNG validation are **not implemented**. The new checks establish which command ran against which source, not whether every engineering requirement is correct.
+The current [feature coverage](docs/feature-coverage.md) distinguishes shipped workflows, native-engine delegation, and missing features. The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventions are recorded in [DESIGN.md](DESIGN.md). Automatic model routing, unattended agent teams, automatic knowledge extraction, repository-wide symbol indexing, a general MCP manager, and semantic Unreal/BeamNG validation are **not implemented**. The checks establish which command ran against which source, not whether every engineering requirement is correct.
 
 ## Run on Windows
 
@@ -38,7 +41,7 @@ The larger roadmap is in [PLAN.md](PLAN.md); the implemented interface conventio
    - [Codex CLI](https://github.com/openai/codex), for OpenAI-hosted models.
    - [Claude Code](https://code.claude.com/docs/en/setup), for Claude.
    - Codex CLI plus an already-running Ollama, LM Studio, or compatible local API server, for local models. See the protocol limits below.
-3. Complete authentication in the provider's **own official CLI**, where required. Nova does not provide a Claude.ai/OpenAI login form, read provider credential files, or import credentials.
+3. Use **Settings → Agents → Provider accounts** to check an existing sign-in or start the provider's official browser flow. Signing in directly through the official CLI remains supported. Nova does not host a password form, read provider credential files, or import credentials.
 
 From this repository's root, open PowerShell:
 
@@ -60,6 +63,17 @@ npm start
 Settings is organized into **General**, **Agents**, **Local models**, **Storage**, and **Recovery**. If provider discovery fails, use **Agents → Browse** to select the installed native executable. Supported JavaScript CLI entry points use the configured Node runtime; arbitrary `.cmd`/`.bat` wrappers are not interpreted. A command containing shell operators is not a supported configuration. Nova intentionally does not use a shell to interpolate prompts or launch arbitrary renderer-supplied commands.
 
 After installing or updating a CLI, use **Refresh agent availability** to rerun capability detection. Saving Settings also refreshes detection. Routine conversation updates use cached results; they do not repeatedly launch the CLIs.
+
+### Sign in to Codex or Claude Code
+
+1. Save any executable or Codex-home changes, then open **Settings → Agents**. **Check status** reads account metadata through the installed tool; CLI availability and signed-in status are separate checks.
+2. Choose **Sign in** for the intended provider. Review the native dialog and finish any agent work running in Nova or other applications before confirming.
+3. Complete the official browser flow while Nova stays open. Progress and **Cancel sign-in** remain available. Nova confirms the account through the official tool before reporting completion.
+4. After completion, select the provider in the composer. Account status alone does not establish model entitlement, remaining usage, or a successful model request.
+
+Codex uses the app-server's supported ChatGPT login and account-status methods. With the same configured Codex home, Nova and the OEM Codex app use that engine-managed sign-in. Claude uses the official `claude auth login` and JSON `claude auth status` commands under safe mode; the CLI owns its normal credential location and browser flow. **Claude Code login is not a login to Claude Desktop**, and neither provider receives the other's tokens. An organizational flow that requires an interactive terminal must be completed through the official CLI before refreshing status; Nova does not bypass it.
+
+Status checks and login start no model turn. Workspace/provider mutations are blocked while an account operation is active, including while browser sign-in is pending. Cancel the flow before changing configuration. If process cleanup cannot be confirmed, Settings → Recovery retains an account-worker lock until you inspect and stop the affected processes and explicitly acknowledge cleanup.
 
 ### First task
 
@@ -96,7 +110,22 @@ Endpoints must use loopback (`127.0.0.1`, `localhost`, or `[::1]`) without embed
 5. Keep Codex selected for native continuation, or explicitly choose Claude/local to hand off a bounded visible transcript and project references. Those providers do not acquire Codex's native session, account, private reasoning, or binary attachments.
 6. Preview selected references before importing them into a project. Imported skills are reference text, not installed or automatically executed tools.
 
+For an imported conversation, use its **Refresh from Codex** action after another official client has updated it. Refresh updates the retained native-history snapshot; Nova's own recorded runs remain separate. Stop competing work before refreshing or continuing. This is an explicit refresh, not an always-on cross-application writer lock.
+
+Use **Publish handoff to Codex** on a Nova thread to save its bounded visible context and eligible memory as a new named native conversation. For an imported/native-linked thread, the installed engine forks its current native source first, preserving full Codex-managed history inside Codex; a Nova-only thread starts a fresh native conversation. The engine then persists the labeled handoff without requesting a model turn or overwriting the original. Subsequent Codex work in the same Nova thread continues the published native thread. Claude and local models still receive only bounded visible context, not that full provider-private history. The native thread ID is retained for finding the handoff. Codex's rendering of injected context depends on the installed version: model-visible persisted context does **not** guarantee a pixel-identical or fully merged transcript in its proprietary desktop UI.
+
 See [Codex compatibility and storage boundaries](docs/codex-compatibility.md) for exact folder handling, conversation lifecycle, limits, and recovery behavior. This is an integration with the open-source engine, not a clone of every proprietary desktop feature.
+
+### Share project memory with the official tools
+
+1. Add or review project notes in **Memory**, then choose **Preview shared memory files** under **Use memory in the official apps**.
+2. Review the complete before/after text for `.nova/MEMORY.md`, `AGENTS.md`, and `CLAUDE.md`. Stale, missing, or unavailable source-linked notes are omitted with a warning. Existing text outside Nova's managed blocks is preserved.
+3. Choose **Publish reviewed memory…** and confirm the exact project files in the native dialog. A changed preview or ambiguous file/link state requires a fresh review; it is not silently overwritten.
+4. Review and commit these ordinary project-file changes yourself before a new isolated Build. No automatic commit occurs, Build requires a clean baseline, and a new worktree inherits only committed files.
+
+Publishing opts that project into fresh shared-file reads for later Nova Codex, Claude, and local-model context. Official Codex follows the project's `AGENTS.md` reference; Claude Code follows its `CLAUDE.md` import. Put durable notes written by other tools **outside the Nova-managed notes block** so a later explicit publish preserves them. Nested instruction overrides, selected worktree contents, and each model's context limits still apply.
+
+Publishing is manual, not background synchronization or automatic extraction of memories from every conversation. Nova's private note store and the providers' private memory databases remain separate. **Disable Nova shared-file reads** stops Nova's automatic inclusion, but does not delete shared files or remove instructions that the official tools can still read. Review/remove those project references separately if you want to stop that sharing too. Never put credentials in these files; included context can be sent to your selected cloud provider.
 
 ### Inspect context and organize ongoing work
 
@@ -160,7 +189,7 @@ Application state is written atomically to `workspace/workspace.json` under Elec
 - Do not put API keys, passwords, or other secrets in project memory.
 - A cloud provider receives the prompt and context passed to it and any project content its tools read. Local persistence does not make cloud execution private or offline.
 - The Local adapter uses the Codex harness and a configured loopback server; it is not a blanket guarantee that every external tool or local server is offline.
-- No project-memory export to the repository is automatic. Nova memory is separate from Codex's internal store; explicitly imported reference text is a source-linked copy, not a synchronized write into that store.
+- No project-memory export to the repository is automatic. An explicitly reviewed publish writes ordinary project files and enables fresh shared-file reads in Nova; it does not synchronize private Codex/Claude memory databases. Imported Codex references remain source-linked copies.
 - Provider credentials remain with the official provider tooling. Nova does not copy, exchange, or share authentication between providers.
 - Composer drafts are separate plaintext device-local storage. An explicit Markdown export creates a plaintext file at your chosen destination; it is not a complete native-history backup or a guaranteed secrets scrubber.
 
@@ -229,6 +258,9 @@ The initial package is unsigned. A public release still needs a Windows-native s
 
 - [ ] Install or launch the application on Windows and confirm the native folder picker and window controls work.
 - [ ] Detect each intended provider; confirm an unsupported CLI reports an error without a weaker fallback.
+- [ ] Check and complete official Codex/Claude Code sign-in, then cancel a pending sign-in; confirm no credentials appear in Nova state or transcript exports.
+- [ ] Import and refresh a disposable native Codex thread, then publish a separate handoff and verify how the installed OEM app presents it before relying on that workflow.
+- [ ] Review/publish shared project memory, edit a note outside its managed block, confirm a later context request reads the change, and exercise disabling Nova reads without deleting files.
 - [ ] Run Plan against a disposable repository, then confirm Build creates a separate worktree and leaves the original checkout unchanged.
 - [ ] Cancel an active task and verify its worker exits while existing changes remain reviewable.
 - [ ] Restart the app and verify projects, conversations, and memory persist; interrupted tasks must not appear active.
@@ -246,6 +278,8 @@ Nova Workbench is maintained in this fork under the repository's Apache-2.0 lice
 Useful upstream references:
 
 - [Codex source and build documentation](https://github.com/openai/codex)
+- [Codex app-server protocol, including account and thread methods](https://learn.chatgpt.com/docs/app-server)
 - [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+- [Claude Code project memory and instruction files](https://code.claude.com/docs/en/memory)
 - [Claude Code legal and compliance guidance](https://code.claude.com/docs/en/legal-and-compliance)
 - [Electron security checklist](https://www.electronjs.org/docs/latest/tutorial/security)

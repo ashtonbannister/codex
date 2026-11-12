@@ -635,7 +635,8 @@ export class CodexStdioClient {
   }
 }
 
-async function connect(options: CodexServerOptions): Promise<CodexStdioClient> {
+/** Owned, initialized transport for narrow official account operations as well as history. */
+export async function connectCodexServer(options: CodexServerOptions): Promise<CodexStdioClient> {
   checkAbort(options.signal);
   const executable = await resolveExecutable(options.settings.codexPath);
   checkAbort(options.signal);
@@ -655,7 +656,7 @@ async function withClient<T>(
   options: CodexServerOptions,
   work: (client: CodexStdioClient) => Promise<T>,
 ): Promise<T> {
-  const client = await connect(options);
+  const client = await connectCodexServer(options);
   let result: T;
   try {
     result = await work(client);
@@ -710,7 +711,7 @@ const STARTUP_WARNING =
 
 export async function listCodexThreads(
   options: CodexServerOptions,
-  query: CodexThreadQuery,
+  query: CodexThreadQuery & { cwd?: string },
 ): Promise<CodexThreadPage> {
   return withClient(options, async (client) => {
     const result = record(
@@ -723,6 +724,7 @@ export async function listCodexThreads(
         sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
         archived: query.archived === true,
         useStateDbOnly: true,
+        ...(query.cwd ? { cwd: boundedString(query.cwd, 4_096, "thread directory filter") } : {}),
         ...(query.cursor
           ? { cursor: boundedString(query.cursor, 4_096, "history cursor") }
           : {}),
@@ -744,6 +746,32 @@ export async function listCodexThreads(
   });
 }
 
+/** Direct thread/read is not account-scoped upstream; verify membership before exposing history. */
+async function assertCurrentAccountThread(
+  client: CodexStdioClient,
+  thread: CodexThreadSummary,
+  archived: boolean,
+): Promise<void> {
+  let next: string | undefined;
+  const seen = new Set<string>();
+  for (let page = 0; page < 8; page += 1) {
+    const result = record(await client.request("thread/list", {
+      currentAccountOnly: true, cwd: thread.cwd, archived,
+      modelProviders: [], sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
+      limit: 50, sortKey: "updated_at", sortDirection: "desc", useStateDbOnly: true,
+      ...(next ? { cursor: next } : {}),
+    }), "account-scoped thread list");
+    if (!Array.isArray(result.data) || result.data.length > 50) throw invalid("account-scoped thread list");
+    if (result.data.some((entry) => record(entry, "thread").id === thread.id)) return;
+    next = cursor(result.nextCursor);
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+  }
+  throw new CodexAppServerError(
+    "This conversation is not in the current account's bounded folder history. It may belong to a different account, have been archived, or need reopening in official Codex to refresh its index. No transcript or model turn was transferred.",
+  );
+}
+
 export async function readCodexHistory(
   options: CodexServerOptions,
   query: CodexHistoryQuery,
@@ -759,6 +787,7 @@ export async function readCodexHistory(
     );
     const thread = threadSummary(result.thread, query.archived === true);
     if (thread.id !== id) throw invalid("mismatched thread ID");
+    await assertCurrentAccountThread(client, thread, query.archived === true);
     const history = record(
       await client.request("thread/turns/list", {
         threadId: id,
@@ -902,7 +931,7 @@ function sandbox(mode: RunMode, cwd: string): JsonObject {
 
 async function validateNativeSession(
   response: JsonObject,
-  options: NativeCodexOptions,
+  options: Pick<NativeCodexOptions, "fork" | "threadId" | "mode" | "cwd">,
 ): Promise<string> {
   const thread = threadSummary(response.thread, false);
   if (
@@ -960,12 +989,85 @@ export interface NativeCodexOptions extends CodexServerOptions {
   model: string;
   threadId: string;
   fork: boolean;
+  sourceArchived?: boolean;
   prompt: string;
   signal: AbortSignal;
   timeoutMs: number;
   maxBytes: number;
   onEvent: (event: NormalizedEvent) => void;
   onThreadReady: (threadId: string) => Promise<void>;
+}
+
+export interface NativeHandoffOptions extends CodexServerOptions {
+  title: string;
+  text: string;
+  sourceThreadId?: string;
+  sourceArchived?: boolean;
+  /** Persist the new engine ID before submitting context, so ambiguous failures remain inspectable. */
+  onThreadCreated: (threadId: string) => Promise<void>;
+}
+
+/**
+ * Publish a provider-neutral reference to a NEW native thread through the
+ * installed engine. No turn/start, model request, credential copying or direct
+ * rollout/database writes are involved. The original thread is never changed.
+ */
+export async function publishNativeHandoff(
+  options: NativeHandoffOptions,
+): Promise<{ nativeThreadId: string; warnings: string[] }> {
+  const title = boundedString(options.title, 160, "handoff title");
+  const text = boundedString(options.text, 100_000, "handoff context");
+  if (Buffer.byteLength(text, "utf8") > 256 * 1_024)
+    throw new CodexAppServerError("The shared context exceeds the native handoff limit. Shorten the context and try again.");
+  if (!path.isAbsolute(options.cwd)) throw invalid("handoff directory");
+  return withClient(options, async (client) => {
+    if (options.sourceThreadId) {
+      const source = record(await client.request("thread/read", {
+        threadId: boundedString(options.sourceThreadId, 256, "handoff source ID"), includeTurns: false,
+      }), "handoff source");
+      const summary = threadSummary(source.thread, options.sourceArchived === true);
+      if (summary.id !== options.sourceThreadId) throw invalid("handoff source ID");
+      await assertCurrentAccountThread(client, summary, options.sourceArchived === true);
+      if (summary.modelProvider !== "openai" || !["idle", "notLoaded"].includes(summary.status))
+        throw new CodexAppServerError("The linked native conversation is active or uses a different provider. No handoff was created.");
+    }
+    const config = nativeConfig(await client.request("config/read", {
+      includeLayers: false,
+      cwd: options.cwd,
+    }));
+    const response = record(await client.request(options.sourceThreadId ? "thread/fork" : "thread/start", {
+      ...(options.sourceThreadId ? { threadId: options.sourceThreadId, excludeTurns: true } : { ephemeral: false }),
+      cwd: options.cwd,
+      modelProvider: "openai",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandbox: "read-only",
+      config,
+    }), "new handoff thread");
+    const nativeThreadId = await validateNativeSession(response, {
+      cwd: options.cwd, mode: "plan", fork: true, threadId: options.sourceThreadId ?? "",
+    });
+    await options.onThreadCreated(nativeThreadId);
+    checkAbort(options.signal);
+    await client.request("thread/name/set", { threadId: nativeThreadId, name: title });
+    await client.request("thread/inject_items", {
+      threadId: nativeThreadId,
+      items: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      }],
+    });
+    return {
+      nativeThreadId,
+      warnings: [
+        options.sourceThreadId
+          ? "A new native Codex fork retains its provider-owned history and the bounded shared handoff. No model turn was started; the original conversation was not rewritten."
+          : "A new native Codex conversation contains the bounded visible-context handoff. No model turn was started; no existing conversation was rewritten.",
+        "Codex persists injected context for subsequent model requests. Its desktop transcript presentation depends on the installed version; this is not a replica of Claude's native session or hidden reasoning.",
+      ],
+    };
+  });
 }
 
 /** Native history stays with the official engine. No transcript is fabricated as native state. */
@@ -1016,7 +1118,7 @@ export async function runNativeCodex(
   try {
     // Cancellation is routed here first to attempt turn/interrupt before EOF;
     // the transport still performs unconditional, awaited process cleanup.
-    client = await connect({ ...options, signal });
+    client = await connectCodexServer({ ...options, signal });
     client.detachAbortSignal();
     signal.addEventListener("abort", abort, { once: true });
     if (timedOut) throw new CodexAppServerError(failure!);
@@ -1034,6 +1136,7 @@ export async function runNativeCodex(
     );
     const sourceThread = threadSummary(source.thread, false);
     if (sourceThread.id !== options.threadId) throw invalid("native source ID");
+    await assertCurrentAccountThread(client, sourceThread, options.sourceArchived === true);
     if (sourceThread.status === "active")
       throw new CodexAppServerError(
         "This Codex conversation is active. Let its current turn finish before continuing it in Nova.",

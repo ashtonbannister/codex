@@ -6,6 +6,7 @@ import { LOCAL_DEFAULTS } from "../../shared/local-models";
 import type { ProviderStatus, Settings } from "../../shared/types";
 import type { RecoveryItem } from "../../shared/workspace-actions";
 import { api, isPreview } from "../bridge";
+import { AccountConnections } from "./AccountConnections";
 import { errorText, Modal, ProviderMark } from "./primitives";
 
 type Section = "general" | "agents" | "local" | "storage" | "recovery";
@@ -16,8 +17,8 @@ const sections: { id: Section; label: string }[] = [
 ];
 const backendNames = { ollama: "Ollama", lmstudio: "LM Studio", custom: "Custom endpoint" };
 
-export function SettingsForm({ settings, providers, onClose, onSaved }: {
-  settings: Settings; providers: ProviderStatus[]; onClose: () => void; onSaved: () => Promise<void>;
+export function SettingsForm({ settings, providers, workActive = false, onClose, onSaved }: {
+  settings: Settings; providers: ProviderStatus[]; workActive?: boolean; onClose: () => void; onSaved: () => Promise<void>;
 }) {
   const [values, setValues] = useState<Settings>(() => ({
     ...settings,
@@ -32,6 +33,7 @@ export function SettingsForm({ settings, providers, onClose, onSaved }: {
   const [notice, setNotice] = useState("");
   const [catalog, setCatalog] = useState<LocalModelCatalog | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [authenticating, setAuthenticating] = useState(false);
   const [discoveryError, setDiscoveryError] = useState("");
   const discoveryId = useRef(0);
   const connection: LocalConnection = { kind: values.localProvider ?? "ollama", baseUrl: values.localBaseUrl ?? "", protocol: values.localProtocol ?? "responses" };
@@ -39,7 +41,15 @@ export function SettingsForm({ settings, providers, onClose, onSaved }: {
   const currentConnection = useRef(connectionKey);
   currentConnection.current = connectionKey;
   const currentCatalog = catalog && JSON.stringify(catalog.connection) === connectionKey ? catalog : null;
-  const busy = saving || !!choosing;
+  const busy = saving || !!choosing || authenticating;
+  const unsavedAccountConnection = values.codexPath !== settings.codexPath || values.claudePath !== settings.claudePath || (values.codexHome ?? "") !== (settings.codexHome ?? "");
+  const accountDisabledReason = workActive ? "Stop active runs and checks before changing provider accounts." : unsavedAccountConnection ? "Save executable and Codex-home changes before checking or signing in to an account." : saving || choosing ? "Wait for the current settings action to finish." : "";
+  const close = () => {
+    if (authenticating) {
+      setSection("agents");
+      setNotice("Finish or cancel sign-in before closing settings.");
+    } else onClose();
+  };
   useEffect(() => () => { discoveryId.current++; }, []);
 
   const pick = async (kind: "codex" | "claude" | "codex-home" | "worktrees") => {
@@ -79,13 +89,13 @@ export function SettingsForm({ settings, providers, onClose, onSaved }: {
     setError("");
     try {
       await api.openProviderHelp(provider);
-      setNotice(isPreview ? "Preview only. The desktop app opens the provider’s official setup documentation in your browser." : provider === "codex" || provider === "claude" ? "Official setup documentation opened in your browser. Sign in using the installed CLI; then save settings to refresh availability." : "Official local-server setup documentation opened in your browser. Load an installed model in your server, then use Load models here.");
+      setNotice(isPreview ? "Preview only. The desktop app opens the provider’s official setup documentation in your browser." : provider === "codex" || provider === "claude" ? "Official setup documentation opened in your browser. Use the account controls here after saving your executable path." : "Official local-server setup documentation opened in your browser. Load an installed model in your server, then use Load models here.");
     } catch (reason) { setError(errorText(reason)); }
   };
 
-  return <Modal title="Workbench settings" subtitle="Local preferences, runtimes, and safe recovery." onClose={onClose} wide className="workbench-settings">
+  return <Modal title="Workbench settings" subtitle="Local preferences, accounts, and safe recovery." onClose={close} wide className="workbench-settings">
     <form className="settings-form" onSubmit={save}>
-      <div className="settings-callout"><ShieldCheck size={17} /><p>Sign in through the official CLI tools. Workbench does not collect API keys or account tokens. Provider usage limits still apply.</p></div>
+      <div className="settings-callout"><ShieldCheck size={17} /><p>Sign-in stays with the official Codex and Claude Code tools. Workbench does not collect API keys or account tokens. Provider usage limits still apply.</p></div>
       <div className="settings-tabs" role="tablist" aria-label="Settings sections">
         {sections.map((item, index) => <button key={item.id} id={`settings-tab-${item.id}`} type="button" role="tab" aria-selected={section === item.id} aria-controls={`settings-panel-${item.id}`} tabIndex={section === item.id ? 0 : -1} onClick={() => setSection(item.id)} onKeyDown={(event) => {
           let next: number | undefined;
@@ -97,6 +107,7 @@ export function SettingsForm({ settings, providers, onClose, onSaved }: {
         }}>{item.label}</button>)}
       </div>
       <div className="settings-panel" role="tabpanel" id={`settings-panel-${section}`} aria-labelledby={`settings-tab-${section}`}>
+        <AccountConnections hidden={section !== "agents"} disabledReason={accountDisabledReason} onBusyChange={setAuthenticating} />
         {section === "general" && <>
           <section><h3>Run boundaries</h3><div className="field-row">
             <label className="field"><span>Timeout · minutes</span><input type="number" min={1} max={120} required value={values.timeoutMinutes} onChange={(event) => setValues({ ...values, timeoutMinutes: Number(event.target.value) })} /></label>
@@ -128,7 +139,7 @@ export function SettingsForm({ settings, providers, onClose, onSaved }: {
       </div>
       {notice && <p className="panel-note" role="status">{notice}</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy} type="submit">{saving && <LoaderCircle className="spin" size={15} />}Save settings</button></div>
+      <div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy || workActive} type="submit">{saving && <LoaderCircle className="spin" size={15} />}Save settings</button></div>
     </form>
   </Modal>;
 }
@@ -159,7 +170,7 @@ function RecoveryPanel() {
     finally { setAcknowledging(null); }
   };
   return <section className="recovery-panel"><div className="inspector-section-top"><h3>Interrupted worker recovery</h3><button type="button" className="icon-button" aria-label="Refresh recovery items" disabled={loading || !!acknowledging} onClick={() => void refresh()}><RefreshCw size={14} className={loading ? "spin" : ""} /></button></div><p className="panel-intro">A failed worker cleanup can leave a project or Codex home locked. Nova cannot automatically prove that an old worker has stopped.</p><p className="context-warning">Before acknowledging, close the affected coding processes and verify in Task Manager that they are no longer running. This removes the safety lock; it does not stop a process or repair files. A native confirmation is required.</p>
-    {loading ? <p className="panel-loading"><LoaderCircle size={14} className="spin" />Reading recovery state…</p> : items.length ? <div className="recovery-list">{items.map((item) => <article className="recovery-item" key={item.id}><h4>{item.label}</h4><span className="field-hint">{item.kind === "codex-home" ? "Codex home lock" : "Project worker lock"}</span><p>{item.detail}</p><button type="button" className="secondary-button" disabled={!!acknowledging} onClick={() => void acknowledge(item)}>{acknowledging === item.id && <LoaderCircle size={14} className="spin" />}I verified the worker stopped…</button></article>)}</div> : !error && <p className="panel-note">No recovery locks recorded. This is not a scan of running processes.</p>}
+    {loading ? <p className="panel-loading"><LoaderCircle size={14} className="spin" />Reading recovery state…</p> : items.length ? <div className="recovery-list">{items.map((item) => <article className="recovery-item" key={item.id}><h4>{item.label}</h4><span className="field-hint">{item.kind === "codex-home" ? "Codex home lock" : item.kind === "accounts" ? "Provider account worker lock" : "Project worker lock"}</span><p>{item.detail}</p><button type="button" className="secondary-button" disabled={!!acknowledging} onClick={() => void acknowledge(item)}>{acknowledging === item.id && <LoaderCircle size={14} className="spin" />}I verified the worker stopped…</button></article>)}</div> : !error && <p className="panel-note">No recovery locks recorded. This is not a scan of running processes.</p>}
     {notice && <p className="panel-note" role="status">{notice}</p>}{error && <p className="form-error" role="alert">{error}</p>}
   </section>;
 }

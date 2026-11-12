@@ -63,10 +63,22 @@ if(!process.argv.includes('app-server')){
     const thread=data.threads.find(entry=>entry.id===params.threadId);
     let result={};
     if(request.method==='initialize')result={userAgent:'fake-codex'};
-    else if(request.method==='thread/list')result={data:data.threads.map(summary),nextCursor:null};
+    else if(request.method==='thread/list')result={data:data.threads.filter(entry=>entry.visible!==false&&(!params.cwd||entry.cwd===params.cwd)).map(summary),nextCursor:null};
     else if(request.method==='thread/read')result={thread:summary(thread)};
     else if(request.method==='thread/turns/list')result={data:params.cursor?thread.turns.slice(1):thread.turns.slice(0,thread.pages?1:undefined),nextCursor:!params.cursor&&thread.pages?'older':null};
     else if(request.method==='config/read')result={config:{mcp_servers:{}}};
+    else if(request.method==='thread/start'){
+      const target={id:randomUUID(),name:'New native thread',preview:'',cwd:params.cwd,modelProvider:'openai',createdAt:1700000100,updatedAt:1700000100,source:'appServer',status:{type:'notLoaded'},turns:[]};
+      data.threads.push(target);
+      result={thread:summary(target),modelProvider:'openai',cwd:params.cwd,approvalPolicy:'never',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}};
+    }else if(request.method==='thread/name/set')thread.name=params.name;
+    else if(request.method==='thread/inject_items'){
+      const saved=JSON.parse(fs.readFileSync(data.workspaceFile,'utf8'));
+      const receipt=saved.threads.find(entry=>entry.codexHandoff?.nativeThreadId===params.threadId)?.codexHandoff;
+      if(!receipt||receipt.state!=='pending')throw Error('Handoff receipt not durably pending before injection');
+      if(data.failInjection){fs.writeFileSync(file,JSON.stringify(data));send({id:request.id,error:{code:-32603,message:'PRIVATE_FIXTURE_ERROR_DO_NOT_EXPOSE'}});return;}
+      thread.injectedItems=params.items;
+    }
     else if(request.method==='thread/fork'||request.method==='thread/resume'){
       const target=request.method==='thread/fork'?{...thread,id:randomUUID(),cwd:params.cwd}:thread;
       if(request.method==='thread/fork')data.threads.push(target);
@@ -234,6 +246,182 @@ async function finish(service: WorkspaceService, id: string): Promise<Run> {
   }
   throw new Error("Fixture run did not finish within its bounded wait.");
 }
+
+test("refresh native history sees official-app changes and preserves Nova turns and project notes", async (t) => {
+  const f = await fixture(t, { pages: true });
+  const thread = await f.importThread();
+  await f.service.saveMemory({ projectId: thread.projectId, title: "Nova decision", content: "Preserve the user's constraints.", kind: "decision", source: "User" });
+  const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Continue with the current project." });
+  assert.equal((await finish(f.service, run.id)).status, "completed");
+  const before = (await f.service.snapshot()).state;
+  const native = await f.nativeState();
+  native.threads[0].updatedAt += 60;
+  native.threads[0].turns.unshift({ id: "official-new", items: [{ type: "agentMessage", id: "official-answer", text: "New answer from the official Codex app." }] });
+  await writeFile(f.nativeFile, JSON.stringify(native));
+  const refreshed = await f.service.refreshCodexThread(thread.id, f.connection);
+  assert.ok(refreshed.codex?.history.some((message) => message.id === "official-answer"));
+  assert.equal(refreshed.codex?.history.length, 5);
+  const after = (await f.service.snapshot()).state;
+  assert.deepEqual(after.runs, before.runs);
+  assert.deepEqual(after.memories, before.memories);
+  const listCall = (await f.nativeState()).calls.find((call: any) => call.method === "thread/list");
+  assert.equal(listCall.params.currentAccountOnly, true);
+  assert.equal(listCall.params.cwd, f.cwd);
+});
+
+test("refresh rejects threads outside the current account catalog without reading or replacing their snapshots", async (t) => {
+  const f = await fixture(t);
+  const thread = await f.importThread();
+  const native = await f.nativeState();
+  native.calls = [];
+  native.threads[0].visible = false;
+  await writeFile(f.nativeFile, JSON.stringify(native));
+  await assert.rejects(f.service.refreshCodexThread(thread.id, f.connection), /not in the current account/);
+  assert.deepEqual((await f.service.snapshot()).state.threads[0], thread);
+  assert.ok((await f.nativeState()).calls.every((call: any) => call.method !== "thread/turns/list"));
+});
+
+test("native handoff publishes Claude-visible context and memory with durable receipt, new native identity and idempotence", async (t) => {
+  const f = await fixture(t);
+  const thread = await f.importThread();
+  const memory = await f.service.saveMemory({ projectId: thread.projectId, title: "Shared engineering decision", content: "Preserve the same geometry across providers.", kind: "decision", source: "User" });
+  const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Review the shared engineering decision." });
+  assert.equal((await finish(f.service, run.id)).status, "completed");
+  const original = structuredClone((await f.nativeState()).threads[0]);
+  const review = await f.service.reviewCodexHandoff(thread.id, f.connection);
+  const published = await f.service.publishCodexHandoff(thread.id, review.fingerprint, f.connection);
+  assert.equal(published.unchanged, false);
+  assert.notEqual(published.nativeThreadId, SOURCE_ID);
+  const state = (await f.service.snapshot()).state;
+  const linked = state.threads.find((entry) => entry.id === thread.id)!;
+  assert.equal(linked.codexHandoff?.state, "published");
+  assert.equal(linked.codexHandoff?.nativeThreadId, published.nativeThreadId);
+  assert.equal(linked.codex?.sourceThreadId, SOURCE_ID);
+  assert.equal(linked.codex?.forkedThreadId, published.nativeThreadId);
+  assert.ok(state.memories.some((entry) => entry.id === memory.id));
+  assert.ok(state.runs.some((entry) => entry.id === run.id));
+  const native = await f.nativeState();
+  assert.deepEqual(native.threads[0], original);
+  const copy = native.threads.find((entry: any) => entry.id === published.nativeThreadId);
+  assert.deepEqual(copy.turns, original.turns, "native-owned history stays in the native fork");
+  assert.match(copy.injectedItems[0].content[0].text, /Preserve the same geometry across providers/);
+  assert.match(copy.injectedItems[0].content[0].text, /Current visible native answer/);
+  assert.match(copy.injectedItems[0].content[0].text, /claude/);
+  assert.doesNotMatch(copy.injectedItems[0].content[0].text, /PRIVATE_REASONING_SENTINEL/);
+  assert.equal(native.calls.filter((call: any) => call.method === "turn/start").length, 0);
+  const nextReview = await f.service.reviewCodexHandoff(thread.id, f.connection);
+  assert.equal(nextReview.unchanged, true);
+  const again = await f.service.publishCodexHandoff(thread.id, nextReview.fingerprint, f.connection);
+  assert.equal(again.unchanged, true);
+  assert.equal(again.nativeThreadId, published.nativeThreadId);
+  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "thread/start" || call.method === "thread/fork").length, 1);
+});
+
+test("a Nova-only Claude conversation receives a real OEM thread link after explicit publishing", async (t) => {
+  const f = await fixture(t);
+  const imported = await f.importThread();
+  const run = await f.service.startRun({ projectId: imported.projectId, provider: "claude", mode: "plan", prompt: "Start a Nova-only conversation." });
+  assert.equal((await finish(f.service, run.id)).status, "completed");
+  const before = (await f.service.snapshot()).state.threads.find((entry) => entry.id === run.threadId)!;
+  assert.equal(before.codex, undefined);
+  const review = await f.service.reviewCodexHandoff(before.id, f.connection);
+  const published = await f.service.publishCodexHandoff(before.id, review.fingerprint, f.connection);
+  const after = (await f.service.snapshot()).state.threads.find((entry) => entry.id === run.threadId)!;
+  assert.equal(after.codex?.sourceThreadId, published.nativeThreadId);
+  assert.equal(after.codex?.home, f.home);
+  assert.equal(after.codexHandoff?.state, "published");
+  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "thread/start").length, 1);
+  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "turn/start").length, 0);
+});
+
+test("native handoff refuses stale context and retains failed creation receipts without exposing provider diagnostics", async (t) => {
+  const f = await fixture(t);
+  const thread = await f.importThread();
+  const review = await f.service.reviewCodexHandoff(thread.id, f.connection);
+  await f.service.saveMemory({ projectId: thread.projectId, title: "New note", content: "Changed after review.", kind: "note", source: "User" });
+  await assert.rejects(f.service.publishCodexHandoff(thread.id, review.fingerprint, f.connection), /changed|preview|review/i);
+  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "thread/start" || call.method === "thread/fork").length, 0);
+  const current = await f.service.reviewCodexHandoff(thread.id, f.connection);
+  const native = await f.nativeState();
+  const original = structuredClone(native.threads[0]);
+  native.failInjection = true;
+  await writeFile(f.nativeFile, JSON.stringify(native));
+  let failure: unknown;
+  try { await f.service.publishCodexHandoff(thread.id, current.fingerprint, f.connection); }
+  catch (error) { failure = error; }
+  assert.ok(failure instanceof Error);
+  assert.doesNotMatch(failure.message, /PRIVATE_FIXTURE_ERROR_DO_NOT_EXPOSE/);
+  const saved = (await f.service.snapshot()).state.threads.find((entry) => entry.id === thread.id)!;
+  assert.equal(saved.codexHandoff?.state, "failed");
+  assert.ok(saved.codexHandoff?.nativeThreadId);
+  assert.equal(saved.codex?.forkedThreadId, undefined);
+  assert.deepEqual((await f.nativeState()).threads[0], original);
+  const persisted = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
+  assert.equal(persisted.threads.find((entry: any) => entry.id === thread.id).codexHandoff.state, "failed");
+  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "turn/start").length, 0);
+});
+
+test("account operation lease is durable before launch, blocks agents, rejects stale finish and clears only its exact marker", async (t) => {
+  const f = await fixture(t);
+  const thread = await f.importThread();
+  const operation = await f.service.beginAccountOperation("codex", f.home);
+  const persisted = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
+  assert.equal(persisted.accountOperation.id, operation);
+  assert.equal(persisted.accountOperation.provider, "codex");
+  assert.equal(persisted.accountOperation.home, f.home);
+  const beforeCalls = (await f.nativeState()).calls;
+  await assert.rejects(f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Must not start during login." }), /provider account cleanup/);
+  await assert.rejects(f.service.finishAccountOperation("stale-operation"), /marker was preserved/);
+  assert.equal((await f.service.snapshot()).state.accountOperation?.id, operation);
+  assert.equal(JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8")).accountOperation.id, operation);
+  assert.deepEqual((await f.nativeState()).calls, beforeCalls);
+  assert.equal((await f.service.snapshot()).state.runs.length, 0);
+  await f.service.finishAccountOperation(operation);
+  assert.equal((await f.service.snapshot()).state.accountOperation, undefined);
+  assert.equal(JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8")).accountOperation, undefined);
+  const failed = await f.service.beginAccountOperation("claude", f.home);
+  await f.service.recordAccountRecovery("claude", f.home);
+  await assert.rejects(f.service.finishAccountOperation(failed), /marker was preserved/);
+  const recovered = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
+  assert.equal(recovered.accountOperation, undefined);
+  assert.equal(recovered.accountRecovery.provider, "claude");
+});
+
+test("orphan account lease becomes durable recovery on restart without probes and requires acknowledgement then explicit tool refresh", async (t) => {
+  const f = await fixture(t);
+  const thread = await f.importThread();
+  const operation = await f.service.beginAccountOperation("claude", f.home);
+  await f.service.dispose();
+  const probeFile = path.join(f.root, "restart-probes.txt");
+  const instrumented = fakeCli.replace("import fs from 'node:fs';", `import fs from 'node:fs';\nfs.appendFileSync(${JSON.stringify(probeFile)}, 'invoked\\n');`);
+  await writeFile(f.executable, instrumented);
+  const restarted = new WorkspaceService(f.dataDir, () => undefined);
+  try {
+    await restarted.initialize();
+    const snapshot = await restarted.snapshot();
+    assert.equal(snapshot.state.accountOperation, undefined);
+    assert.equal(snapshot.state.accountRecovery?.provider, "claude");
+    assert.equal(snapshot.state.accountRecovery?.home, f.home);
+    assert.ok(snapshot.providers.every((provider) => !provider.available));
+    await assert.rejects(readFile(probeFile), { code: "ENOENT" });
+    const durable = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
+    assert.equal(durable.accountOperation, undefined);
+    assert.equal(durable.accountRecovery.provider, "claude");
+    await assert.rejects(restarted.finishAccountOperation(operation), /marker was preserved/);
+    await assert.rejects(restarted.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Must remain blocked." }), /provider account cleanup/);
+    const recovery = (await restarted.listRecoveryItems()).find((entry) => entry.id === "provider-accounts")!;
+    assert.equal(recovery.kind, "accounts");
+    await assert.rejects(restarted.acknowledgeRecovery({ id: recovery.id, token: "0".repeat(64) }), /Recovery state changed/);
+    await restarted.acknowledgeRecovery({ id: recovery.id, token: recovery.token });
+    assert.equal((await restarted.snapshot()).state.accountRecovery, undefined);
+    await assert.rejects(readFile(probeFile), { code: "ENOENT" });
+    assert.ok((await restarted.snapshot()).providers.every((provider) => !provider.available), "Acknowledgement does not claim successful redetection");
+    await assert.rejects(restarted.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Detection must be refreshed first." }), /refresh tool detection/);
+    const refreshed = await restarted.refreshProviderStatus();
+    assert.ok(refreshed.providers.find((provider) => provider.id === "codex")?.available);
+    assert.match(await readFile(probeFile, "utf8"), /invoked/);
+  } finally { await restarted.dispose(); }
+});
 
 test("compatibility inputs stay bounded and legacy workspaces retain their defaults", () => {
   const legacy = validateWorkspaceState(emptyWorkspace());

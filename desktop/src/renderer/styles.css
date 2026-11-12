@@ -2438,6 +2438,172 @@ kbd {
   padding-top: 0;
   border-top: 0;
 }
+.settings-form .settings-panel > section[hidden] + section {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.account-connections[hidden] {
+  display: none;
+}
+.account-list {
+  margin: 14px 0;
+}
+.account-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.account-summary {
+  display: flex;
+  align-items: flex-start;
+  flex: 1 1 200px;
+  gap: 8px;
+  min-width: 0;
+}
+.account-summary > div {
+  min-width: 0;
+}
+.account-summary strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.account-summary p {
+  color: var(--secondary);
+  font-size: 11px;
+  line-height: 1.65;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.account-summary small {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.account-actions .secondary-button {
+  font-size: 11px;
+  padding: 6px 8px;
+}
+.account-detail {
+  flex-basis: 100%;
+  margin: 0;
+}
+.login-progress {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--secondary);
+  background: var(--surface);
+}
+.login-progress p {
+  font-size: 11px;
+  line-height: 1.8;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.login-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  font-size: 11px;
+}
+.login-heading strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.login-heading > span {
+  margin-inline-start: auto;
+  color: var(--muted);
+}
+.login-failed .login-heading > span {
+  color: var(--error);
+}
+.login-code {
+  font-size: 15px;
+  color: var(--text);
+  user-select: all;
+}
+.login-address {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.shared-memory {
+  padding: 14px 0 18px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.shared-memory .inspector-section-top h3 {
+  font-size: 12px;
+}
+.shared-memory .panel-intro {
+  margin: 8px 0 12px;
+}
+.shared-memory code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.shared-memory-preview {
+  margin-top: 12px;
+}
+.shared-project-path {
+  margin: 8px 0 12px;
+  color: var(--muted);
+}
+.shared-file {
+  border-top: 1px solid var(--border-soft);
+  padding: 10px 0;
+}
+.shared-file > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+.shared-file[open] > summary > .shared-file-chevron {
+  transform: rotate(90deg);
+}
+.shared-file > summary > span {
+  margin-inline-start: auto;
+  font-size: 10px;
+  color: var(--muted);
+}
+.shared-file-before {
+  margin-top: 10px;
+}
+.shared-file-before summary, .shared-file h4 {
+  margin: 10px 0 7px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+.shared-file-before summary {
+  cursor: pointer;
+}
+.shared-file pre {
+  background: var(--sidebar);
+  padding: 10px;
+  font-size: 10px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 250px;
+  overflow: auto;
+  color: var(--secondary);
+  border-radius: 5px;
+  margin: 0;
+}
 .runtime-detail .field-hint {
   margin: 7px 0 0 21px;
   overflow-wrap: anywhere;

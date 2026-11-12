@@ -55,6 +55,8 @@ import type {
   WorktreeActionResult,
   WorktreeReview,
 } from "../../shared/workspace-actions";
+import type { SharedMemoryPreview, SharedMemoryRequest, SharedMemoryResult } from "../../shared/sharing";
+import type { CodexHandoffReceipt, CodexHandoffResult } from "../../shared/native-handoff";
 import { APP_VERSION, emptyWorkspace } from "../../shared/types";
 import { buildRunContext } from "./context";
 import { captureMemoryFingerprint } from "./memory-source";
@@ -69,6 +71,7 @@ import {
   CodexAppServerError,
   listCodexThreads as listNativeThreads,
   readCodexHistory as readNativeHistory,
+  publishNativeHandoff,
   runNativeCodex,
   type CodexServerOptions,
 } from "./codex-app-server";
@@ -93,6 +96,7 @@ import {
   runProvider,
 } from "./providers";
 import { connectionFromSettings } from "./local-models";
+import { applyProjectSharedMemory, previewProjectSharedMemory } from "./workspace-sharing";
 import type { NormalizedEvent } from "./provider-events";
 import {
   absoluteDirectory,
@@ -276,6 +280,22 @@ function contextSummary(value: unknown): Run["contextSummary"] {
 }
 
 /** A broken state file is reported and preserved, never silently replaced by empty state. */
+function handoffReceipt(value: unknown): CodexHandoffReceipt | undefined {
+  if (value === undefined) return undefined;
+  const input = record(value, "Codex handoff receipt");
+  const fingerprint = text(input.fingerprint, "Handoff fingerprint", 64);
+  if (!/^[a-f0-9]{64}$/.test(fingerprint) || !["pending", "published", "failed"].includes(String(input.state)))
+    throw new Error("Invalid saved Codex handoff receipt.");
+  return {
+    nativeThreadId: identifier(input.nativeThreadId, "Native handoff thread"),
+    home: absoluteDirectory(input.home, "Handoff Codex home"),
+    cwd: absoluteDirectory(input.cwd, "Handoff working folder"),
+    fingerprint,
+    createdAt: text(input.createdAt, "Handoff date", 80),
+    state: input.state as CodexHandoffReceipt["state"],
+  };
+}
+
 export function validateWorkspaceState(value: unknown): WorkspaceState {
   const state = record(value, "Saved workspace");
   if (state.schemaVersion !== 1)
@@ -325,6 +345,7 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       pinned: optionalBoolean(item.pinned, "Thread pin"),
       archivedAt: optionalText(item.archivedAt, "Archive date", 80),
       codex: codexThreadLink(item.codex),
+      codexHandoff: handoffReceipt(item.codexHandoff),
       worktreeStoragePath:
         item.worktreeStoragePath === undefined
           ? undefined
@@ -585,6 +606,35 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
       acknowledgedAt: text(item.acknowledgedAt, "Recovery acknowledgement", 80),
     };
   });
+  if (state.sharedMemoryProjects !== undefined &&
+    (!Array.isArray(state.sharedMemoryProjects) || state.sharedMemoryProjects.length > projects.length))
+    throw new Error("Invalid shared-memory project selection.");
+  const sharedMemoryProjects = (state.sharedMemoryProjects as unknown[] | undefined)?.map((entry) => {
+    const id = identifier(entry, "Shared-memory project");
+    if (!projectsById.has(id)) throw new Error("Shared memory refers to an unknown project.");
+    return id;
+  });
+  if (sharedMemoryProjects && new Set(sharedMemoryProjects).size !== sharedMemoryProjects.length)
+    throw new Error("Duplicate shared-memory project selection.");
+  let accountRecovery: WorkspaceState["accountRecovery"];
+  let accountOperation: WorkspaceState["accountOperation"];
+  if (state.accountOperation !== undefined) {
+    const value = record(state.accountOperation, "Provider account operation");
+    if (value.provider !== "codex" && value.provider !== "claude")
+      throw new Error("Invalid saved account operation provider.");
+    accountOperation = { id: identifier(value.id), provider: value.provider,
+      home: absoluteDirectory(value.home, "Account operation home"), startedAt: text(value.startedAt, "Account operation date", 80) };
+  }
+  if (state.accountRecovery !== undefined) {
+    const value = record(state.accountRecovery, "Provider account recovery");
+    if (value.provider !== "codex" && value.provider !== "claude")
+      throw new Error("Invalid saved account provider.");
+    accountRecovery = {
+      provider: value.provider,
+      home: absoluteDirectory(value.home, "Account recovery home"),
+      recordedAt: text(value.recordedAt, "Account recovery date", 80),
+    };
+  }
   return {
     schemaVersion: 1,
     projects,
@@ -596,6 +646,9 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
     verifications,
     codexRecoveryHomes,
     codexRecoveryAcknowledgements,
+    sharedMemoryProjects,
+    accountRecovery,
+    accountOperation,
   };
 }
 
@@ -711,6 +764,17 @@ export class WorkspaceService {
             "The app stopped during this check. Inspect and stop remaining processes before clearing the recovery flag; no check was resumed automatically.";
         }
       }
+      for (const thread of this.state.threads) {
+        if (thread.codexHandoff?.state === "pending") {
+          this.markCodexRecovery(thread.codexHandoff.home);
+          thread.codexHandoff.state = "failed";
+        }
+      }
+      if (this.state.accountOperation) {
+        const pending = this.state.accountOperation;
+        this.state.accountRecovery ??= { provider: pending.provider, home: pending.home, recordedAt: pending.startedAt };
+        delete this.state.accountOperation;
+      }
       this.initialized = true;
       await this.refreshProviders();
       await this.persist();
@@ -718,6 +782,13 @@ export class WorkspaceService {
   }
 
   private async refreshProviders(): Promise<void> {
+    if (this.state.accountRecovery) {
+      this.providers = (["codex", "claude", "ollama"] as const).map((id) => ({
+        id, name: id === "codex" ? "Codex" : id === "claude" ? "Claude Code" : "Local models",
+        available: false, detail: "Resolve provider account cleanup in Settings → Recovery, then refresh tool detection.",
+      }));
+      return;
+    }
     // Ollama uses the same Codex executable/capabilities. Share that result
     // instead of launching duplicate metadata processes and cleanup queries.
     const [codex, claude] = await Promise.all(
@@ -760,6 +831,8 @@ export class WorkspaceService {
   }
 
   private assertCodexHomeReady(home: string): void {
+    if (this.state.accountRecovery || this.state.accountOperation)
+      throw new Error("Provider account cleanup is unconfirmed. Resolve Settings → Recovery before starting Codex operations.");
     if (this.state.codexRecoveryHomes?.some((entry) => samePath(entry, home)))
       throw new Error(
         "Codex history access is locked because a previous engine process could not be confirmed stopped. Inspect and stop the remaining processes before deliberately clearing the saved recovery lock; restarting Nova does not clear it.",
@@ -1066,6 +1139,88 @@ export class WorkspaceService {
     );
   }
 
+  async refreshCodexThread(
+    threadId: string,
+    expectedConnection?: { home: string; codexPath: string },
+  ): Promise<Thread> {
+    this.ready();
+    const id = identifier(threadId, "Thread");
+    return this.exclusive(async () => {
+      const thread = this.getThread(id);
+      const link = thread.codex;
+      if (!link) throw new Error("This conversation has no linked native Codex history.");
+      this.assertActionsIdle(thread.projectId);
+      return this.codexOperation(async (options) => {
+        if (!samePath(options.home, link.home))
+          throw new Error("Select the Codex home linked to this conversation before refreshing its history.");
+        const nativeId = link.forkedThreadId ?? link.sourceThreadId;
+        const nativeCwd = link.forkedCwd ?? link.sourceCwd;
+        this.assertNativeSourceIdle(options.home, nativeId);
+        // The app-server reader checks current-account catalog membership in
+        // its own connection before reading native history. Do not treat a
+        // saved thread ID as authority after the official account is switched.
+        const archived = link.forkedThreadId ? false : link.sourceArchived;
+        let page = await readNativeHistory(options, { threadId: nativeId, archived });
+        const initial = page.thread;
+        const validPage = (candidate: CodexHistoryPage) => candidate.thread.id === nativeId &&
+          samePath(candidate.thread.cwd, nativeCwd) && candidate.thread.status !== "active" &&
+          candidate.thread.updatedAt === initial.updatedAt;
+        if (!validPage(page))
+          throw new Error("The linked Codex conversation is active or moved. No retained history was changed.");
+        const warnings: string[] = [];
+        const history: ImportedMessage[] = [];
+        const messageIds = new Set<string>();
+        const cursors = new Set<string>();
+        let bytes = 2;
+        let truncated = false;
+        for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
+          if (!validPage(page))
+            throw new Error("The native conversation changed while refreshing. Retry after its work stops; the previous snapshot was preserved.");
+          truncated ||= page.truncated;
+          warnings.push(...page.warnings);
+          for (const message of [...page.messages].reverse()) {
+            const key = `${message.turnId}\0${message.id}`;
+            if (messageIds.has(key)) continue;
+            const size = Buffer.byteLength(JSON.stringify(message)) + 1;
+            if (history.length >= 2_000 || bytes + size > 1_048_576) {
+              truncated = true;
+              continue;
+            }
+            history.unshift(message);
+            messageIds.add(key);
+            bytes += size;
+          }
+          if (!page.nextCursor) break;
+          if (pageIndex === 7 || history.length >= 2_000 || bytes >= 1_048_576) {
+            truncated = true;
+            break;
+          }
+          if (cursors.has(page.nextCursor))
+            throw new Error("Codex repeated a history cursor. No retained history was changed.");
+          cursors.add(page.nextCursor);
+          this.ready();
+          page = await readNativeHistory(options, { threadId: nativeId, archived, cursor: page.nextCursor });
+        }
+        if (truncated)
+          warnings.push("Refresh retained bounded recent visible history only; inspect older pages in the source library when completeness matters.");
+        warnings.push(`Refreshed visible history from native ${link.forkedThreadId ? "fork" : "source"} ${nativeId}. Nova turns and project notes were preserved; matching native turns may also appear in the retained snapshot.`);
+        const before = { codex: thread.codex, updatedAt: thread.updatedAt };
+        thread.codex = codexThreadLink({
+          ...link,
+          sourceArchived: link.forkedThreadId ? link.sourceArchived : archived,
+          importedAt: now(),
+          history,
+          historyTruncated: truncated,
+          warnings: [...new Set(warnings)].slice(0, 100).map((warning) => warning.slice(0, 2_000)),
+        });
+        thread.updatedAt = now();
+        try { await this.persist(); }
+        catch (error) { Object.assign(thread, before); throw error; }
+        return clone(thread);
+      }, expectedConnection);
+    });
+  }
+
   async listCodexResources(
     value: CodexResourceQuery,
   ): Promise<CodexResourcePage> {
@@ -1075,6 +1230,133 @@ export class WorkspaceService {
       await resolveCodexHome(this.state.settings.codexHome),
       query,
     );
+  }
+
+  private async prepareCodexHandoff(
+    threadId: string,
+    expectedConnection?: { home: string; codexPath: string },
+  ) {
+    this.ready();
+    const thread = this.getThread(identifier(threadId));
+    const project = this.getProject(thread.projectId);
+    this.assertActionsIdle(project.id);
+    if (this.state.accountRecovery || this.hasTerminationIssue(project.id))
+      throw new Error("Resolve worker cleanup in Settings → Recovery before sharing this conversation.");
+    if (thread.archivedAt) throw new Error("Restore this conversation before publishing its handoff.");
+    const home = await resolveCodexHome(this.state.settings.codexHome);
+    this.assertCodexHomeReady(home);
+    if ((expectedConnection && (!samePath(expectedConnection.home, home) || expectedConnection.codexPath !== this.state.settings.codexPath)) ||
+      (thread.codex && !samePath(thread.codex.home, home)))
+      throw new Error("The Codex connection changed or differs from this conversation's linked home. Select its home and review again.");
+    const cwd = thread.worktreePath
+      ? await this.validateWorktree(thread)
+      : await this.originalThreadCwd(project, thread);
+    const referenceState = clone(this.state);
+    const referenceThread = referenceState.threads.find((entry) => entry.id === thread.id)!;
+    // Attaching an initially unlinked thread must not change the content digest
+    // merely by adding an empty native-history link after publication.
+    if (!referenceThread.codex?.history.length) delete referenceThread.codex;
+    const context = await buildRunContext(referenceState, referenceThread,
+      "Retain these visible references for the next explicit user request. This handoff is not a request to perform work. Do not begin tools or inference on its own.",
+      thread.worktreePath ? cwd : project.path);
+    const title = `Nova · ${thread.title}`.slice(0, 160);
+    const fingerprint = createHash("sha256").update(JSON.stringify([
+      thread.id, title, home, cwd, this.state.settings.codexPath, context.prompt,
+    ])).digest("hex");
+    const receipt = thread.codexHandoff;
+    const unchanged = Boolean(receipt?.state === "published" && receipt.fingerprint === fingerprint &&
+      samePath(receipt.home, home) && samePath(receipt.cwd, cwd));
+    return { threadId: thread.id, title, cwd, home, fingerprint, characters: context.characters,
+      warnings: context.warnings, unchanged, prompt: context.prompt };
+  }
+
+  async reviewCodexHandoff(threadId: string, expectedConnection?: { home: string; codexPath: string }) {
+    return this.exclusive(async () => {
+      const { prompt: _prompt, ...review } = await this.prepareCodexHandoff(threadId, expectedConnection);
+      return review;
+    });
+  }
+
+  async publishCodexHandoff(
+    threadId: string,
+    expectedFingerprint: string,
+    expectedConnection?: { home: string; codexPath: string },
+  ): Promise<CodexHandoffResult> {
+    return this.exclusive(async () => {
+      const prepared = await this.prepareCodexHandoff(threadId, expectedConnection);
+      if (prepared.fingerprint !== expectedFingerprint)
+        throw new Error("The conversation, memory, or connection changed while confirmation was open. Review its handoff again.");
+      const thread = this.getThread(prepared.threadId);
+      return this.codexOperation(async (options) => {
+        if (!samePath(options.home, prepared.home)) throw new Error("The Codex home changed. Review the handoff again.");
+        const makeResult = (warnings: string[], unchanged: boolean): CodexHandoffResult => ({
+          threadId: thread.id,
+          nativeThreadId: thread.codexHandoff!.nativeThreadId,
+          title: prepared.title,
+          createdAt: thread.codexHandoff!.createdAt,
+          warnings: [...new Set([...prepared.warnings, ...warnings])],
+          unchanged,
+        });
+        if (prepared.unchanged) {
+          // A different login can share the same home: don't report an old
+          // account's receipt as an accessible current-account conversation.
+          const page = await readNativeHistory(options, { threadId: thread.codexHandoff!.nativeThreadId });
+          if (!samePath(page.thread.cwd, prepared.cwd))
+            throw new Error("The published native conversation moved. Review it in the Codex library before continuing.");
+          return makeResult(["The same handoff is already published and is visible to the current Codex account. No duplicate or model turn was created."], true);
+        }
+        const previousLink = clone(thread.codex);
+        const previousUpdatedAt = thread.updatedAt;
+        let createdId: string | undefined;
+        try {
+          const result = await publishNativeHandoff({ ...options, cwd: prepared.cwd,
+            title: prepared.title, text: prepared.prompt,
+            sourceThreadId: previousLink?.forkedThreadId ?? previousLink?.sourceThreadId,
+            sourceArchived: Boolean(previousLink?.sourceArchived && !previousLink.forkedThreadId),
+            onThreadCreated: async (id) => {
+              createdId = identifier(id, "Native handoff thread");
+              thread.codexHandoff = {
+                nativeThreadId: createdId, home: prepared.home, cwd: prepared.cwd,
+                fingerprint: prepared.fingerprint, createdAt: now(), state: "pending",
+              };
+              await this.persist();
+            },
+          });
+          if (result.nativeThreadId !== createdId) throw new Error("Codex returned a mismatched handoff ID.");
+          thread.codexHandoff!.state = "published";
+          // Subsequent Codex work in THIS Nova conversation continues the
+          // engine-created handoff. Claude/local still use visible references.
+          thread.codex = previousLink ? {
+            ...previousLink, forkedThreadId: result.nativeThreadId, forkedCwd: prepared.cwd,
+          } : {
+            home: prepared.home, sourceThreadId: result.nativeThreadId, sourceCwd: prepared.cwd,
+            importedAt: now(), sourceArchived: false, history: [], historyTruncated: false,
+            warnings: [...result.warnings],
+          };
+          thread.updatedAt = now();
+          await this.persist();
+          return makeResult(result.warnings, false);
+        } catch (error) {
+          thread.codex = previousLink;
+          thread.updatedAt = previousUpdatedAt;
+          if (createdId && thread.codexHandoff) {
+            thread.codexHandoff.state = "failed";
+            try { await this.persist(); }
+            catch {
+              this.markCodexRecovery(prepared.home);
+              this.publish();
+              throw new Error(`A native handoff may exist as ${createdId}, but its local receipt could not be saved. Stop remaining Codex processes and inspect that ID in the official app before retrying.`, { cause: error });
+            }
+          }
+          // Preserve typed cleanup failures so codexOperation records its
+          // durable home lock. The receipt itself contains no credentials.
+          if (error instanceof CodexAppServerError && error.terminationUnconfirmed) throw error;
+          if (createdId)
+            throw new Error(`Native conversation ${createdId} was created, but publishing its context did not finish. The original conversation is unchanged. Inspect the retained native ID before creating another handoff.`, { cause: error });
+          throw error;
+        }
+      }, expectedConnection);
+    });
   }
 
   async previewCodexResource(
@@ -1301,6 +1583,69 @@ export class WorkspaceService {
     return preview;
   }
 
+  async previewSharedMemory(projectId: string): Promise<SharedMemoryPreview> {
+    this.ready();
+    return this.exclusive(async () => {
+      const project = this.getProject(projectId);
+      return previewProjectSharedMemory(
+        { ...project, path: await this.getProjectPath(project.id) },
+        this.state.memories,
+        this.state.sharedMemoryProjects?.includes(project.id) ?? false,
+      );
+    });
+  }
+
+  async publishSharedMemory(value: SharedMemoryRequest): Promise<SharedMemoryResult> {
+    this.ready();
+    const input = record(value, "Shared-memory publishing");
+    const projectId = identifier(input.projectId, "Project");
+    const fingerprint = text(input.fingerprint, "Shared-memory preview fingerprint", 64);
+    if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error("Invalid shared-memory preview fingerprint.");
+    return this.exclusive(async () => {
+      const project = this.getProject(projectId);
+      this.assertActionsIdle(project.id);
+      if (this.hasTerminationIssue(project.id))
+        throw new Error("Resolve the project's worker cleanup warning before publishing shared memory.");
+      const preview = await previewProjectSharedMemory(
+        { ...project, path: await this.getProjectPath(project.id) },
+        this.state.memories,
+        this.state.sharedMemoryProjects?.includes(project.id) ?? false,
+      );
+      if (preview.fingerprint !== fingerprint)
+        throw new Error("Project files or active notes changed after the preview. Preview shared memory again before publishing.");
+      const transaction = await applyProjectSharedMemory(preview);
+      const before = this.state.sharedMemoryProjects;
+      this.state.sharedMemoryProjects = [...new Set([...(before ?? []), project.id])];
+      try { await this.persist(); }
+      catch (error) {
+        this.state.sharedMemoryProjects = before;
+        await transaction.rollback();
+        throw error;
+      }
+      return {
+        projectId: project.id,
+        paths: transaction.paths,
+        enabled: true,
+        message: "Shared project memory is enabled. Nova reads .nova/MEMORY.md freshly on each run; official Codex and Claude can read it through the preserved project instructions. No provider-private database was modified." +
+          (transaction.backupDirectory ? ` Replaced revisions remain recoverable in ${transaction.backupDirectory} (ignored by Git).` : ""),
+      };
+    });
+  }
+
+  async disableSharedMemory(projectId: string): Promise<void> {
+    this.ready();
+    return this.exclusive(async () => {
+      const project = this.getProject(projectId);
+      this.assertActionsIdle(project.id);
+      const before = this.state.sharedMemoryProjects;
+      this.state.sharedMemoryProjects = (before ?? []).filter((id) => id !== project.id);
+      try { await this.persist(); }
+      catch (error) { this.state.sharedMemoryProjects = before; throw error; }
+      // Leave all project files intact. This disables Nova's direct fresh read,
+      // not the user's existing native CLI instruction references.
+    });
+  }
+
   private async validateWorktree(thread: Thread): Promise<string> {
     if (!thread.worktreePath || !thread.branch || !thread.baseCommit)
       throw new Error("Thread has no isolated worktree.");
@@ -1386,6 +1731,8 @@ export class WorkspaceService {
 
   private assertActionsIdle(projectId: string): void {
     this.ready();
+    if (this.state.accountRecovery || this.state.accountOperation)
+      throw new Error("Resolve provider account cleanup in Settings → Recovery before changing project state.");
     if (this.compatibilityControllers.size || this.projectHasCheck(projectId) ||
         this.state.runs.some((run) => run.projectId === projectId && ACTIVE.has(run.status)))
       throw new Error("Wait for active agents, checks, and Codex history operations to finish before changing Git state or acknowledging recovery.");
@@ -1524,6 +1871,12 @@ export class WorkspaceService {
   private recoveryItems(): RecoveryItem[] {
     const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
     const items: RecoveryItem[] = [];
+    if (this.state.accountRecovery) items.push({
+      id: "provider-accounts", kind: "accounts",
+      label: `${this.state.accountRecovery.provider === "codex" ? "Codex" : "Claude Code"} account worker`,
+      detail: "An account subprocess could not be confirmed stopped. Stop its remaining official CLI processes before acknowledging. Credentials are still owned by the provider; this does not sign out or delete an account.",
+      token: digest(this.state.accountRecovery),
+    });
     for (const project of this.state.projects) {
       const runs = this.state.runs.filter((run) => run.projectId === project.id && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt);
       const checks = this.state.verifications.filter((check) => check.projectId === project.id && check.terminationUnconfirmed && !check.recoveryAcknowledgedAt);
@@ -1551,6 +1904,43 @@ export class WorkspaceService {
     return this.exclusive(async () => clone(this.recoveryItems()));
   }
 
+  async recordAccountRecovery(provider: "codex" | "claude", home: string): Promise<void> {
+    return this.exclusive(async () => {
+      this.ready();
+      if (provider !== "codex" && provider !== "claude") throw new Error("Invalid provider account recovery.");
+      this.state.accountRecovery = { provider, home: absoluteDirectory(home, "Account recovery home"), recordedAt: now() };
+      delete this.state.accountOperation;
+      try { await this.persist(); }
+      catch (error) { this.publish(); throw error; }
+    });
+  }
+
+  async beginAccountOperation(provider: "codex" | "claude", home: string): Promise<string> {
+    return this.exclusive(async () => {
+      this.ready();
+      if (provider !== "codex" && provider !== "claude") throw new Error("Invalid account provider.");
+      if (this.state.accountOperation || this.recoveryItems().length || this.active.size || this.activeVerifications.size || this.compatibilityControllers.size)
+        throw new Error("Finish active work and resolve recovery before starting an account process.");
+      const id = randomUUID();
+      this.state.accountOperation = { id, provider, home: absoluteDirectory(home, "Account home"), startedAt: now() };
+      try { await this.persist(); }
+      catch (error) { delete this.state.accountOperation; throw error; }
+      return id;
+    });
+  }
+
+  async finishAccountOperation(operationId: string): Promise<void> {
+    return this.exclusive(async () => {
+      this.ready();
+      const pending = this.state.accountOperation;
+      if (!pending || pending.id !== identifier(operationId) || this.state.accountRecovery)
+        throw new Error("Account recovery state changed. Its operation marker was preserved.");
+      delete this.state.accountOperation;
+      try { await this.persist(); }
+      catch (error) { this.state.accountOperation = pending; this.publish(); throw error; }
+    });
+  }
+
   async acknowledgeRecovery(value: RecoveryRequest): Promise<void> {
     const input = record(value, "Recovery acknowledgement");
     const id = text(input.id, "Recovery item", 120);
@@ -1563,7 +1953,9 @@ export class WorkspaceService {
       if (!item) throw new Error("Recovery state changed. Refresh it and review the current cleanup warning.");
       const previous = clone(this.state);
       const acknowledgedAt = now();
-      if (item.kind === "project") {
+      if (item.kind === "accounts") {
+        delete this.state.accountRecovery;
+      } else if (item.kind === "project") {
         const projectId = item.id.slice("project-".length);
         for (const run of this.state.runs) {
           if (run.projectId === projectId && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt)
@@ -1630,6 +2022,8 @@ export class WorkspaceService {
     const request = validateRunRequest(value);
     return this.exclusive(async () => {
       this.ready();
+      if (this.state.accountRecovery || this.state.accountOperation)
+        throw new Error("Resolve provider account cleanup in Settings → Recovery before starting agents.");
       const project = this.getProject(request.projectId);
       if (request.mode === "build" && project.kind === "folder")
         throw new Error(
@@ -1881,6 +2275,7 @@ export class WorkspaceService {
                   model,
                   threadId: nativeThreadId,
                   fork: forkNative,
+                  sourceArchived: nativeLink.sourceArchived && !nativeLink.forkedThreadId,
                   prompt: context.prompt,
                   signal: controller.signal,
                   timeoutMs: settings.timeoutMinutes * 60_000,
@@ -2250,6 +2645,8 @@ export class WorkspaceService {
     const request = validateVerificationRequest(value);
     return this.exclusive(async () => {
       this.ready();
+      if (this.state.accountRecovery || this.state.accountOperation)
+        throw new Error("Resolve provider account cleanup in Settings → Recovery before running checks.");
       const run = this.getRun(request.runId);
       const thread = this.getThread(run.threadId);
       if (thread.archivedAt)

@@ -7,6 +7,7 @@ import type {
 } from "../../shared/types";
 import { assessMemoryFreshness } from "./memory-source";
 import { assessCodexMemoryFreshness } from "./codex-installation";
+import { readProjectSharedMemory } from "./workspace-sharing";
 
 const MEMORY_BUDGET = 12_000;
 const MAX_MEMORIES = 12;
@@ -60,6 +61,40 @@ export async function buildRunContext(
   > = [];
   const memories: ContextMemory[] = [];
   const warnings: string[] = [];
+  let sharedProjectMemory: { path: string; sha256: string; content: string } | undefined;
+  if (state.sharedMemoryProjects?.includes(thread.projectId)) {
+    const project = state.projects.find((entry) => entry.id === thread.projectId);
+    const summary: ContextMemory = {
+      id: `shared-memory-${thread.projectId}`,
+      title: "Shared project memory",
+      kind: "note",
+      source: ".nova/MEMORY.md · selected project checkout",
+      filePath: ".nova/MEMORY.md",
+      freshness: "unavailable",
+      included: false,
+    };
+    try {
+      if (!project) throw new Error("The shared-memory project is unavailable.");
+      const reference = await readProjectSharedMemory(project.path);
+      if (!reference) {
+        summary.freshness = "missing";
+        summary.reason = "The opted-in .nova/MEMORY.md file is missing. Preview and publish shared memory again.";
+        warnings.push(summary.reason);
+      } else {
+        sharedProjectMemory = { path: ".nova/MEMORY.md", sha256: reference.sha256, content: reference.content };
+        summary.freshness = "current";
+        summary.included = true;
+        summary.reason = "Read freshly from the opted-in project file for this request. Its digest does not prove its claims.";
+        warnings.push("Shared memory is read freshly from the original project checkout, including during isolated Build. It is cross-provider reference data, not a snapshot of worktree-specific code or a provider-private memory database.");
+        if (reference.truncated)
+          warnings.push(`Shared project memory was shortened from ${reference.characters} to 16000 characters; inspect .nova/MEMORY.md for the omitted text.`);
+      }
+    } catch (error) {
+      summary.reason = error instanceof Error ? error.message : "Shared project memory could not be read safely.";
+      warnings.push(`Shared memory was excluded: ${summary.reason}`);
+    }
+    memories.push(summary);
+  }
   let budget = MEMORY_BUDGET;
   for (const [index, { memory }] of ranked.entries()) {
     const assessment =
@@ -237,6 +272,7 @@ export async function buildRunContext(
     JSON.stringify(
       {
         memories: selected,
+        ...(sharedProjectMemory ? { sharedProjectMemory } : {}),
         ...(importedHistory.length
           ? { importedCodexVisibleHistory: importedHistory }
           : {}),
