@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +9,10 @@ test("Markdown export writes UTF-8 atomically and replaces an explicitly selecte
   const folder = await mkdtemp(path.join(os.tmpdir(), "nova-export-test-"));
   try {
     const target = path.join(folder, "Conversation — 测试.md");
-    assert.equal(await saveMarkdownExport(target, "# Visible history\n\nHello 🙂\n"), target);
+    assert.equal(
+      await saveMarkdownExport(target, "# Visible history\n\nHello 🙂\n"),
+      path.join(await realpath(folder), path.basename(target)),
+    );
     assert.equal(await readFile(target, "utf8"), "# Visible history\n\nHello 🙂\n");
     await saveMarkdownExport(target, "# Updated export\n");
     assert.equal(await readFile(target, "utf8"), "# Updated export\n");

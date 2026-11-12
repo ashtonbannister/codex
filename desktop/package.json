@@ -15,7 +15,7 @@
     "dev:ui": "vite --host 127.0.0.1",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts src/renderer/renderer.test.tsx",
+    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts src/renderer/renderer.test.tsx",
     "test:ui": "playwright test",
     "test:electron": "node scripts/smoke-electron.mjs",
     "check": "npm run typecheck && npm test && npm run build",

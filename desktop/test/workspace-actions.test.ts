@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -14,7 +14,9 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, 
 });
 
 async function fixture(t: TestContext, recovery = false) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "nova-actions-"));
+  // Windows temp paths can contain an 8.3 alias (RUNNER~1). Persist canonical
+  // paths like real project selection, including the fixture's storage paths.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "nova-actions-")));
   const repo = path.join(root, "project");
   const dataDir = path.join(root, "state");
   await mkdir(repo);

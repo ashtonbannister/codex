@@ -178,7 +178,7 @@ npm run build
 npm run check
 ```
 
-Tests use temporary repositories and fake provider processes. They should not require a live model request, a cloud API key, or paid inference. Passing them validates the application plumbing, not the quality of a provider's generated code. Legacy version-1 workspace files are read with defaults for the new optional metadata and check collections; no existing history is intentionally discarded.
+Tests use temporary repositories and fake provider processes. Backend test files run serially so concurrent test-created Windows process trees do not contend for bounded CIM inventory checks or race PID reuse. They should not require a live model request, a cloud API key, or paid inference. Passing them validates the application plumbing, not the quality of a provider's generated code. Legacy version-1 workspace files are read with defaults for the new optional metadata and check collections; no existing history is intentionally discarded.
 
 Run browser interaction tests separately:
 
