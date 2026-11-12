@@ -106,6 +106,65 @@ const ownedProcesses = new WeakMap<
   { startedAt: number; exitedAt?: number }
 >();
 const terminationTasks = new WeakMap<ChildProcess, Promise<boolean>>();
+type TerminationFailureCode =
+  | "windows-inventory-timeout"
+  | "windows-inventory-output-limit"
+  | "windows-inventory-unavailable"
+  | "windows-inventory-exit-failure"
+  | "windows-inventory-invalid"
+  | "windows-identity-ambiguous"
+  | "windows-leader-pid-reused-after-exit"
+  | "windows-exited-leader-pid-observed"
+  | "windows-cleanup-deadline"
+  | "windows-process-limit"
+  | "worker-lifetime-unavailable"
+  | "posix-cleanup-unconfirmed"
+  | "unexpected-cleanup-error"
+  | "output-pipes-still-open";
+const terminationFailures = new WeakMap<ChildProcess, TerminationFailureCode>();
+
+class CleanupFailure extends Error {
+  constructor(
+    readonly code: TerminationFailureCode,
+    message: string = code,
+  ) {
+    super(message);
+  }
+}
+
+/** Fixed diagnostic codes only: never expose commands, process output or env. */
+export function terminationDiagnostic(
+  child: ChildProcess,
+): TerminationFailureCode {
+  return terminationFailures.get(child) ?? "output-pipes-still-open";
+}
+
+export function classifyWindowsInventoryFailure(
+  error: unknown,
+): TerminationFailureCode {
+  const value =
+    error && typeof error === "object"
+      ? (error as { code?: unknown; killed?: unknown })
+      : {};
+  if (value.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+    return "windows-inventory-output-limit";
+  if (value.killed === true) return "windows-inventory-timeout";
+  if (
+    value.code === "ENOENT" ||
+    value.code === "EACCES" ||
+    value.code === "EPERM"
+  )
+    return "windows-inventory-unavailable";
+  return "windows-inventory-exit-failure";
+}
+
+/** Cold CIM startup gets up to 5s, always inside the same 8s cleanup deadline. */
+export function windowsInventoryTimeout(
+  deadline: number,
+  now = Date.now(),
+): number {
+  return Math.max(0, Math.min(5_000, Math.floor(deadline - now)));
+}
 const pause = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -200,13 +259,24 @@ export function selectWindowsDescendants(
   known: Map<number, number>,
 ): WindowsProcess[] {
   const currentLeader = rows.find((row) => row.pid === leader.pid);
+  if (currentLeader && leader.hasExited)
+    throw new CleanupFailure(
+      leader.exitedAt !== undefined &&
+      Number.isFinite(currentLeader.started) &&
+      currentLeader.started > leader.exitedAt
+        ? "windows-leader-pid-reused-after-exit"
+        : "windows-exited-leader-pid-observed",
+      "The worker PID is no longer uniquely identified.",
+    );
   if (
     currentLeader &&
-    (leader.hasExited ||
-      !Number.isFinite(currentLeader.started) ||
+    (!Number.isFinite(currentLeader.started) ||
       currentLeader.started < leader.startedAt)
   )
-    throw new Error("The worker PID is no longer uniquely identified.");
+    throw new CleanupFailure(
+      "windows-identity-ambiguous",
+      "The worker PID is no longer uniquely identified.",
+    );
   if (currentLeader) known.set(leader.pid, currentLeader.started);
   const discovered = new Map<number, WindowsProcess>();
   if (currentLeader) discovered.set(leader.pid, currentLeader);
@@ -217,7 +287,10 @@ export function selectWindowsDescendants(
       const parentStart = known.get(row.parent);
       if (parentStart === undefined) continue;
       if (!Number.isFinite(row.started))
-        throw new Error("Unknown descendant identity.");
+        throw new CleanupFailure(
+          "windows-identity-ambiguous",
+          "Unknown descendant identity.",
+        );
       // No multi-second tolerance: a process older than the owned parent's
       // recorded spawn cannot be attributed to it through a historical PPID.
       if (row.started < parentStart) continue;
@@ -236,11 +309,15 @@ export function selectWindowsDescendants(
             parent.pid === row.parent && parent.started === parentStart,
         )
       )
-        throw new Error(
+        throw new CleanupFailure(
+          "windows-identity-ambiguous",
           "A historical descendant parent can no longer be uniquely identified.",
         );
       if (previouslyKnown !== undefined && previouslyKnown !== row.started)
-        throw new Error("A descendant PID was reused.");
+        throw new CleanupFailure(
+          "windows-identity-ambiguous",
+          "A descendant PID was reused.",
+        );
       discovered.set(row.pid, row);
       known.set(row.pid, row.started);
       changed = true;
@@ -250,7 +327,10 @@ export function selectWindowsDescendants(
     const start = known.get(row.pid);
     if (row.pid !== leader.pid && start !== undefined) {
       if (row.started !== start)
-        throw new Error("A descendant PID was reused.");
+        throw new CleanupFailure(
+          "windows-identity-ambiguous",
+          "A descendant PID was reused.",
+        );
       discovered.set(row.pid, row);
     }
   }
@@ -262,30 +342,44 @@ async function windowsProcessTable(timeout: number): Promise<WindowsProcess[]> {
   // process identity metadata is inspected, never command lines or env vars.
   const command =
     "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; parent=$_.ParentProcessId; started=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }) } }) | ConvertTo-Json -Compress";
-  const { stdout } = await execFileAsync(
-    path.join(
-      process.env.SystemRoot || "C:\\Windows",
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe",
-    ),
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-    {
-      shell: false,
-      windowsHide: true,
-      encoding: "utf8",
-      timeout,
-      maxBuffer: 2_097_152,
-    },
-  );
-  const parsed: unknown = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      path.join(
+        process.env.SystemRoot || "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+      {
+        shell: false,
+        windowsHide: true,
+        encoding: "utf8",
+        timeout,
+        maxBuffer: 2_097_152,
+      },
+    ));
+  } catch (error) {
+    throw new CleanupFailure(classifyWindowsInventoryFailure(error));
+  }
+  return parseWindowsProcessTable(stdout);
+}
+
+export function parseWindowsProcessTable(stdout: string): WindowsProcess[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+  } catch {
+    throw new CleanupFailure("windows-inventory-invalid");
+  }
   const rows = Array.isArray(parsed) ? parsed : [parsed];
   if (!rows.length || rows.length > 50_000)
-    throw new Error("Incomplete process inventory.");
+    throw new CleanupFailure("windows-inventory-invalid");
   return rows.map((value: unknown) => {
     if (!value || typeof value !== "object")
-      throw new Error("Invalid process inventory.");
+      throw new CleanupFailure("windows-inventory-invalid");
     const row = value as Record<string, unknown>;
     if (
       !Number.isInteger(row.pid) ||
@@ -294,7 +388,7 @@ async function windowsProcessTable(timeout: number): Promise<WindowsProcess[]> {
       Number(row.parent) < 0 ||
       typeof row.started !== "string"
     )
-      throw new Error("Invalid process identity.");
+      throw new CleanupFailure("windows-inventory-invalid");
     return {
       pid: Number(row.pid),
       parent: Number(row.parent),
@@ -306,9 +400,13 @@ async function windowsProcessTable(timeout: number): Promise<WindowsProcess[]> {
 async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
   const pid = child.pid!;
   const lifetime = ownedProcesses.get(child);
-  if (!lifetime) return false;
+  if (!lifetime) throw new CleanupFailure("worker-lifetime-unavailable");
   const deadline = Date.now() + 8_000;
-  const timeLeft = () => Math.max(1, Math.min(3_000, deadline - Date.now()));
+  const timeLeft = () => {
+    const remaining = windowsInventoryTimeout(deadline);
+    if (!remaining) throw new CleanupFailure("windows-cleanup-deadline");
+    return remaining;
+  };
   const kill = async (target: number) => {
     try {
       await execFileAsync(
@@ -321,7 +419,7 @@ async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
         {
           shell: false,
           windowsHide: true,
-          timeout: timeLeft(),
+          timeout: Math.min(3_000, timeLeft()),
           maxBuffer: 65_536,
         },
       );
@@ -334,6 +432,8 @@ async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
   const known = new Map<number, number>([[pid, lifetime.startedAt]]);
   while (Date.now() < deadline) {
     const rows = await windowsProcessTable(timeLeft());
+    if (Date.now() >= deadline)
+      throw new CleanupFailure("windows-cleanup-deadline");
     const discovered = selectWindowsDescendants(
       rows,
       {
@@ -347,7 +447,8 @@ async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
       known,
     );
     if (!discovered.length) return true;
-    if (discovered.length > 256) return false;
+    if (discovered.length > 256)
+      throw new CleanupFailure("windows-process-limit");
     const targets = discovered.map((row) => row.pid);
     for (
       let offset = 0;
@@ -356,7 +457,7 @@ async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
     )
       await Promise.all(targets.slice(offset, offset + 8).map(kill));
   }
-  return false;
+  throw new CleanupFailure("windows-cleanup-deadline");
 }
 
 /**
@@ -374,7 +475,21 @@ export function terminateTree(child: ChildProcess): Promise<boolean> {
       : process.platform === "win32"
         ? terminateWindowsTree(child)
         : terminatePosixGroup(child.pid)
-  ).catch(() => false);
+  )
+    .then((confirmed) => {
+      if (!confirmed)
+        terminationFailures.set(child, "posix-cleanup-unconfirmed");
+      return confirmed;
+    })
+    .catch((error: unknown) => {
+      terminationFailures.set(
+        child,
+        error instanceof CleanupFailure
+          ? error.code
+          : "unexpected-cleanup-error",
+      );
+      return false;
+    });
   terminationTasks.set(child, task);
   return task;
 }
@@ -425,7 +540,7 @@ export async function captureCommand(
       if (unconfirmed)
         reject(
           new Error(
-            `${failure} CLI descendant termination could not be confirmed; inspect running CLI processes.`,
+            `${failure ? `${failure} ` : ""}CLI descendant termination could not be confirmed; inspect running CLI processes. Cleanup diagnostic: ${terminationDiagnostic(child)}.`,
           ),
         );
       else if (failure || spawnError || code !== 0)
@@ -800,7 +915,7 @@ export async function runProvider(options: {
       if (buffer && bytes <= options.maxBytes) emitLine(buffer);
       const cancelled = options.signal.aborted && !terminationUnconfirmed;
       const error = terminationUnconfirmed
-        ? "Worker termination could not be confirmed. Nova disconnected its output after a bounded wait. Inspect and stop any remaining CLI processes before using this project again."
+        ? `Worker termination could not be confirmed. Nova disconnected its output after a bounded wait. Inspect and stop any remaining CLI processes before using this project again. Cleanup diagnostic: ${terminationDiagnostic(child)}.`
         : cancelled
           ? undefined
           : failure ||

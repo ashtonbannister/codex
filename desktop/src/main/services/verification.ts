@@ -7,6 +7,7 @@ import type { VerificationProfile } from "../../shared/types";
 import {
   disconnectChild,
   terminateTree,
+  terminationDiagnostic,
   trackOwnedProcess,
   type Executable,
 } from "./providers";
@@ -220,7 +221,7 @@ export async function runVerificationCommand(options: {
       append(stderr.end());
       const cancelled = options.signal.aborted && !terminationUnconfirmed;
       const error = terminationUnconfirmed
-        ? "Verification process termination could not be confirmed. Inspect remaining processes before using this worktree again."
+        ? `Verification process termination could not be confirmed. Inspect remaining processes before using this worktree again. Cleanup diagnostic: ${terminationDiagnostic(child)}.`
         : cancelled
           ? undefined
           : failure ||

@@ -16,8 +16,11 @@ import test from "node:test";
 import type { VerificationProfile } from "../src/shared/types";
 import { captureRevisionSnapshot } from "../src/main/services/revision";
 import {
+  classifyWindowsInventoryFailure,
+  parseWindowsProcessTable,
   runProvider,
   selectWindowsDescendants,
+  windowsInventoryTimeout,
 } from "../src/main/services/providers";
 import {
   resolveVerificationExecutable,
@@ -262,6 +265,102 @@ test("Windows process identity checks reject reused leader/descendant PIDs and o
       ),
     /historical descendant parent/,
   );
+});
+
+test("Windows cleanup diagnostics distinguish bounded failure causes without exposing command or output data", () => {
+  const privateFields = {
+    cmd: "sensitive-command",
+    stdout: "private-output",
+    stderr: "credential-value",
+  };
+  assert.equal(
+    classifyWindowsInventoryFailure({ ...privateFields, killed: true }),
+    "windows-inventory-timeout",
+  );
+  assert.equal(
+    classifyWindowsInventoryFailure({
+      ...privateFields,
+      killed: true,
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    }),
+    "windows-inventory-output-limit",
+  );
+  assert.equal(
+    classifyWindowsInventoryFailure({ ...privateFields, code: "ENOENT" }),
+    "windows-inventory-unavailable",
+  );
+  assert.equal(
+    classifyWindowsInventoryFailure({ ...privateFields, code: "EPERM" }),
+    "windows-inventory-unavailable",
+  );
+  assert.equal(
+    classifyWindowsInventoryFailure({ ...privateFields, code: 1 }),
+    "windows-inventory-exit-failure",
+  );
+  assert.equal(
+    classifyWindowsInventoryFailure(null),
+    "windows-inventory-exit-failure",
+  );
+  for (const output of [
+    "private-output",
+    "[]",
+    '{"pid":"not a PID","parent":1,"started":"private-output"}',
+    "null",
+  ]) {
+    assert.throws(
+      () => parseWindowsProcessTable(output),
+      (error: unknown) => {
+        assert.equal((error as Error).message, "windows-inventory-invalid");
+        return true;
+      },
+    );
+  }
+  const valid = parseWindowsProcessTable(
+    '\uFEFF[{"pid":42,"parent":7,"started":"2026-11-12T06:00:00.0000000Z"}]',
+  );
+  assert.deepEqual(valid, [
+    { pid: 42, parent: 7, started: Date.parse("2026-11-12T06:00:00Z") },
+  ]);
+  assert.throws(
+    () =>
+      selectWindowsDescendants(
+        [{ pid: 42, parent: 7, started: 1000 }],
+        { pid: 42, startedAt: 900, exitedAt: 1200, hasExited: true },
+        new Map([[42, 900]]),
+      ),
+    (error: unknown) => {
+      assert.equal(
+        (error as { code?: string }).code,
+        "windows-exited-leader-pid-observed",
+      );
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      selectWindowsDescendants(
+        [{ pid: 42, parent: 7, started: 1300 }],
+        { pid: 42, startedAt: 900, exitedAt: 1200, hasExited: true },
+        new Map([[42, 900]]),
+      ),
+    (error: unknown) => {
+      assert.equal(
+        (error as { code?: string }).code,
+        "windows-leader-pid-reused-after-exit",
+      );
+      return true;
+    },
+  );
+});
+
+test("cold Windows inventory gets up to five seconds without extending the total cleanup deadline", () => {
+  const deadline = 8_000;
+  assert.equal(windowsInventoryTimeout(deadline, 0), 5_000);
+  assert.equal(windowsInventoryTimeout(deadline, 2_000), 5_000);
+  assert.equal(windowsInventoryTimeout(deadline, 4_500), 3_500);
+  assert.equal(windowsInventoryTimeout(deadline, 7_999), 1);
+  assert.equal(windowsInventoryTimeout(deadline, 8_000), 0);
+  assert.equal(windowsInventoryTimeout(deadline, 9_000), 0);
 });
 
 for (const runner of ["verification", "provider"] as const) {
