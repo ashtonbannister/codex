@@ -1,5 +1,5 @@
 import { Folder, MessageSquare, Plus, Search, Settings2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Project, Thread } from "../../shared/types";
 import { Modal } from "./primitives";
 
@@ -26,6 +26,7 @@ export function CommandPalette({
 }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
+  const activeOption = useRef<HTMLButtonElement>(null);
   const commands = useMemo(
     () =>
       [
@@ -92,6 +93,11 @@ export function CommandPalette({
     ],
   );
   const active = Math.min(selected, Math.max(commands.length - 1, 0));
+  const activeId = commands[active]?.id;
+  useLayoutEffect(() => {
+    // Keep the combobox focused while revealing keyboard selection in long lists.
+    activeOption.current?.scrollIntoView({ block: "nearest" });
+  }, [activeId, query]);
   const choose = (index: number) => {
     const command = commands[index];
     if (!command) return;
@@ -146,6 +152,7 @@ export function CommandPalette({
       >
         {commands.map((command, index) => (
           <button
+            ref={active === index ? activeOption : undefined}
             type="button"
             role="option"
             aria-selected={active === index}

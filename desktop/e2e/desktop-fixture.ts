@@ -38,6 +38,7 @@ export async function installFakeDesktopBridge(
     literal?: boolean;
     seed?: boolean;
     planOnly?: boolean;
+    extraThreads?: number;
   } = {},
 ) {
   const initial = emptyWorkspace();
@@ -157,6 +158,15 @@ export async function installFakeDesktopBridge(
           complete: true,
         },
       });
+  }
+  for (let index = 0; index < (options.extraThreads ?? 0); index++) {
+    initial.threads.push({
+      id: `extra-thread-${index + 1}`,
+      projectId: "test-project",
+      title: `Palette test thread ${String(index + 1).padStart(2, "0")}`,
+      createdAt: now,
+      updatedAt: now,
+    });
   }
   await page.addInitScript(
     ({ initialState, config, version }) => {

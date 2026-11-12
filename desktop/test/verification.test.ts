@@ -81,6 +81,18 @@ async function run(executable: string, cwd: string, args: string[] = []) {
   });
 }
 
+async function stopFixture(stopFile: string | undefined): Promise<void> {
+  if (!stopFile) return;
+  // Only this fixture observes this private token. Never signal a saved PID:
+  // Windows may already have recycled it for another test's Git/CLI process.
+  try {
+    await writeFile(stopFile, "stop");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 test("verification executable candidates never use cwd or Windows drive-relative PATH entries", () => {
   assert.deepEqual(
     verificationExecutableCandidates(
@@ -256,40 +268,27 @@ for (const runner of ["verification", "provider"] as const) {
   for (const cancel of [true, false]) {
     test(`${runner} ${cancel ? "cancellation" : "successful leader exit"} waits for ignored-stdio descendants to stop`, async (t) => {
       let descendant: number | undefined;
-      let pidFile: string | undefined;
-      t.after(async () => {
-        if (!descendant && pidFile) {
-          try {
-            descendant = Number(await readFile(pidFile, "utf8"));
-          } catch {
-            /* Not launched. */
-          }
-        }
-        if (descendant) {
-          try {
-            process.kill(descendant, "SIGKILL");
-          } catch {
-            /* Already stopped. */
-          }
-        }
-      });
+      let stopFile: string | undefined;
+      t.after(() => stopFixture(stopFile));
       const { root, repo } = await fixture(t);
       const entry = path.join(root, "ignored-stdio-leader.cjs");
       const marker = path.join(root, "background-writes.txt");
-      pidFile = path.join(root, "descendant.pid");
+      stopFile = path.join(root, "stop-descendant");
       await writeFile(marker, "");
-      const background = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));process.on('SIGTERM',()=>{});let writes=0;setInterval(()=>{fs.appendFileSync(${JSON.stringify(marker)},'write\\n');if(++writes===3)process.send(process.pid);},20);`;
+      const background = `const fs=require('node:fs');process.on('SIGTERM',()=>{});let writes=0;setInterval(()=>{if(fs.existsSync(${JSON.stringify(stopFile)})||!fs.existsSync(${JSON.stringify(root)}))process.exit(0);fs.appendFileSync(${JSON.stringify(marker)},'write\\n');if(++writes===3)process.send(process.pid);},20);setTimeout(()=>process.exit(0),30000).unref();`;
       await writeFile(
         entry,
         `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(background)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{c.disconnect();process.stdout.write('READY:'+pid+'\\n'+JSON.stringify({type:'turn.completed'})+'\\n',()=>{${cancel ? "" : "process.exit(0);"}});});setInterval(()=>{},1000);`,
       );
       const controller = new AbortController();
       let log = "";
+      let readyAt = 0;
       const observe = (text: string) => {
         log += text;
         const match = /READY:(\d+)/.exec(log);
         if (match && !descendant) {
           descendant = Number(match[1]);
+          readyAt = Date.now();
           if (cancel) controller.abort();
         }
       };
@@ -320,6 +319,10 @@ for (const runner of ["verification", "provider"] as const) {
       assert.equal(result.terminationUnconfirmed, undefined);
       assert.equal(result.error, undefined);
       assert.equal(result.cancelled, cancel);
+      assert.ok(
+        Date.now() - readyAt < 12_000,
+        "Cleanup must finish before the fixture's independent self-expiry.",
+      );
       if ("completed" in result) assert.equal(result.completed, !cancel);
       if (process.platform === "linux") {
         try {
@@ -338,12 +341,9 @@ for (const runner of ["verification", "provider"] as const) {
           )
             throw error;
         }
-      } else {
-        assert.throws(
-          () => process.kill(descendant!, 0),
-          (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
-        );
       }
+      // The private marker identifies this writer even after Windows recycles
+      // its PID. A raw PID existence check could observe an unrelated process.
       const before = await readFile(marker, "utf8");
       await new Promise((resolve) => setTimeout(resolve, 150));
       assert.equal(
@@ -585,22 +585,16 @@ test(
   "an exited verification leader cannot leave inherited pipes hanging",
   { skip: process.platform === "win32" },
   async (t) => {
+    let stopFile: string | undefined;
+    t.after(() => stopFixture(stopFile));
     const { root, repo } = await fixture(t);
+    stopFile = path.join(root, "stop-orphan");
     const entry = path.join(root, "orphan.cjs");
-    const code =
-      "process.on('SIGTERM',()=>{});setInterval(()=>{},1000);const ready=()=>console.log('READY:'+process.pid);if(process.connected)process.once('disconnect',ready);else ready();";
+    const code = `process.on('SIGTERM',()=>{});const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(${JSON.stringify(stopFile)})||!fs.existsSync(${JSON.stringify(root)}))process.exit(0);},20);setTimeout(()=>process.exit(0),30000).unref();const ready=()=>console.log('READY:'+process.pid);if(process.connected)process.once('disconnect',ready);else ready();`;
     await writeFile(
       entry,
       `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(code)}],{stdio:['ignore','inherit','inherit','ipc']});c.unref();process.exit(0);`,
     );
-    let orphan: number | undefined;
-    t.after(() => {
-      try {
-        if (orphan) process.kill(orphan, "SIGKILL");
-      } catch {
-        /* Already stopped. */
-      }
-    });
     const controller = new AbortController();
     let log = "";
     let readyAt = 0;
@@ -613,7 +607,6 @@ test(
         log += chunk;
         const match = /READY:(\d+)\r?\n/.exec(log);
         if (match && !readyAt) {
-          orphan = Number(match[1]);
           readyAt = Date.now();
           controller.abort();
         }
@@ -630,22 +623,16 @@ test(
   "unreachable verification descendants fail closed after a bounded drain",
   { skip: process.platform === "win32" },
   async (t) => {
+    let stopFile: string | undefined;
+    t.after(() => stopFixture(stopFile));
     const { root, repo } = await fixture(t);
+    stopFile = path.join(root, "stop-detached-orphan");
     const entry = path.join(root, "detached-orphan.cjs");
-    const code =
-      "setInterval(()=>{},1000);const ready=()=>console.log('READY:'+process.pid);if(process.connected)process.once('disconnect',ready);else ready();";
+    const code = `const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(${JSON.stringify(stopFile)})||!fs.existsSync(${JSON.stringify(root)}))process.exit(0);},20);setTimeout(()=>process.exit(0),30000).unref();const ready=()=>console.log('READY:'+process.pid);if(process.connected)process.once('disconnect',ready);else ready();`;
     await writeFile(
       entry,
       `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(code)}],{stdio:['ignore','inherit','inherit','ipc'],detached:true});c.unref();process.exit(0);`,
     );
-    let orphan: number | undefined;
-    t.after(() => {
-      try {
-        if (orphan) process.kill(orphan, "SIGKILL");
-      } catch {
-        /* Already stopped. */
-      }
-    });
     const controller = new AbortController();
     let log = "";
     let readyAt = 0;
@@ -658,7 +645,6 @@ test(
         log += chunk;
         const match = /READY:(\d+)\r?\n/.exec(log);
         if (match && !readyAt) {
-          orphan = Number(match[1]);
           readyAt = Date.now();
           controller.abort();
         }

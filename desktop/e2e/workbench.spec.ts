@@ -369,6 +369,46 @@ test("command palette navigates threads and settings using the keyboard", async 
   ).toBeVisible();
 });
 
+test("long command lists keep keyboard selection visible through scrolling and wraparound", async ({
+  page,
+}) => {
+  await installFakeDesktopBridge(page, { seed: true, extraThreads: 14 });
+  await page.goto("/");
+  await page.keyboard.press("Control+k");
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  const search = palette.getByRole("combobox", { name: "Search commands" });
+  await search.fill("Palette test thread");
+  await expect(palette.getByRole("option")).toHaveCount(14);
+  const selected = palette.locator('[role="option"][aria-selected="true"]');
+  const expectVisibleSelection = async (title: string) => {
+    await expect(search).toBeFocused();
+    await expect(selected).toContainText(title);
+    await expect
+      .poll(() =>
+        selected.evaluate((element) => {
+          const list = element
+            .closest(".command-results")!
+            .getBoundingClientRect();
+          const item = element.getBoundingClientRect();
+          return item.top >= list.top && item.bottom <= list.bottom;
+        }),
+      )
+      .toBe(true);
+  };
+  for (let index = 0; index < 12; index++) await search.press("ArrowDown");
+  await expectVisibleSelection("Palette test thread 13");
+  await search.press("ArrowDown");
+  await search.press("ArrowDown");
+  await expectVisibleSelection("Palette test thread 01");
+  await search.press("ArrowUp");
+  await expectVisibleSelection("Palette test thread 14");
+  await search.press("Enter");
+  await expect(palette).toHaveCount(0);
+  await expect(page.locator(".toolbar-breadcrumb")).toContainText(
+    "Palette test thread 14",
+  );
+});
+
 test("thread names, pinning, archiving, and restoration are state backed", async ({
   page,
 }) => {
@@ -515,11 +555,9 @@ test("linked memories expose freshness and original-checkout reconfirmation", as
   await installFakeDesktopBridge(page, { seed: true });
   await page.goto("/");
   await page.getByRole("tab", { name: "Memory", exact: true }).click();
-  const card = page
-    .locator(".memory-card")
-    .filter({
-      has: page.getByRole("heading", { name: "Prior source decision" }),
-    });
+  const card = page.locator(".memory-card").filter({
+    has: page.getByRole("heading", { name: "Prior source decision" }),
+  });
   await expect(card).toContainText("Source changed");
   await expect(card).toContainText("Omitted from current context");
   await card

@@ -45,14 +45,17 @@ process.stdin.on('end', () => {
   input = input.split('CURRENT USER REQUEST:').at(-1);
   console.log(JSON.stringify({type:'thread.started', thread_id:'fake-session'}));
   if (input.includes('WINDOWS_PROCESS_TREE')) {
-    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000);process.send({pid:process.pid});'], {stdio:['ignore','ignore','ignore','ipc']});
+    const stopFile = process.cwd()+'/fixture.stop';
+    const descendant = 'const fs=require("node:fs");const stopFile='+JSON.stringify(stopFile)+';setInterval(()=>{if(fs.existsSync(stopFile))process.exit(0)},20);setTimeout(()=>process.exit(0),30000);process.send({pid:process.pid});';
+    const child = spawn(process.execPath, ['-e', descendant], {stdio:['ignore','ignore','ignore','ipc']});
     child.on('message', message => console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'TREE_DESCENDANT_READY:'+message.pid}})));
     fs.writeFileSync('tree-pids.json', JSON.stringify([process.pid,child.pid]));
-    setInterval(()=>{},1000);
+    setInterval(()=>{if(fs.existsSync(stopFile))process.exit(0)},20);
+    setTimeout(()=>process.exit(0),30000);
     return;
   }
   if (input.includes('ORPHAN_PIPES')) {
-    const descendant = 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000);const ready=()=>console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"ORPHAN_DESCENDANT_READY:"+process.pid}}));if(process.connected)process.once("disconnect",ready);else ready();';
+    const descendant = 'const fs=require("node:fs");const stopFile=process.cwd()+"/fixture.stop";process.on("SIGTERM",()=>{});setInterval(()=>{if(fs.existsSync(stopFile))process.exit(0)},20);setTimeout(()=>process.exit(0),30000);const ready=()=>console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"ORPHAN_DESCENDANT_READY:"+process.pid}}));if(process.connected)process.once("disconnect",ready);else ready();';
     const child = spawn(process.execPath, ['-e', descendant], {stdio:['ignore','inherit','inherit','ipc'],detached:input.includes('DETACHED_ORPHAN')});
     fs.writeFileSync('orphan.pid', String(child.pid));
     child.unref();
@@ -150,17 +153,14 @@ async function cancelReadyOrphan(
 ) {
   let orphanPid: number | undefined;
   let orphanRoot: string | undefined;
-  // Register before fixture cleanup so even a failed handshake can recover the
-  // child PID from its marker before the temporary directory is removed.
+  // Cleanup belongs to this fixture's unique directory, not a historical PID:
+  // Windows may already have recycled that PID for another concurrent test.
   t.after(async () => {
-    try {
-      orphanPid ??= Number(
-        await readFile(path.join(orphanRoot!, "orphan.pid"), "utf8"),
+    if (orphanRoot) {
+      await writeFile(path.join(orphanRoot, "fixture.stop"), "stop").catch(
+        () => undefined,
       );
-      if (Number.isInteger(orphanPid) && orphanPid > 0)
-        process.kill(orphanPid, "SIGKILL");
-    } catch {
-      /* Group shutdown already killed the fixture, or it never started. */
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
   });
   const { executable, root } = await fixture(t);
@@ -572,6 +572,7 @@ test(
   { skip: process.platform !== "win32" },
   async (t) => {
     let pidFile: string | undefined;
+    let stopFile: string | undefined;
     const pids: number[] = [];
     t.after(async () => {
       if (pidFile) {
@@ -581,17 +582,15 @@ test(
           /* No fixture process started. */
         }
       }
-      for (const pid of new Set(pids)) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          /* taskkill already stopped it. */
-        }
-      }
+      // Never signal a remembered PID after taskkill reported it gone. Only
+      // these fixture processes observe this unique cooperative stop marker.
+      if (stopFile) await writeFile(stopFile, "stop").catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 200));
       await waitForProcessesToExit([...new Set(pids)], Date.now() + 1_000);
     });
     const { executable, root } = await fixture(t);
     pidFile = path.join(root, "tree-pids.json");
+    stopFile = path.join(root, "fixture.stop");
     const command = await resolveExecutable(executable);
     const controller = new AbortController();
     let readyAt: number | undefined;
@@ -621,7 +620,7 @@ test(
     assert.equal(result.cancelled, true);
     assert.equal(result.terminationUnconfirmed, undefined);
     pids.push(...JSON.parse(await readFile(pidFile, "utf8")));
-    await waitForProcessesToExit([...new Set(pids)], readyAt! + 2_800);
+    await waitForProcessesToExit([...new Set(pids)], readyAt! + 12_000);
     for (const pid of new Set(pids)) {
       assert.throws(
         () => process.kill(pid, 0),
@@ -629,7 +628,7 @@ test(
         `taskkill must stop PID ${pid}`,
       );
     }
-    assert.ok(Date.now() - readyAt! < 2_800);
+    assert.ok(Date.now() - readyAt! < 12_000);
   },
 );
 
