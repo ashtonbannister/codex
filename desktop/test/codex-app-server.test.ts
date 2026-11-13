@@ -22,6 +22,7 @@ import {
   type NativeCodexOptions,
 } from "../src/main/services/codex-app-server";
 import { resolveExecutable } from "../src/main/services/providers";
+import { classifyCodexStartupFailure } from "../src/main/services/codex-startup-diagnostics";
 import type { NormalizedEvent } from "../src/main/services/provider-events";
 
 const SOURCE_ID = "019a0000-0000-7000-8000-000000000001";
@@ -39,6 +40,8 @@ const log = value => fs.appendFileSync(path.join(home, 'rpc.jsonl'), JSON.string
 if(process.argv.includes('--print-startup-config')){
  log({kind:'preflight',args:process.argv.slice(2)});
  if(config.preflightWait){setTimeout(()=>process.exit(2),30000);}
+ else if(config.startupFailure){console.log(JSON.stringify({error:config.startupFailure}));process.stderr.write('SECRET_STARTUP_DIAGNOSTIC');process.exit(1)}
+ else if(config.unsupportedStartupFlag){process.stderr.write("error: unexpected argument '"+config.unsupportedStartupFlag+"' found\nSECRET_STARTUP_DIAGNOSTIC");process.exit(2)}
  else if(config.preflightUnsupported){process.stderr.write('SECRET_STARTUP_DIAGNOSTIC');process.exit(1)}
  else if(config.preflightError){console.log(JSON.stringify({error:{message:'SECRET_STARTUP_DIAGNOSTIC'}}));process.exit(0)}
  else {console.log(JSON.stringify({appServerVersion:'fixture-1',configRequirements:{requirements:config.requiredFeatures?{featureRequirements:config.requiredFeatures}:null}}));process.exit(0)}
@@ -635,6 +638,57 @@ for (const [label, config] of [
     assert.ok(!(await f.requests()).some((r) => r.kind === "startup"));
   });
 }
+
+for (const [label, config, expected] of [
+  ["configuration error with a nonzero exit", { startupFailure: {
+    message: "SECRET_STARTUP_DIAGNOSTIC",
+    data: { reason: "configLoad", filePath: "C:\\SECRET_PATH\\config.toml", line: 12, column: 3,
+      detail: "unknown configuration field `SECRET_SETTING`" },
+  } }, /config\.toml.*line 12.*column 3/],
+  ["managed sign-in requirement", { startupFailure: {
+    message: "SECRET_STARTUP_DIAGNOSTIC",
+    data: { reason: "cloudConfigBundle", errorCode: "Auth", action: "relogin", detail: "SECRET_TOKEN" },
+  } }, /sign.in|login/i],
+  ["confirmed unsupported option", { unsupportedStartupFlag: "--print-startup-config" }, /does not support.*--print-startup-config/],
+] as const) {
+  test(`startup reports ${label} before any native history connection`, async (t) => {
+    const f = await fixture(t, config);
+    await assert.rejects(listCodexThreads(f.options, {}), (error: unknown) => {
+      assert.ok(error instanceof CodexAppServerError);
+      assert.match(error.message, expected);
+      assert.doesNotMatch(error.message, /SECRET/);
+      return true;
+    });
+    assert.deepEqual((await f.requests()).map((r) => r.kind), ["preflight"]);
+  });
+}
+
+test("startup diagnostics distinguish known failures without returning private native text", () => {
+  const failure = (data: Record<string, unknown>) => ({ error: {
+    message: "SECRET_MESSAGE", data: { filePath: "C:\\SECRET_PATH\\config.toml", detail: "SECRET_TOKEN", ...data },
+  } });
+  const cases: [unknown, string, number | null, RegExp][] = [
+    [failure({ reason: "configLoad", detail: "TOML parse error: SECRET_SOURCE", line: 2, column: 1 }), "", 1, /could not parse.*config\.toml, line 2, column 1/],
+    [failure({ reason: "configLoad", line: -1, column: 2 }), "", 1, /could not load or validate/],
+    [failure({ reason: "cloudConfigBundle", errorCode: "Timeout" }), "", 1, /timed out/],
+    [failure({ reason: "cloudConfigBundle", errorCode: "InvalidBundle" }), "", 1, /rejected the managed configuration bundle/],
+    [failure({ reason: "configLoad", detail: "windows.require_mxc = true requires MXC to be selected on this Windows host" }), "", 1, /requires the MXC Windows sandbox/],
+    [undefined, "error: unexpected argument '--startup-client-info' found\nSECRET_TOKEN", 2, /does not support --startup-client-info/],
+    [undefined, "error: unrecognized option '--strict-config'\nSECRET_TOKEN", 2, /does not support --strict-config/],
+    [undefined, "SECRET_DIAGNOSTIC", 5, /startup discovery failed \(exit code 5\)/],
+    [failure({ reason: "SECRET_REASON", filePath: "C:\\SECRET_PATH\\SECRET_CONFIG", line: 10 }), "SECRET_DIAGNOSTIC", 0, /rejected startup validation/],
+  ];
+  for (const [stdout, stderr, code, expected] of cases) {
+    const message = classifyCodexStartupFailure(stdout, stderr, code);
+    assert.match(message, expected);
+    assert.match(message, /Native app-server was not started/);
+    assert.doesNotMatch(message, /SECRET|C:\\|line -1/);
+  }
+  // A real configuration error takes precedence over coincidental stderr text.
+  assert.doesNotMatch(classifyCodexStartupFailure(
+    failure({ reason: "configLoad" }), "error: unexpected argument '--strict-config' found", 1,
+  ), /does not support/);
+});
 
 test("cancelling startup preflight closes it before launching app-server", async (t) => {
   const f = await fixture(t, { preflightWait: true });

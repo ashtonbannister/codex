@@ -10,6 +10,7 @@ import type {
   ImportedMessage,
 } from "../../shared/compatibility";
 import { APP_VERSION, type RunMode, type Settings } from "../../shared/types";
+import { classifyCodexStartupFailure } from "./codex-startup-diagnostics";
 import type { NormalizedEvent } from "./provider-events";
 import {
   disconnectChild,
@@ -236,6 +237,7 @@ async function preflight(
     );
     trackOwnedProcess(child, startedAt);
     const chunks: Buffer[] = [];
+    const diagnosticChunks: Buffer[] = [];
     let bytes = 0;
     let stderrBytes = 0;
     let failure: CodexAppServerError | undefined;
@@ -265,22 +267,29 @@ async function preflight(
         reject(failure);
         return;
       }
-      if (exitCode !== 0) {
-        reject(
-          new CodexAppServerError(
-            "Installed Codex could not perform safe startup discovery. Update Codex if --print-startup-config is unsupported. Native app-server was not started.",
-          ),
-        );
-        return;
-      }
       try {
-        validateStartupRequirements(
-          JSON.parse(
-            new TextDecoder("utf-8", { fatal: true }).decode(
-              Buffer.concat(chunks),
+        // Upstream emits a structured JSON error AND a nonzero exit code for
+        // config/auth/policy failures. Inspect that envelope before deciding
+        // that a CLI option is unsupported; never expose its raw diagnostics.
+        let startup: unknown;
+        try {
+          startup = JSON.parse(
+            new TextDecoder("utf-8", { fatal: true })
+              .decode(Buffer.concat(chunks))
+              .replace(/^\uFEFF/, ""),
+          );
+        } catch {
+          if (exitCode === 0) throw invalid("startup requirements");
+        }
+        if (exitCode !== 0 || (isObject(startup) && Object.hasOwn(startup, "error")))
+          throw new CodexAppServerError(
+            classifyCodexStartupFailure(
+              startup,
+              Buffer.concat(diagnosticChunks).toString("utf8"),
+              exitCode,
             ),
-          ),
-        );
+          );
+        validateStartupRequirements(startup);
         resolve();
       } catch (error) {
         reject(
@@ -317,6 +326,7 @@ async function preflight(
       stderrBytes += chunk.length;
       if (stderrBytes > 128 * 1_024)
         stop("Codex startup diagnostics exceeded the bounded operation limit.");
+      else if (!failure) diagnosticChunks.push(chunk);
     });
     child.once("close", (code) => {
       exitCode = code;

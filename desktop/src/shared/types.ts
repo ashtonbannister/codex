@@ -33,7 +33,7 @@ import type { SharedMemoryPreview, SharedMemoryRequest, SharedMemoryResult } fro
 import type { CodexHandoffReceipt, CodexHandoffResult } from "./native-handoff";
 
 export type ProviderId = "codex" | "claude" | "ollama";
-export const APP_VERSION = "0.5.0";
+export const APP_VERSION = "0.5.1";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
