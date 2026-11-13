@@ -35,11 +35,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 const home = process.env.CODEX_HOME;
-const config = JSON.parse(fs.readFileSync(path.join(home, 'fixture.json'), 'utf8'));
+// An isolated startup check intentionally has no user's fixture/configuration.
+const config = fs.existsSync(path.join(home, 'fixture.json')) ? JSON.parse(fs.readFileSync(path.join(home, 'fixture.json'), 'utf8')) : {};
 const log = value => fs.appendFileSync(path.join(home, 'rpc.jsonl'), JSON.stringify(value)+'\n');
 if(process.argv.includes('--print-startup-config')){
  log({kind:'preflight',args:process.argv.slice(2)});
  if(config.preflightWait){setTimeout(()=>process.exit(2),30000);}
+ else if(config.unknownHomeConfig && process.argv.includes('--strict-config')){console.log(JSON.stringify({error:{message:'failed to load configuration',data:{reason:'configLoad',filePath:path.join(home,'config.toml'),line:264,column:23,detail:'unknown configuration field SECRET_OEM_SETTING'}}}));process.exit(1)}
  else if(config.startupFailure){console.log(JSON.stringify({error:config.startupFailure}));process.stderr.write('SECRET_STARTUP_DIAGNOSTIC');process.exit(1)}
  else if(config.unsupportedStartupFlag){process.stderr.write("error: unexpected argument '"+config.unsupportedStartupFlag+"' found\nSECRET_STARTUP_DIAGNOSTIC");process.exit(2)}
  else if(config.preflightUnsupported){process.stderr.write('SECRET_STARTUP_DIAGNOSTIC');process.exit(1)}
@@ -267,6 +269,25 @@ test("app-server flags constrain supported worker features without pretending em
   assert.ok(!args.includes("--ignore-user-config"));
   assert.ok(!args.some((arg) => arg.startsWith("mcp_servers=")));
   assert.ok(!args.some((arg) => arg.includes("danger-full-access")));
+  assert.ok(!codexAppServerArguments("win32", false).includes("--strict-config"));
+  assert.ok(codexAppServerArguments("win32", false).includes("features.hooks=false"));
+});
+
+test("unknown OEM config field uses isolated strict worker validation before compatible native history", async (t) => {
+  const f = await fixture(t, { unknownHomeConfig: true });
+  const configPath = path.join(f.home, "config.toml");
+  await writeFile(configPath, "[oem_only]\nsetting = 'unchanged'\n");
+  const result = await listCodexThreads(f.options, {});
+  assert.equal(result.threads[0].id, SOURCE_ID);
+  assert.equal(await readFile(configPath, "utf8"), "[oem_only]\nsetting = 'unchanged'\n");
+  const requests = await f.requests();
+  const preflights = requests.filter((r) => r.kind === "preflight");
+  assert.equal(preflights.length, 2);
+  assert.ok(preflights[0].args.includes("--strict-config"));
+  assert.ok(!preflights[1].args.includes("--strict-config"));
+  assert.ok(!requests.find((r) => r.kind === "startup")!.args.includes("--strict-config"));
+  assert.ok(requests.some((r) => r.method === "thread/list"));
+  assert.ok(!JSON.stringify(result).includes("SECRET_OEM_SETTING"));
 });
 
 test("native history listing initializes in order, uses all interactive native sources, and exposes no engine path", async (t) => {
@@ -640,10 +661,10 @@ for (const [label, config] of [
 }
 
 for (const [label, config, expected] of [
-  ["configuration error with a nonzero exit", { startupFailure: {
+  ["configuration parse error with a nonzero exit", { startupFailure: {
     message: "SECRET_STARTUP_DIAGNOSTIC",
     data: { reason: "configLoad", filePath: "C:\\SECRET_PATH\\config.toml", line: 12, column: 3,
-      detail: "unknown configuration field `SECRET_SETTING`" },
+      detail: "TOML parse error: SECRET_SETTING" },
   } }, /config\.toml.*line 12.*column 3/],
   ["managed sign-in requirement", { startupFailure: {
     message: "SECRET_STARTUP_DIAGNOSTIC",

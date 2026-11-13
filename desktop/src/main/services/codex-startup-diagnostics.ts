@@ -8,6 +8,16 @@ const text = (value: unknown): string => typeof value === "string" ? value : "";
 const STOPPED = " Native app-server was not started; safety checks were not bypassed.";
 const MXC_REQUIRED = "windows.require_mxc = true requires MXC to be selected on this Windows host";
 
+/** An unknown OEM/user key is safe to ignore only after Nova's own overrides pass strict validation. */
+export function isUnknownUserCodexSetting(value: unknown): boolean {
+  const root = object(value);
+  const error = object(root?.error);
+  const data = object(error?.data);
+  return data?.reason === "configLoad" &&
+    /(?:^|[\\/])config\.toml$/i.test(text(data.filePath)) &&
+    /unknown configuration field/i.test(`${text(error?.message)}\n${text(data?.detail)}`);
+}
+
 function location(data: RecordValue): string {
   const match = /(?:^|[\\/])(config\.toml|requirements\.toml|managed_config\.toml)$/i.exec(text(data.filePath));
   if (!match) return "";

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type {
   CodexHistoryPage,
@@ -10,7 +11,7 @@ import type {
   ImportedMessage,
 } from "../../shared/compatibility";
 import { APP_VERSION, type RunMode, type Settings } from "../../shared/types";
-import { classifyCodexStartupFailure } from "./codex-startup-diagnostics";
+import { classifyCodexStartupFailure, isUnknownUserCodexSetting } from "./codex-startup-diagnostics";
 import type { NormalizedEvent } from "./provider-events";
 import {
   disconnectChild,
@@ -45,6 +46,7 @@ export class CodexAppServerError extends Error {
   constructor(
     message: string,
     readonly terminationUnconfirmed = false,
+    readonly unknownUserSetting = false,
   ) {
     super(message);
     this.name = "CodexAppServerError";
@@ -125,11 +127,11 @@ function toml(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function codexAppServerArguments(platform = process.platform): string[] {
+export function codexAppServerArguments(platform = process.platform, strictConfig = true): string[] {
   return [
     "app-server",
     "--stdio",
-    "--strict-config",
+    ...(strictConfig ? ["--strict-config"] : []),
     ...Object.entries(WORKER_CONFIG).flatMap(([key, value]) => [
       "--config",
       `${key}=${toml(value)}`,
@@ -207,6 +209,7 @@ function validateStartupRequirements(value: unknown): void {
 async function preflight(
   executable: Executable,
   options: CodexServerOptions,
+  strictConfig = true,
 ): Promise<void> {
   checkAbort(options.signal);
   await new Promise<void>((resolve, reject) => {
@@ -215,7 +218,7 @@ async function preflight(
       executable.command,
       [
         ...executable.prefix,
-        ...codexAppServerArguments().filter((arg) => arg !== "--stdio"),
+        ...codexAppServerArguments(process.platform, strictConfig).filter((arg) => arg !== "--stdio"),
         "--print-startup-config",
         "--startup-client-info",
         JSON.stringify(CLIENT_INFO),
@@ -288,6 +291,8 @@ async function preflight(
               Buffer.concat(diagnosticChunks).toString("utf8"),
               exitCode,
             ),
+            false,
+            isUnknownUserCodexSetting(startup),
           );
         validateStartupRequirements(startup);
         resolve();
@@ -338,6 +343,30 @@ async function preflight(
   });
 }
 
+/**
+ * Strict parsing of the user's OEM config can reject keys the installed CLI
+ * harmlessly ignores. Before retrying without strict parsing, prove that the
+ * selected binary recognizes every restriction Nova applies to its worker.
+ * This temporary home contains no credentials, sessions, plugins or user config.
+ */
+async function validateWorkerOverridesInIsolation(
+  executable: Executable,
+  options: CodexServerOptions,
+): Promise<void> {
+  const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "nova-codex-config-check-"));
+  try {
+    await preflight(executable, { ...options, home: isolatedHome, cwd: isolatedHome }, true);
+  } finally {
+    try {
+      await rm(isolatedHome, { recursive: true, force: true });
+    } catch {
+      throw new CodexAppServerError(
+        "Nova could not clean up its isolated Codex configuration check. Native connection was not started.",
+      );
+    }
+  }
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -369,6 +398,7 @@ export class CodexStdioClient {
       cwd: string;
       signal?: AbortSignal;
       maxBytes?: number;
+      strictConfig?: boolean;
     },
   ) {
     checkAbort(options.signal);
@@ -376,7 +406,7 @@ export class CodexStdioClient {
     const startedAt = Date.now();
     this.child = spawn(
       executable.command,
-      [...executable.prefix, ...codexAppServerArguments()],
+      [...executable.prefix, ...codexAppServerArguments(process.platform, options.strictConfig ?? true)],
       {
         cwd: options.cwd,
         env: {
@@ -650,9 +680,21 @@ export async function connectCodexServer(options: CodexServerOptions): Promise<C
   checkAbort(options.signal);
   const executable = await resolveExecutable(options.settings.codexPath);
   checkAbort(options.signal);
-  await preflight(executable, options);
+  let strictConfig = true;
+  try {
+    await preflight(executable, options);
+  } catch (error) {
+    if (!(error instanceof CodexAppServerError) || !error.unknownUserSetting)
+      throw error;
+    // Do not weaken the worker just because the OEM config has a newer key.
+    // First confirm restrictions in a clean home, then recheck real managed
+    // requirements under normal CLI parsing. Never touch the OEM config.
+    await validateWorkerOverridesInIsolation(executable, options);
+    await preflight(executable, options, false);
+    strictConfig = false;
+  }
   checkAbort(options.signal);
-  const client = new CodexStdioClient(executable, options);
+  const client = new CodexStdioClient(executable, { ...options, strictConfig });
   try {
     await client.initialize();
     return client;
