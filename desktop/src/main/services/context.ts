@@ -6,7 +6,6 @@ import type {
   WorkspaceState,
 } from "../../shared/types";
 import { assessMemoryFreshness } from "./memory-source";
-import { assessCodexMemoryFreshness } from "./codex-installation";
 import { readProjectSharedMemory } from "./workspace-sharing";
 
 const MEMORY_BUDGET = 12_000;
@@ -36,7 +35,6 @@ export async function buildRunContext(
   thread: Pick<Thread, "id" | "projectId">,
   prompt: string,
   cwd?: string,
-  options: { nativeCodex?: boolean } = {},
 ): Promise<ContextPreview> {
   const terms = [
     ...new Set(prompt.toLowerCase().match(/[a-z0-9_./-]{3,}/g) || []),
@@ -97,14 +95,16 @@ export async function buildRunContext(
   }
   let budget = MEMORY_BUDGET;
   for (const [index, { memory }] of ranked.entries()) {
-    const assessment =
-      index < MAX_SOURCE_CHECKS
-        ? memory.codexSource
-          ? await assessCodexMemoryFreshness(memory.codexSource)
-          : await assessMemoryFreshness(cwd, memory)
+    const assessment = memory.codexSource
+      ? {
+          freshness: "unlinked" as const,
+          reason: "Imported copy. The original Codex source is not reread automatically; explicitly import it again to refresh this note.",
+        }
+      : index < MAX_SOURCE_CHECKS
+        ? await assessMemoryFreshness(cwd, memory)
         : {
             freshness:
-              memory.filePath || memory.codexSource
+              memory.filePath
                 ? ("unavailable" as const)
                 : ("unlinked" as const),
             reason:
@@ -154,7 +154,7 @@ export async function buildRunContext(
     )
   )
     warnings.push(
-      "Included user notes without file links have not been freshness-checked.",
+      "Included unlinked notes and imported copies have not been checked against their original sources.",
     );
   if (
     memories.some((memory) =>
@@ -227,11 +227,7 @@ export async function buildRunContext(
       warnings.push(
         "The imported history snapshot is incomplete; older pages, attachments, or long messages were omitted. Browse the source conversation when completeness matters.",
       );
-    if (options.nativeCodex) {
-      warnings.push(
-        "Native Codex continuation also retains its provider-owned conversation history. This preview shows only Nova's added prompt, not the full native context or its token count.",
-      );
-    } else {
+    {
       let remaining = 12_000;
       for (const message of imported.history.slice(-12).reverse()) {
         const content = message.text.slice(

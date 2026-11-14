@@ -24,6 +24,7 @@ import {
 import { resolveExecutable } from "../src/main/services/providers";
 import { classifyCodexStartupFailure } from "../src/main/services/codex-startup-diagnostics";
 import type { NormalizedEvent } from "../src/main/services/provider-events";
+import { ensureNovaCodexHome } from "../src/main/services/nova-runtime";
 
 const SOURCE_ID = "019a0000-0000-7000-8000-000000000001";
 const FORK_ID = "019a0000-0000-7000-8000-000000000002";
@@ -37,6 +38,12 @@ import readline from 'node:readline';
 const home = process.env.CODEX_HOME;
 // An isolated startup check intentionally has no user's fixture/configuration.
 const config = fs.existsSync(path.join(home, 'fixture.json')) ? JSON.parse(fs.readFileSync(path.join(home, 'fixture.json'), 'utf8')) : {};
+const runtimeConfig = {};
+const args = process.argv.slice(2);
+for(let i=0;i<args.length-1;i++) if(args[i]==='--config') {
+ const split=args[i+1].indexOf('=');
+ try {runtimeConfig[args[i+1].slice(0,split)]=JSON.parse(args[i+1].slice(split+1));} catch {}
+}
 const log = value => fs.appendFileSync(path.join(home, 'rpc.jsonl'), JSON.stringify(value)+'\n');
 if(process.argv.includes('--print-startup-config')){
  log({kind:'preflight',args:process.argv.slice(2)});
@@ -53,7 +60,7 @@ let initialized = false;
 let selected;
 const sourceId = '019a0000-0000-7000-8000-000000000001';
 const forkId = '019a0000-0000-7000-8000-000000000002';
-const metadata = (id=sourceId,cwd=process.cwd()) => ({
+const metadata = (id=sourceId,cwd=config.sourceCwd??process.cwd()) => ({
  id,sessionId:id,forkedFromId:id===forkId?sourceId:null,parentThreadId:null,
  preview:'Existing conversation',name:'Native conversation',modelProvider:config.provider??'openai',model:'fixture-model',
  createdAt:1700000000,updatedAt:1700000100,status:{type:config.active?'active':'notLoaded'},
@@ -93,7 +100,7 @@ input.on('line', line => {
   if(config.rpcError){send({id:req.id,error:{code:-32001,message:'SECRET_RPC_VALUE',data:{token:'SECRET_RPC_VALUE'}}});return}
   reply(req,{data:[metadata()],nextCursor:'next-thread-page',backwardsCursor:null});return;
  }
- if(req.method==='thread/read'){reply(req,{thread:metadata(req.params.threadId,config.wrongSourceCwd?home:process.cwd())});return}
+ if(req.method==='thread/read'){reply(req,{thread:metadata(req.params.threadId,config.wrongSourceCwd?home:config.sourceCwd??process.cwd())});return}
  if(req.method==='thread/turns/list'){
   const text=config.largeHistory?'z'.repeat(30000):'Newest response 🌲';
   const newest={id:'turn-newest',status:'completed',items:[
@@ -111,7 +118,7 @@ input.on('line', line => {
  if(req.method==='config/read'){
   if(config.configUnsupported){send({id:req.id,error:{code:-32601,message:'unknown'}});return}
   const servers={'literal.dot':{command:'PRIVATE_TOOL_COMMAND',env:{TOKEN:'SECRET_CONFIG_VALUE'}},normal:{url:'https://example.invalid',headers:{Authorization:'SECRET_CONFIG_VALUE'}}};
-  reply(req,{config:{mcp_servers:servers,api_key:'SECRET_CONFIG_VALUE'},origins:{},layers:null});return;
+  reply(req,{config:{...runtimeConfig,mcp_servers:servers,api_key:'SECRET_CONFIG_VALUE'},origins:{},layers:null});return;
  }
  if(req.method==='thread/resume'||req.method==='thread/fork'||req.method==='thread/start'){
   if(config.archivedAfterRead&&req.method==='thread/resume'){send({id:req.id,error:{code:-32600,message:'session is archived; unarchive it first'}});return}
@@ -152,13 +159,12 @@ async function fixture(
   const root = await realpath(
     await mkdtemp(path.join(os.tmpdir(), "nova-app-server-")),
   );
-  const home = path.join(root, "engine home");
+  const home = await ensureNovaCodexHome(root);
   const cwd = path.join(root, "project with spaces");
-  await mkdir(home);
   await mkdir(cwd);
   const executable = path.join(root, "fake-codex.mjs");
   await writeFile(executable, fakeServer);
-  await writeFile(path.join(home, "fixture.json"), JSON.stringify(config));
+  await writeFile(path.join(home, "fixture.json"), JSON.stringify({ ...config, sourceCwd: cwd }));
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
   });
@@ -273,21 +279,21 @@ test("app-server flags constrain supported worker features without pretending em
   assert.ok(codexAppServerArguments("win32", false).includes("features.hooks=false"));
 });
 
-test("unknown OEM config field uses isolated strict worker validation before compatible native history", async (t) => {
+test("unknown private runtime config fails closed without OEM fallback or retry", async (t) => {
   const f = await fixture(t, { unknownHomeConfig: true });
   const configPath = path.join(f.home, "config.toml");
   await writeFile(configPath, "[oem_only]\nsetting = 'unchanged'\n");
-  const result = await listCodexThreads(f.options, {});
-  assert.equal(result.threads[0].id, SOURCE_ID);
+  await assert.rejects(listCodexThreads(f.options, {}), (error: unknown) => {
+    assert.ok(error instanceof CodexAppServerError);
+    assert.ok(!error.message.includes("SECRET_OEM_SETTING"));
+    return true;
+  });
   assert.equal(await readFile(configPath, "utf8"), "[oem_only]\nsetting = 'unchanged'\n");
   const requests = await f.requests();
   const preflights = requests.filter((r) => r.kind === "preflight");
-  assert.equal(preflights.length, 2);
+  assert.equal(preflights.length, 1);
   assert.ok(preflights[0].args.includes("--strict-config"));
-  assert.ok(!preflights[1].args.includes("--strict-config"));
-  assert.ok(!requests.find((r) => r.kind === "startup")!.args.includes("--strict-config"));
-  assert.ok(requests.some((r) => r.method === "thread/list"));
-  assert.ok(!JSON.stringify(result).includes("SECRET_OEM_SETTING"));
+  assert.ok(!requests.some((r) => r.kind === "startup" || r.method === "thread/list"));
 });
 
 test("native history listing initializes in order, uses all interactive native sources, and exposes no engine path", async (t) => {
@@ -306,7 +312,7 @@ test("native history listing initializes in order, uses all interactive native s
   const requests = await f.requests();
   assert.deepEqual(
     requests.filter((r) => r.method).map((r) => r.method),
-    ["initialize", "initialized", "thread/list"],
+    ["initialize", "initialized", "config/read", "thread/list"],
   );
   const params = requests.find((r) => r.method === "thread/list")!.params;
   assert.deepEqual(params.sourceKinds, [
@@ -762,7 +768,7 @@ test("externally moved native source is not silently repointed by resume", async
   assert.ok(requests.some((r) => r.method === "thread/read"));
   assert.ok(
     !requests.some((r) =>
-      ["config/read", "thread/resume", "turn/start"].includes(r.method),
+      ["thread/resume", "turn/start"].includes(r.method),
     ),
   );
 });

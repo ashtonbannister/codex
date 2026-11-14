@@ -304,13 +304,15 @@ and `CLAUDE.md` contents are reviewable before native confirmation. The UI
 distinguishes Nova-managed notes from preserved external text and distinguishes
 disabling Nova reads from deleting the official tools' project references.
 
-Thread toolbar/menu actions refresh retained visible Codex history or publish a
-native handoff without starting a model turn. These are explicit operations, not
-claims of live synchronization, interchangeable hidden state, or full proprietary
-desktop feature parity. Existing neutral colors, mint states, system type, and
-line icons are retained; no raster assets are added.
+As of v0.5.4, the thread toolbar/menu offers explicit **Copy latest from Codex**
+only; native publishing has been removed. Codex Library is unloaded until **Read
+import source**, and Settings describes source-only imports separately from Nova's
+private runtime/account. All providers use independent copied context, not OEM
+session resume/fork. The v0.5.3 no-project agent/model and Recovery navigation
+controls are retained. Existing neutral colors, mint states, system type, and
+line icons are unchanged; no full proprietary desktop parity is claimed.
 
 The four `accounts-sharing.spec.ts` captures are synthetic test evidence for
-desktop sign-in, compact light-theme controls, shared-memory preview, and Codex
-handoff. At this source update the final rendered/native review remains pending
+desktop sign-in, compact light-theme controls, shared-memory preview, and explicit
+Codex-history copy. At this source update the final rendered/native review remains pending
 CI artifact inspection. They cannot certify a real provider login or inference.

@@ -21,7 +21,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Share2,
   Settings2,
   ShieldCheck,
   Square,
@@ -410,17 +409,12 @@ export function App() {
     } catch (reason) { setError(errorText(reason)); }
     finally { setExporting(false); }
   };
-  const shareThread = async (id: string, action: "refresh" | "publish") => {
+  const copyLatestHistory = async (id: string) => {
     if (sharing || workActive) return;
     setSharing(true); setError(""); setNotice(""); setThreadMenu(null);
     try {
-      if (action === "refresh") {
-        await api.refreshCodexThread(id);
-        setNotice(isPreview ? "Synthetic Codex history refreshed. No official conversation was read." : "Codex visible history refreshed. Existing Nova runs and project memory were preserved.");
-      } else {
-        const result = await api.publishCodexHandoff(id);
-        setNotice(isPreview ? "Synthetic handoff only. No official Codex thread was created." : `${result.unchanged ? "This handoff is already saved" : "Handoff saved"} in Codex as “${result.title}” (${result.nativeThreadId}). No model turn was started.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`);
-      }
+      await api.refreshCodexThread(id);
+      setNotice(isPreview ? "Synthetic history copied. No official conversation was read." : "Latest visible history copied into Nova. The source Codex files were not modified; existing Nova runs and memory were preserved.");
       await refreshSnapshot();
       setContextRefresh((value) => value + 1);
     } catch (reason) { setError(errorText(reason)); }
@@ -735,8 +729,7 @@ export function App() {
             {surface === "workspace" && (
               <div className="toolbar-actions">
                 {thread && <button className="icon-button" aria-label="Export conversation as Markdown" title="Export conversation as Markdown" disabled={exporting} onClick={() => void exportThread(thread.id)}>{exporting ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}</button>}
-                {thread?.codex && <button className="icon-button" aria-label="Refresh conversation from Codex" title="Refresh retained visible history from the official Codex thread" disabled={sharing || workActive} onClick={() => void shareThread(thread.id, "refresh")}><RefreshCw size={16} className={sharing ? "spin" : ""} /></button>}
-                {thread && <button className="icon-button" aria-label="Publish handoff to Codex" title="Save bounded visible context as a native Codex handoff; no model turn" disabled={sharing || workActive} onClick={() => void shareThread(thread.id, "publish")}><Share2 size={16} /></button>}
+                {thread?.codex && <button className="icon-button" aria-label="Copy latest history from Codex" title="Read and copy the latest visible source history into Nova; never write back" disabled={sharing || workActive} onClick={() => void copyLatestHistory(thread.id)}><RefreshCw size={16} className={sharing ? "spin" : ""} /></button>}
                 {project && (
                   <span
                     className="branch-label"
@@ -801,6 +794,7 @@ export function App() {
           )}
           {surface === "library" ? (
             <CodexLibrary
+              key={state.settings.codexHome ?? "default-import-source"}
               projects={state.projects}
               selectedProjectId={projectId}
               codexHome={state.settings.codexHome}
@@ -963,15 +957,7 @@ export function App() {
                 )}
                 {thread?.codex && (
                   <p className="continuation-note">
-                    {provider !== "codex"
-                      ? "Shared handoff · bounded visible history and project memory. No Codex hidden state is transferred."
-                      : mode === "build"
-                        ? "Native Codex · use this thread’s isolated worktree, forking native history if needed; the source conversation stays separate."
-                        : thread.codex.forkedThreadId
-                          ? "Native Codex · continue Nova’s existing fork."
-                          : thread.codex.sourceArchived
-                            ? "Native Codex · fork the archived source to continue; leave the source archived."
-                            : "Native Codex · resume the original conversation with its engine-managed history."}
+                    Independent Nova copy · every agent uses bounded visible history and project memory. No Codex hidden state is transferred, and the original conversation and working folder are not resumed or changed.
                   </p>
                 )}
                 <div className="composer">
@@ -1510,8 +1496,7 @@ export function App() {
           onExport={() => void exportThread(threadMenu.thread.id)}
           exporting={exporting}
           sharing={sharing || workActive}
-          onRefreshCodex={() => void shareThread(threadMenu.thread.id, "refresh")}
-          onPublishCodex={() => void shareThread(threadMenu.thread.id, "publish")}
+          onRefreshCodex={() => void copyLatestHistory(threadMenu.thread.id)}
           onRename={() => {
             setEditingThread(threadMenu.thread);
             setThreadMenu(null);

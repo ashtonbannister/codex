@@ -24,6 +24,7 @@ import {
   resolveExecutable,
   runProvider,
 } from "../src/main/services/providers";
+import { ensureNovaCodexHome } from "../src/main/services/nova-runtime";
 import {
   validateMemoryInput,
   validateRunRequest,
@@ -39,6 +40,7 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 if (process.argv.includes('--version')) { console.log('test-cli 1.0'); process.exit(0); }
 if (process.argv.includes('--help')) { console.log('--json --sandbox --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools'); process.exit(0); }
+if (process.argv.includes('--print-startup-config')) { console.log(JSON.stringify({appServerVersion:'test-cli-1.0',configRequirements:{requirements:null}})); process.exit(0); }
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);
@@ -170,7 +172,7 @@ async function cancelReadyOrphan(
   const controller = new AbortController();
   let readyAt: number | undefined;
   const result = await runProvider({
-    command: { ...command, args: [] },
+    command: { ...command, env: { ...command.env, CODEX_HOME: await ensureNovaCodexHome(path.join(root, "state")) }, args: [] },
     provider: "codex",
     cwd: root,
     prompt,
@@ -564,7 +566,7 @@ test("process timeout kills a worker instead of leaving it waiting", async (t) =
   const { executable, root } = await fixture(t);
   const command = await resolveExecutable(executable);
   const result = await runProvider({
-    command: { ...command, args: [] },
+    command: { ...command, env: { ...command.env, CODEX_HOME: await ensureNovaCodexHome(path.join(root, "state")) }, args: [] },
     provider: "codex",
     cwd: root,
     prompt: "WAIT_FOR_CANCEL",
@@ -619,7 +621,7 @@ test(
     const controller = new AbortController();
     let readyAt: number | undefined;
     const result = await runProvider({
-      command: { ...command, args: [] },
+      command: { ...command, env: { ...command.env, CODEX_HOME: await ensureNovaCodexHome(path.join(root, "state")) }, args: [] },
       provider: "codex",
       cwd: root,
       prompt: "WINDOWS_PROCESS_TREE",

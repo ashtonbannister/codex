@@ -13,6 +13,7 @@ import type {
 } from "../../shared/types";
 import { normalizeProviderLine, type NormalizedEvent } from "./provider-events";
 import { connectionFromSettings } from "./local-models";
+import { assertNovaCodexHome, ensureNovaCodexHome, isolatedCodexEnv, novaCodexConfigArgs } from "./nova-runtime";
 export { assertLocalModelAvailable, prepareLocalProvider } from "./local-models";
 
 export interface Executable {
@@ -548,12 +549,18 @@ export async function captureCommand(
   args: string[],
   cwd: string,
   maximum = 128_000,
+  runtimeHome?: string,
 ): Promise<string> {
+  const home = runtimeHome ?? executable.env?.CODEX_HOME;
+  if (home) await assertNovaCodexHome(home);
+  const environment = home
+    ? isolatedCodexEnv(home, executable.env)
+    : { ...process.env, ...executable.env, NO_COLOR: "1" };
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const child = spawn(executable.command, [...executable.prefix, ...args], {
       cwd,
-      env: { ...process.env, ...executable.env, NO_COLOR: "1" },
+      env: environment,
       shell: false,
       windowsHide: true,
       detached: process.platform !== "win32",
@@ -641,18 +648,21 @@ export async function probeProvider(
         ? `Local · ${settings.localProvider === "lmstudio" ? "LM Studio" : settings.localProvider === "custom" ? "Custom server" : "Ollama"}`
         : "Codex";
   try {
+    const runtimeHome = await ensureNovaCodexHome(cwd, settings.codexHome);
     const executable = await resolveExecutable(
       provider === "claude" ? settings.claudePath : settings.codexPath,
     );
     const version = (
-      await captureCommand(executable, ["--version"], cwd, 8_192)
+      await captureCommand(executable, ["--version"], runtimeHome ?? cwd, 8_192, runtimeHome)
     )
       .trim()
       .slice(0, 160);
     const help = await captureCommand(
       executable,
       provider === "claude" ? ["--help"] : ["exec", "--help"],
-      cwd,
+      runtimeHome ?? cwd,
+      128_000,
+      runtimeHome,
     );
     const required =
       provider === "claude"
@@ -686,7 +696,9 @@ export async function probeProvider(
       detail:
         provider === "ollama"
           ? "Codex bridge ready; the selected local endpoint/model is checked when you run. No inference was requested by detection."
-          : "CLI detected. Authentication and account limits remain with the official CLI; no model call has been made.",
+          : provider === "codex"
+            ? "CLI detected. Nova uses separate runtime storage and sign-in; OEM Codex is untouched. No model call has been made."
+            : "CLI detected. Authentication and account limits remain with the official CLI; no model call has been made.",
     };
   } catch (error) {
     return {
@@ -799,14 +811,33 @@ export async function runProvider(options: {
   onEvent: (event: NormalizedEvent) => void;
 }): Promise<ProcessResult> {
   if (options.signal.aborted) return { cancelled: true, completed: false };
+  const args = [...options.command.args];
+  let environment: NodeJS.ProcessEnv = { ...process.env, ...options.command.env, NO_COLOR: "1" };
+  if (options.command.env?.CODEX_HOME || options.provider !== "claude") {
+    const home = await assertNovaCodexHome(options.command.env?.CODEX_HOME ?? "");
+    environment = isolatedCodexEnv(home, options.command.env);
+  }
+  if (options.provider !== "claude") {
+    const home = options.command.env!.CODEX_HOME!;
+    // Put fixed storage overrides after any provider-specific config, before
+    // stdin's positional marker. Neither inherited env nor caller config wins.
+    const stdin = args.at(-1) === "-";
+    if (stdin) args.pop();
+    args.push(...novaCodexConfigArgs(home), ...(stdin ? ["-"] : []));
+    const { validateCodexRuntimeRequirements } = await import("./codex-app-server");
+    await validateCodexRuntimeRequirements(options.command, home, options.cwd, options.signal,
+      args[args.indexOf("--sandbox") + 1] === "workspace-write" ? "workspace-write" : "read-only");
+    if (options.signal.aborted) return { cancelled: true, completed: false };
+    await assertNovaCodexHome(home);
+  }
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const child = spawn(
       options.command.command,
-      [...options.command.prefix, ...options.command.args],
+      [...options.command.prefix, ...args],
       {
         cwd: options.cwd,
-        env: { ...process.env, ...options.command.env, NO_COLOR: "1" },
+        env: environment,
         shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",

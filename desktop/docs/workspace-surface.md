@@ -66,23 +66,26 @@ preview pages does not silently enlarge the bounded imported snapshot. Source an
 truncation labels stay with the retained transcript, which is never displayed as a
 new agent run or new verification evidence.
 
-Codex Plan resumes native engine history, or an owned fork once one exists. An
-archived source is forked before continuing. Isolated Build uses a Nova worktree;
-non-Git folders remain Plan-only. Claude and local providers share the same Nova
-thread and its bounded visible context, not Codex hidden state. Native consent and
+As of v0.5.4, the Library opens unloaded and requires **Read import source**.
+Codex, Claude, and local providers all use the same independent Nova copy and its
+bounded visible context. No source-native resume, fork, or archive change occurs.
+Imports create Nova-owned Plan folders, not projects at their recorded source cwd.
+Isolated Build requires an explicitly opened Git project. Native consent and
 provider execution remain main-process responsibilities.
 
 Resources are previewed as literal text and imported only into a selected project
 with the exact reviewed digest. Memories, memories v2, instructions, skills, and
 plans become reference notes—not installed instructions or executable skills.
 Credentials and raw configuration are excluded. An imported note retains its
-external source fingerprint; manual editing explicitly removes that link. Returning
-to a note's resource preview does not start the native conversation engine. If its
+external source fingerprint as import provenance, without automatic freshness
+reads; manual editing explicitly removes that link. Returning to a note's resource
+preview still requires Read import source and never starts an OEM engine. If its
 source home differs from the configured library, the UI warns before offering
 current-library resources instead of silently substituting another source.
 
-Settings expose optional Codex home and worktree-storage locations through the
-native picker contract. Empty values preserve configured defaults. A worktree
+Settings expose an optional read-only Codex import source and worktree-storage
+location through the native picker contract. Codex runtime/sign-in stays in Nova's
+private app-owned home, not the source. A worktree
 location change applies only to future worktrees; existing thread folders are not
 moved.
 
@@ -112,8 +115,10 @@ process. Unavailable actions explain why rather than silently weakening the
 clean-baseline or fast-forward requirement. No push or destructive cleanup is
 implicit.
 
-Recovery lists affected projects/Codex homes and explicitly records the user's
-cleanup acknowledgement. It neither claims to have found every detached process
+Recovery lists affected projects/accounts and retained legacy Codex-home warnings;
+those source-home warnings no longer block importing or the independent runtime.
+It explicitly records the user's cleanup acknowledgement without killing OEM
+processes or auto-clearing records. It neither claims to have found every detached process
 nor turns a historical unconfirmed termination into a verified shutdown. Active
 work or stale recovery entries cannot be cleared through the interface.
 
@@ -133,7 +138,7 @@ teams, routing, signed distribution, or every later roadmap milestone.
 
 Settings → Agents separates saved executable detection from account state.
 Explicit account checks and sign-in run through the official tools. Native
-confirmation, persisted worker/recovery controls, and the selected Codex home
+confirmation, persisted worker/recovery controls, and Nova's private Codex home
 remain main-process responsibilities. The renderer shows bounded progress and
 cancel/retry states without collecting credentials or opening OAuth URLs itself.
 Transient progress failures do not strand the dialog, and a failed account refresh
@@ -147,12 +152,12 @@ automatic commit. Opted-in shared-file reads are fresh per request across Nova's
 providers. Disabling them leaves project files and official Codex/Claude references
 intact, as stated next to the action.
 
-Codex refresh and native handoff live beside existing thread actions. Refresh
-preserves Nova runs and notes; publishing saves bounded visible context without
-model inference. Native transcript rendering may differ, and hidden reasoning and
-private memory databases are outside this interchange contract.
+**Copy latest from Codex** lives beside existing thread actions. It explicitly
+copies bounded source-visible text and preserves Nova runs and notes. Native
+publishing has been removed and its IPC fails closed. Hidden reasoning, live
+sessions, and private memory databases are outside this interchange contract.
 
 Four deterministic, synthetic capture cases cover accounts, compact light-theme
-keyboard use, memory review, and thread refresh/handoff. Final browser/native QA
+keyboard use, memory review, and explicit thread-history copy. Final browser/native QA
 is pending CI artifact review at this documentation update. No local browser or
 real provider account was used to claim completion.

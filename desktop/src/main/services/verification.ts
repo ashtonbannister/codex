@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { assertNovaCodexHome, isolatedCodexEnv } from "./nova-runtime";
 import type { VerificationProfile } from "../../shared/types";
 import {
   disconnectChild,
@@ -129,6 +130,8 @@ export async function runVerificationCommand(options: {
   cwd: string;
   signal: AbortSignal;
   maxBytes: number;
+  /** Nova's issued runtime also isolates any Codex command a saved check invokes. */
+  codexHome?: string;
   /** Receives each decoded output chunk, never cumulative output. */
   onOutput: (text: string) => void;
 }): Promise<VerificationCommandResult> {
@@ -157,6 +160,7 @@ export async function runVerificationCommand(options: {
   let executable: Executable;
   try {
     executable = await resolveVerificationExecutable(profile.executable);
+    if (options.codexHome) await assertNovaCodexHome(options.codexHome);
   } catch (error) {
     return {
       ...empty,
@@ -174,7 +178,9 @@ export async function runVerificationCommand(options: {
       [...executable.prefix, ...profile.args],
       {
         cwd: options.cwd,
-        env: { ...process.env, ...executable.env, NO_COLOR: "1" },
+        env: options.codexHome
+          ? isolatedCodexEnv(options.codexHome, executable.env)
+          : { ...process.env, ...executable.env, NO_COLOR: "1" },
         shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",

@@ -4,13 +4,14 @@ import type { Page } from "@playwright/test";
 import { installFakeDesktopBridge } from "./desktop-fixture";
 import type { FixtureCalls, FixtureControls } from "./desktop-fixture";
 
-const openLibrary = async (page: Page) => {
+const openLibrary = async (page: Page, readSource = true) => {
   await page
     .getByRole("button", { name: "Codex library", exact: true })
     .click();
   await expect(
     page.getByRole("heading", { name: "Codex library", exact: true }),
   ).toBeVisible();
+  if (readSource) await page.getByRole("button", { name: "Read Codex import source", exact: true }).click();
 };
 const calls = (page: Page) =>
   page.evaluate(
@@ -42,7 +43,7 @@ test("locked Codex history still allows agent selection, project opening, and Re
   await page.getByRole("button", { name: "Open Settings → Recovery" }).click();
   await expect(page.getByRole("tab", { name: "Recovery" })).toHaveAttribute("aria-selected", "true");
   await page.getByRole("button", { name: "Cancel" }).click();
-  await page.getByRole("button", { name: "Open a project", exact: true }).click();
+  await page.locator(".codex-library").getByRole("button", { name: "Open a project", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "Choose agent" })).toHaveValue("claude");
   await expect(page.getByRole("textbox", { name: "Model override" })).toHaveValue("fixture-claude-model");
 });
@@ -52,7 +53,18 @@ test("Codex library is inline, discoverable, and distinguishes excluded location
 }) => {
   await installFakeDesktopBridge(page);
   await page.goto("/");
-  await openLibrary(page);
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  await expect(page.getByRole("dialog", { name: "Workbench settings" })).toBeVisible();
+  expect((await calls(page)).installationReads).toBe(0);
+  expect((await calls(page)).libraryQueries).toEqual([]);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await openLibrary(page, false);
+  const beforeRead = await calls(page);
+  expect(beforeRead.installationReads).toBe(0);
+  expect(beforeRead.libraryQueries).toEqual([]);
+  expect(beforeRead.historyQueries).toEqual([]);
+  await expect(page.locator(".codex-library")).toContainText("Nothing in the source folder is read");
+  await page.getByRole("button", { name: "Read Codex import source", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator(".library-source-bar")).toContainText(
     "C:\\Fixtures\\Codex",
@@ -66,7 +78,7 @@ test("Codex library is inline, discoverable, and distinguishes excluded location
     .filter({ hasText: "Credentials" });
   await expect(excluded).toContainText("Excluded");
   await expect(excluded.getByRole("button")).toHaveCount(0);
-  await expect(page.locator(".location-list")).toContainText("Engine-managed");
+  await expect(page.locator(".location-list")).toContainText("Readable content");
   await page.getByRole("button", { name: "Workspace", exact: true }).click();
   await expect(page.locator(".codex-library")).toHaveCount(0);
   await page.keyboard.press("Control+k");
@@ -108,7 +120,7 @@ test("conversation discovery supports active, archived, search, and opaque pagin
     "Archived Codex conversation",
   );
   await expect(page.locator(".library-handoff")).toContainText(
-    "archived source is forked first",
+    "No native session is resumed or forked",
   );
   expect((await calls(page)).libraryQueries.at(-1)?.archived).toBe(true);
 });
@@ -162,12 +174,12 @@ test("imported threads keep one Nova thread when switching Codex, Claude, and lo
   await openLibrary(page);
   await page.getByRole("button", { name: "Open in Nova", exact: true }).click();
   await expect(page.locator(".continuation-note")).toContainText(
-    "resume the original conversation",
+    "Independent Nova copy",
   );
   const composer = page.getByRole("textbox", {
     name: "Message your coding agent",
   });
-  await composer.fill("Continue natively");
+  await composer.fill("Continue from copied context with Codex");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(page.locator(".run-card")).toHaveCount(1);
   await page
@@ -305,6 +317,7 @@ test("resources require exact preview digests and keep external provenance disti
   await memory
     .getByRole("button", { name: "Preview source in Codex library" })
     .click();
+  await page.getByRole("button", { name: "Read Codex import source", exact: true }).click();
   await expect(page.getByLabel("Resource content")).toContainText(
     "Keep checks reproducible",
   );
@@ -364,10 +377,10 @@ test("storage settings use native bridge pickers and explicitly do not relocate 
   const dialog = page.getByRole("dialog", { name: "Workbench settings" });
   await dialog.getByRole("tab", { name: "Storage", exact: true }).click();
   await dialog
-    .getByRole("button", { name: "Choose Codex home folder" })
+    .getByRole("button", { name: "Choose Codex import source folder" })
     .click();
   await expect(
-    dialog.getByRole("textbox", { name: "Codex home", exact: true }),
+    dialog.getByRole("textbox", { name: "Codex import source", exact: true }),
   ).toHaveValue("E:\\Chosen\\Codex");
   await dialog
     .getByRole("button", { name: "Choose worktree storage folder" })
@@ -413,7 +426,7 @@ test("library errors are explicit and refresh recovers without a model call", as
       window as unknown as { __workbenchFixture: FixtureControls }
     ).__workbenchFixture.setLibraryFailure(""),
   );
-  await page.getByRole("button", { name: "Refresh Codex library" }).click();
+  await page.getByRole("button", { name: "Refresh Codex import source" }).click();
   await expect(
     page.getByRole("button", { name: "Open in Nova", exact: true }),
   ).toBeEnabled();

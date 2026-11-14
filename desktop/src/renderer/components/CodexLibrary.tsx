@@ -73,11 +73,12 @@ export function CodexLibrary({
     null,
   );
   const [installationError, setInstallationError] = useState("");
+  const [sourceEnabled, setSourceEnabled] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [archived, setArchived] = useState(false);
   const [search, setSearch] = useState("");
   const [threads, setThreads] = useState<CodexThreadPage | null>(null);
-  const [threadsLoading, setThreadsLoading] = useState(true);
+  const [threadsLoading, setThreadsLoading] = useState(false);
   const [threadsError, setThreadsError] = useState("");
   const [selected, setSelected] = useState<CodexThreadSummary | null>(null);
   const [history, setHistory] = useState<CodexHistoryPage | null>(null);
@@ -106,6 +107,7 @@ export function CodexLibrary({
     let alive = true;
     setInstallation(null);
     setInstallationError("");
+    if (!sourceEnabled) return;
     void api
       .inspectCodexInstallation()
       .then((value) => {
@@ -117,11 +119,11 @@ export function CodexLibrary({
     return () => {
       alive = false;
     };
-  }, [codexHome, refresh]);
+  }, [codexHome, refresh, sourceEnabled]);
 
   useEffect(() => {
     const request = ++threadRequest.current;
-    if (tab !== "conversations") {
+    if (!sourceEnabled || tab !== "conversations") {
       setThreadsLoading(false);
       return;
     }
@@ -153,11 +155,11 @@ export function CodexLibrary({
       threadRequest.current++;
       window.clearTimeout(timer);
     };
-  }, [tab, archived, search, codexHome, refresh]);
+  }, [tab, archived, search, codexHome, refresh, sourceEnabled]);
 
   useEffect(() => {
     const request = ++historyRequest.current;
-    if (tab !== "conversations") {
+    if (!sourceEnabled || tab !== "conversations") {
       setHistoryLoading(false);
       return;
     }
@@ -184,10 +186,10 @@ export function CodexLibrary({
     return () => {
       historyRequest.current++;
     };
-  }, [tab, selected, refresh]);
+  }, [tab, selected, refresh, sourceEnabled]);
 
   useEffect(() => {
-    if (tab !== "resources") return;
+    if (!sourceEnabled || !installation || tab !== "resources") return;
     let alive = true;
     resourceRequest.current++;
     setResources(null);
@@ -222,7 +224,7 @@ export function CodexLibrary({
       alive = false;
       resourceRequest.current++;
     };
-  }, [tab, section, codexHome, refresh, initialResource, installation?.home]);
+  }, [tab, section, codexHome, refresh, initialResource, installation?.home, sourceEnabled]);
 
   const loadThreads = async () => {
     if (!threads?.nextCursor || threadsLoading) return;
@@ -345,7 +347,7 @@ export function CodexLibrary({
           <p>
             {isPreview
               ? "Synthetic examples — nothing is read from your computer."
-              : "Bring existing conversations and selected knowledge into Nova."}
+              : "Copy selected conversations and knowledge into Nova. Source folders are read-only."}
           </p>
         </div>
         <button className="secondary-button" onClick={onBack}>
@@ -361,22 +363,23 @@ export function CodexLibrary({
       )}
       <div className="library-source-bar">
         <Folder size={14} />
-        <code title={installation?.home}>
+        <code title={installation?.home ?? codexHome}>
           {installation?.home ??
             (installationError
               ? "Location unavailable"
-              : "Inspecting configured Codex home…")}
+              : sourceEnabled ? "Reading import source…" : codexHome || "Default Codex import source · not loaded")}
         </code>
         <button className="text-button" onClick={onSettings}>
           Change location
         </button>
         <button
-          className="icon-button"
-          aria-label="Refresh Codex library"
+          className="secondary-button"
+          aria-label={sourceEnabled ? "Refresh Codex import source" : "Read Codex import source"}
           disabled={importing}
-          onClick={() => setRefresh((value) => value + 1)}
+          onClick={() => { setSourceEnabled(true); setRefresh((value) => value + 1); }}
         >
           <RefreshCw size={14} />
+          {sourceEnabled ? "Refresh import source" : "Read import source"}
         </button>
       </div>
       {installationError && (
@@ -412,12 +415,19 @@ export function CodexLibrary({
           </button>
         ))}
       </nav>
-      {tab === "locations" ? (
+      {!sourceEnabled ? (
+        <div className="library-locations">
+          <h2>Import only · separate working state</h2>
+          <p className="panel-intro">Nothing in the source folder is read until you choose Read import source. Nova does not start Codex there, watch for changes, or write back.</p>
+          <p className="panel-note">Imported conversations become independent Nova copies in a Nova-owned folder. Credentials, native session state, and the original working folder are not transferred. Nova uses its own Codex runtime home and sign-in.</p>
+        </div>
+      ) : tab === "locations" ? (
         <div className="library-locations">
           <h2>Location inventory</h2>
           <p className="panel-intro">
-            Readable resources are previewed before import. Conversations stay
-            engine-managed; credentials and raw configuration are not imported.
+            Readable resources are previewed before import. Conversation files
+            are read only to make visible-text copies. Credentials, databases,
+            and raw configuration are not imported or modified.
           </p>
           {installation ? (
             <div className="location-list">
@@ -429,7 +439,7 @@ export function CodexLibrary({
                       {location.access === "content"
                         ? "Readable content"
                         : location.access === "engine-managed"
-                          ? "Engine-managed"
+                          ? "Not imported"
                           : "Excluded"}
                     </span>
                   </div>
@@ -564,27 +574,27 @@ export function CodexLibrary({
                 </div>
                 <dl className="library-metadata">
                   <div>
-                    <dt>Project folder</dt>
+                    <dt>Recorded folder · not opened</dt>
                     <dd>
                       <code>{selected.cwd}</code>
                     </dd>
                   </div>
                   <div>
                     <dt>Source</dt>
-                    <dd>{selected.source || "Codex engine"}</dd>
+                    <dd>{selected.source || "Read-only conversation file"}</dd>
                   </div>
                 </dl>
                 <details className="library-handoff" open>
                   <summary>What carries over?</summary>
                   <p>
-                    Codex Plan resumes native history; an archived source is
-                    forked first. Build forks into an isolated Git worktree.
-                    Later Codex runs continue Nova’s fork when one exists.
+                    Nova copies visible text into its own workspace. The source
+                    conversation, archive state, and working folder remain
+                    untouched. No native session is resumed or forked.
                   </p>
                   <p>
-                    Claude and local models receive a bounded visible transcript
-                    and selected project memory, not Codex’s hidden state.
-                    Opening does not run a model or edit source files.
+                    Codex, Claude, and local models all receive a bounded visible
+                    transcript and selected Nova memory, not Codex’s hidden state.
+                    Opening makes an independent copy; it does not run a model.
                   </p>
                 </details>
                 {importError && (
@@ -640,9 +650,9 @@ export function CodexLibrary({
                 )}
                 <p className="panel-note">
                   Preview pagination does not enlarge the imported snapshot.
-                  Nova keeps a bounded copy; Codex retains its own native
-                  history. Hidden reasoning and raw tool payloads are not shared
-                  here.
+                  Nova keeps a bounded copy; the source Codex history is never
+                  used as Nova’s working state. Hidden reasoning and raw tool
+                  payloads are not shared here.
                 </p>
               </>
             ) : (

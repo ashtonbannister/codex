@@ -5,7 +5,6 @@ import path from "node:path";
 import type { MemoryEntry, Project } from "../../shared/types";
 import type { SharedMemoryFile, SharedMemoryPreview } from "../../shared/sharing";
 import { assessMemoryFreshness } from "./memory-source";
-import { assessCodexMemoryFreshness } from "./codex-installation";
 
 const MAX_FILE_BYTES = 256 * 1_024;
 const MAX_REFERENCE_CHARS = 16_000;
@@ -106,7 +105,7 @@ export async function previewProjectSharedMemory(
   const excluded: string[] = [];
   for (const memory of candidates) {
     const assessment = memory.codexSource
-      ? await assessCodexMemoryFreshness(memory.codexSource)
+      ? { freshness: "unlinked" as const }
       : await assessMemoryFreshness(root, memory);
     if (!["current", "unlinked"].includes(assessment.freshness)) {
       excluded.push(memory.title);
@@ -122,6 +121,7 @@ export async function previewProjectSharedMemory(
   const files: SharedMemoryFile[] = [];
   const warnings = [
     "Only these project files are shared. Codex/Claude credentials, private memory databases, hidden reasoning, plugins, and permissions are not copied.",
+    "Imported Codex notes are retained copies. Publishing does not reread or update the original Codex source; import explicitly to refresh a copy.",
     "Publishing replaces the Nova notes block with current active notes. Review the before/after text; manual or OEM edits outside that block are preserved.",
     "Nova reads the shared Markdown reference afresh on each run after opt-in. Official Codex and Claude use their project instructions; nested instruction overrides and provider context limits still apply.",
     "Publishing changes ordinary working files. Review and commit AGENTS.md, CLAUDE.md, and .nova/MEMORY.md before isolated Build, which requires a clean Git baseline; new native worktrees inherit only committed instructions. No commit happens automatically.",

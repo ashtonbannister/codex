@@ -1,6 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
-import os from "node:os";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type {
   CodexHistoryPage,
@@ -13,6 +12,7 @@ import type {
 import { APP_VERSION, type RunMode, type Settings } from "../../shared/types";
 import { classifyCodexStartupFailure, isUnknownUserCodexSetting } from "./codex-startup-diagnostics";
 import type { NormalizedEvent } from "./provider-events";
+import { assertNovaCodexConfig, assertNovaCodexHome, assertNovaCodexRequirements, isolatedCodexEnv, novaCodexConfigArgs } from "./nova-runtime";
 import {
   disconnectChild,
   resolveExecutable,
@@ -127,7 +127,7 @@ function toml(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function codexAppServerArguments(platform = process.platform, strictConfig = true): string[] {
+export function codexAppServerArguments(platform = process.platform, strictConfig = true, home?: string): string[] {
   return [
     "app-server",
     "--stdio",
@@ -139,6 +139,7 @@ export function codexAppServerArguments(platform = process.platform, strictConfi
     ...(platform === "win32"
       ? ["--config", 'windows.sandbox="unelevated"']
       : []),
+    ...(home ? novaCodexConfigArgs(home) : []),
   ];
 }
 
@@ -148,7 +149,7 @@ const CLIENT_INFO = {
   version: APP_VERSION,
 };
 
-function validateStartupRequirements(value: unknown): void {
+function validateStartupRequirements(value: unknown, home: string, sandbox = "read-only"): void {
   const result = record(value, "startup requirements");
   if (Object.hasOwn(result, "error"))
     throw new CodexAppServerError(
@@ -158,8 +159,10 @@ function validateStartupRequirements(value: unknown): void {
   const response = record(result.configRequirements, "startup requirements");
   if (response.requirements === null) return;
   const requirements = record(response.requirements, "startup requirements");
+  try { assertNovaCodexRequirements(home, requirements); }
+  catch (error) { throw new CodexAppServerError((error as Error).message); }
   const features = requirements.featureRequirements;
-  if (features !== null && !isObject(features))
+  if (features !== null && features !== undefined && !isObject(features))
     throw invalid("managed feature requirements");
   if (features && Object.keys(features).length > 512)
     throw invalid("managed feature requirements");
@@ -185,7 +188,7 @@ function validateStartupRequirements(value: unknown): void {
   }
   for (const [field, expected] of [
     ["allowedApprovalPolicies", "never"],
-    ["allowedSandboxModes", "read-only"],
+    ["allowedSandboxModes", sandbox],
     ["allowedWebSearchModes", "disabled"],
   ] as const) {
     const allowed = requirements[field];
@@ -208,9 +211,12 @@ function validateStartupRequirements(value: unknown): void {
  */
 async function preflight(
   executable: Executable,
-  options: CodexServerOptions,
+  options: Pick<CodexServerOptions, "home" | "cwd" | "signal">,
   strictConfig = true,
+  sandbox = "read-only",
 ): Promise<void> {
+  checkAbort(options.signal);
+  await assertNovaCodexHome(options.home);
   checkAbort(options.signal);
   await new Promise<void>((resolve, reject) => {
     const startedAt = Date.now();
@@ -218,20 +224,15 @@ async function preflight(
       executable.command,
       [
         ...executable.prefix,
-        ...codexAppServerArguments(process.platform, strictConfig).filter((arg) => arg !== "--stdio"),
+        ...codexAppServerArguments(process.platform, strictConfig, options.home).filter((arg) => arg !== "--stdio"),
+        "--config", `sandbox_mode=${JSON.stringify(sandbox)}`,
         "--print-startup-config",
         "--startup-client-info",
         JSON.stringify(CLIENT_INFO),
       ],
       {
         cwd: options.cwd,
-        env: {
-          ...process.env,
-          ...executable.env,
-          CODEX_HOME: options.home,
-          CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
-          NO_COLOR: "1",
-        },
+        env: isolatedCodexEnv(options.home, executable.env),
         shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -294,7 +295,7 @@ async function preflight(
             false,
             isUnknownUserCodexSetting(startup),
           );
-        validateStartupRequirements(startup);
+        validateStartupRequirements(startup, options.home, sandbox);
         resolve();
       } catch (error) {
         reject(
@@ -343,28 +344,15 @@ async function preflight(
   });
 }
 
-/**
- * Strict parsing of the user's OEM config can reject keys the installed CLI
- * harmlessly ignores. Before retrying without strict parsing, prove that the
- * selected binary recognizes every restriction Nova applies to its worker.
- * This temporary home contains no credentials, sessions, plugins or user config.
- */
-async function validateWorkerOverridesInIsolation(
+/** Config-only discovery before explicit CLI runs; no app-server is started. */
+export async function validateCodexRuntimeRequirements(
   executable: Executable,
-  options: CodexServerOptions,
+  home: string,
+  cwd: string,
+  signal: AbortSignal,
+  sandbox = "read-only",
 ): Promise<void> {
-  const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "nova-codex-config-check-"));
-  try {
-    await preflight(executable, { ...options, home: isolatedHome, cwd: isolatedHome }, true);
-  } finally {
-    try {
-      await rm(isolatedHome, { recursive: true, force: true });
-    } catch {
-      throw new CodexAppServerError(
-        "Nova could not clean up its isolated Codex configuration check. Native connection was not started.",
-      );
-    }
-  }
+  await preflight(executable, { home, cwd, signal }, true, sandbox);
 }
 
 interface PendingRequest {
@@ -406,16 +394,10 @@ export class CodexStdioClient {
     const startedAt = Date.now();
     this.child = spawn(
       executable.command,
-      [...executable.prefix, ...codexAppServerArguments(process.platform, options.strictConfig ?? true)],
+      [...executable.prefix, ...codexAppServerArguments(process.platform, options.strictConfig ?? true, options.home)],
       {
-        cwd: options.cwd,
-        env: {
-          ...process.env,
-          ...executable.env,
-          CODEX_HOME: options.home,
-          CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
-          NO_COLOR: "1",
-        },
+        cwd: options.home,
+        env: isolatedCodexEnv(options.home, executable.env),
         shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -675,28 +657,22 @@ export class CodexStdioClient {
   }
 }
 
-/** Owned, initialized transport for narrow official account operations as well as history. */
+/** Private Nova transport. OEM homes are never valid runtime input. */
 export async function connectCodexServer(options: CodexServerOptions): Promise<CodexStdioClient> {
   checkAbort(options.signal);
+  const home = await assertNovaCodexHome(options.home);
+  options = { ...options, home, cwd: home };
   const executable = await resolveExecutable(options.settings.codexPath);
   checkAbort(options.signal);
-  let strictConfig = true;
-  try {
-    await preflight(executable, options);
-  } catch (error) {
-    if (!(error instanceof CodexAppServerError) || !error.unknownUserSetting)
-      throw error;
-    // Do not weaken the worker just because the OEM config has a newer key.
-    // First confirm restrictions in a clean home, then recheck real managed
-    // requirements under normal CLI parsing. Never touch the OEM config.
-    await validateWorkerOverridesInIsolation(executable, options);
-    await preflight(executable, options, false);
-    strictConfig = false;
-  }
+  await preflight(executable, options);
   checkAbort(options.signal);
-  const client = new CodexStdioClient(executable, { ...options, strictConfig });
+  await assertNovaCodexHome(home);
+  const client = new CodexStdioClient(executable, { ...options, strictConfig: true });
   try {
     await client.initialize();
+    const response = record(await client.request("config/read", { includeLayers: false, cwd: home }), "runtime config");
+    try { assertNovaCodexConfig(home, record(response.config, "runtime config")); }
+    catch (error) { throw new CodexAppServerError((error as Error).message); }
     return client;
   } catch (error) {
     if (!(await client.close())) throw client.error;

@@ -19,6 +19,7 @@ import {
   trackOwnedProcess,
   type Executable,
 } from "./providers";
+import { assertNovaCodexHome, isolatedCodexEnv } from "./nova-runtime";
 
 const AUTH_TIMEOUT_MS = 10 * 60_000;
 const STATUS_TIMEOUT_MS = 15_000;
@@ -88,8 +89,8 @@ function parseCodexAccount(value: unknown): ProviderAccountStatus {
       ? { label: text(account.email) }
       : {}),
     message: account.type === "chatgpt"
-      ? "Using the installed Codex account. The official Codex app shares this configured home."
-      : "Using credentials already managed by the official Codex engine.",
+      ? "Using Nova's separate Codex sign-in. The official Codex app and its credentials are unchanged."
+      : "Using credentials managed by Codex in Nova's private runtime.",
   };
 }
 
@@ -127,11 +128,13 @@ async function claudeCommand(
   onUrl?: (url: string) => void,
 ): Promise<{ code: number | null; output: string }> {
   if (signal.aborted) throw new ProviderAuthError("Account operation was cancelled.");
+  const home = await assertNovaCodexHome(options.home);
+  if (signal.aborted) throw new ProviderAuthError("Account operation was cancelled.");
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const child = spawn(executable.command, [...executable.prefix, ...args], {
-      cwd: options.cwd,
-      env: { ...process.env, ...executable.env, NO_COLOR: "1" },
+      cwd: home,
+      env: isolatedCodexEnv(home, executable.env),
       shell: false,
       windowsHide: true,
       detached: process.platform !== "win32",
@@ -337,7 +340,7 @@ export class ProviderAuthService {
             provider,
             state: "unavailable" as const,
             checkedAt: new Date().toISOString(),
-            message: error instanceof ProviderAuthError ? error.message
+            message: error instanceof ProviderAuthError || error instanceof CodexAppServerError ? error.message
               : `Could not read ${provider === "codex" ? "Codex" : "Claude Code"} account status. Check the official CLI installation and configured path.`,
           };
         } finally {
@@ -382,7 +385,7 @@ export class ProviderAuthService {
         provider,
         state: "complete",
         message: provider === "codex"
-          ? "Signed in through Codex. This account is shared with the official Codex app using the same home."
+          ? "Signed in to Nova's private Codex runtime. The official Codex app and its sign-in are unchanged."
           : "Signed in through Claude Code. Nova will use its normal account; Claude Desktop sign-in remains separate.",
       };
     } catch (error) {
@@ -399,7 +402,7 @@ export class ProviderAuthService {
           ? "Account process cleanup could not be confirmed. Stop remaining CLI processes before restarting Nova."
           : options.signal?.aborted
             ? "Sign-in was cancelled. No credentials were copied into Nova."
-            : error instanceof ProviderAuthError ? error.message
+            : error instanceof ProviderAuthError || error instanceof CodexAppServerError ? error.message
               : `The ${provider === "codex" ? "Codex" : "Claude Code"} sign-in flow failed. Check the installed official CLI and retry.`,
       };
     }
@@ -452,7 +455,7 @@ export class ProviderAuthService {
       session.loginId = id;
       if (pending?.id === id) complete?.(pending.success);
       session.status = { ...session.status, state: "waiting", verificationUrl: url,
-        message: "Complete ChatGPT sign-in in your browser. Keep Nova open; credentials stay with Codex." };
+        message: "Complete ChatGPT sign-in in your browser. Keep Nova open; credentials stay in Nova's private Codex runtime." };
       timer = setTimeout(() => fail?.(new ProviderAuthError("Codex sign-in timed out. Start sign-in again when ready.")), AUTH_TIMEOUT_MS);
       try { await this.options.openExternal(url); }
       catch { throw new ProviderAuthError("Could not open the official Codex sign-in page. Check your default browser and retry."); }

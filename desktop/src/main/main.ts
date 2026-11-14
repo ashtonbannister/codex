@@ -39,6 +39,7 @@ import { listLocalModels, validateLocalConnection } from "./services/local-model
 import { resolveExecutable } from "./services/providers";
 import { saveMarkdownExport } from "./services/export-file";
 import { ProviderAuthService, officialLoginUrl } from "./services/provider-auth";
+import { ensureNovaCodexHome } from "./services/nova-runtime";
 import type { AccountProvider } from "../shared/provider-auth";
 import type {
   CommitWorktreeRequest,
@@ -133,7 +134,8 @@ function objectPayload(value: unknown): Record<string, unknown> {
 }
 
 // These remain usable while account sign-in is waiting on the browser or a
-// previous worker needs manual recovery. All other IPC participates in the
+// previous worker needs manual recovery. Explicit read-only import operations
+// never touch provider runtime state. All other IPC participates in the
 // account-operation gate, including future workspace/provider handlers.
 const PASSIVE_DURING_AUTH = new Set([
   "workspace:snapshot",
@@ -146,6 +148,12 @@ const PASSIVE_DURING_AUTH = new Set([
   "verification:cancel",
   "project:open",
   "run:reveal",
+  "codex:installation",
+  "codex:threads",
+  "codex:history",
+  "codex:resources",
+  "codex:preview-resource",
+  "codex:publish-handoff",
 ]);
 const ACCOUNT_OPERATIONS = new Set([
   "provider:account-status",
@@ -157,7 +165,7 @@ async function assertAccountIdle(service: WorkspaceService): Promise<void> {
   if (state.runs.some((run) => run.status === "queued" || run.status === "running") ||
     state.verifications.some((check) => check.status === "running"))
     throw new Error("Finish or stop active agent work and checks before changing or reading provider accounts.");
-  if ((await service.listRecoveryItems()).length)
+  if ((await service.listRecoveryItems()).some((item) => item.kind !== "codex-home"))
     throw new Error("Resolve the listed worker recovery items before connecting provider accounts.");
 }
 
@@ -178,7 +186,7 @@ function handle(
     if (ACCOUNT_OPERATIONS.has(name)) {
       // Reserve synchronously before a dialog, snapshot, or filesystem await.
       // A status read also starts an owned provider process, so it takes the
-      // same gate as login rather than racing a model/history worker.
+      // same gate as login rather than racing a Nova model worker.
       if (accountOperationPending || engineSensitiveInFlight || providerAuth?.busy)
         throw new Error("Another workspace or account operation is running. Finish or cancel it before connecting an account.");
       accountOperationPending = true;
@@ -241,58 +249,57 @@ function registerHandlers(service: WorkspaceService) {
   handle("provider:local-models", async (payload) =>
     listLocalModels(validateLocalConnection(payload)),
   );
-  const connectedProfiles = new Set<string>();
+  const approvedImportSources = new Set<string>();
   const approvedHandoffs = new Set<string>();
-  let connectionPrompt: Promise<void> | undefined;
-  const connectionIdentity = async () => {
+  let importPrompt: Promise<void> | undefined;
+  const importIdentity = async () => {
     const settings = (await service.snapshot()).state.settings;
     return {
       codexPath: settings.codexPath,
       home: await resolveCodexHome(settings.codexHome),
     };
   };
-  const connectionKey = (identity: { codexPath: string; home: string }) =>
-    `${identity.codexPath}\0${identity.home}`;
-  const confirmConnection = async (): Promise<{
+  const importKey = (home: string) => process.platform === "win32" ? home.toLowerCase() : home;
+  const confirmImportSource = async (): Promise<{
     codexPath: string;
     home: string;
   }> => {
-    const identity = await connectionIdentity();
-    const key = connectionKey(identity);
-    if (connectedProfiles.has(key)) return identity;
-    if (connectionPrompt) {
-      await connectionPrompt;
+    const identity = await importIdentity();
+    const key = importKey(identity.home);
+    if (approvedImportSources.has(key)) return identity;
+    if (importPrompt) {
+      await importPrompt;
       if (
-        !connectedProfiles.has(key) ||
-        connectionKey(await connectionIdentity()) !== key
+        !approvedImportSources.has(key) ||
+        importKey((await importIdentity()).home) !== key
       )
-        throw new Error("Codex connection changed. Open the library again.");
+        throw new Error("The Codex import source changed. Read and confirm the selected source again.");
       return identity;
     }
-    connectionPrompt = (async () => {
+    importPrompt = (async () => {
       const result = await dialog.showMessageBox(window!, {
         type: "question",
-        buttons: ["Cancel", "Connect to Codex"],
+        buttons: ["Cancel", "Read import source"],
         defaultId: 0,
         cancelId: 0,
-        title: "Connect to your existing Codex installation?",
-        message: "Connect to Codex for account status and saved conversations?",
-        detail: `Codex home: ${confirmationValue(identity.home)}\nExecutable: ${confirmationValue(identity.codexPath)}\n\nNova starts the installed Codex app-server to read account status and history. Codex manages its own authentication, logs, databases, and migrations; this is not an immutable filesystem scan. Status checks and browsing send no model turn. Nova does not copy credentials or directly edit Codex databases. Conversations and references are only added to Nova when you choose them.`,
+        title: "Read this Codex import source?",
+        message: "Preview saved conversations and selected text for copying into Nova?",
+        detail: `Read-only source: ${confirmationValue(identity.home)}\n\nNova reads supported conversation and reference files only. No Codex process is started, no native session is resumed, and no source files, locks, databases, credentials, or configuration are changed. There is no background sync or watcher. Selected visible text is copied into Nova's own workspace only when you import it. Nova's agents and sign-in use separate working state.`,
       });
       if (result.response !== 1)
         throw new Error(
-          "Codex connection cancelled. No app-server was started.",
+          "Source read cancelled. No Codex process was started or source data imported.",
         );
-      if (connectionKey(await connectionIdentity()) !== key)
+      if (importKey((await importIdentity()).home) !== key)
         throw new Error(
-          "Codex settings changed during confirmation. Connect again.",
+          "The Codex import source changed during confirmation. Read and confirm it again.",
         );
-      connectedProfiles.add(key);
+      approvedImportSources.add(key);
     })();
     try {
-      await connectionPrompt;
+      await importPrompt;
     } finally {
-      connectionPrompt = undefined;
+      importPrompt = undefined;
     }
     return identity;
   };
@@ -301,7 +308,7 @@ function registerHandlers(service: WorkspaceService) {
     const cwd = path.join(app.getPath("userData"), "workspace");
     return {
       settings,
-      home: provider === "codex" ? await resolveCodexHome(settings.codexHome) : cwd,
+      home: await ensureNovaCodexHome(cwd, settings.codexHome),
       // Metadata/login commands never start in the selected project. This is
       // the already-created app-owned workspace data directory, not repo code.
       cwd,
@@ -311,7 +318,6 @@ function registerHandlers(service: WorkspaceService) {
     JSON.stringify([options.settings.codexPath, options.settings.claudePath, options.home]);
   handle("provider:account-status", async (payload) => {
     const provider = accountProvider(payload);
-    if (provider === "codex") await confirmConnection();
     const options = await accountOptions(provider);
     await assertAccountIdle(service);
     return accounts.read(provider, options);
@@ -328,13 +334,15 @@ function registerHandlers(service: WorkspaceService) {
       buttons: ["Cancel", "Sign in with official tool"],
       defaultId: 0,
       cancelId: 0,
-      title: provider === "codex" ? "Sign in to Codex with ChatGPT?" : "Sign in to Claude Code?",
+      title: provider === "codex" ? "Sign in to Nova's separate Codex runtime?" : "Sign in to Claude Code?",
       message: "Let the installed official tool open its browser sign-in flow?",
-      detail: `Executable: ${confirmationValue(executable)}\n${provider === "codex" ? `Codex home: ${confirmationValue(options.home)}\n\nThis changes the account managed by Codex. The OEM Codex app shares the account when it uses this same home. ` : "\nThis changes the account managed by Claude Code. Claude Desktop maintains a separate sign-in session. "}Credentials remain with the official tool; Nova does not read, copy, or exchange tokens. Signing in makes no model request. Finish any Codex or Claude work running outside Nova before continuing.`,
-      checkboxLabel: "Other Codex and Claude workers are idle.",
-      checkboxChecked: false,
+      detail: `Executable: ${confirmationValue(executable)}\n${provider === "codex" ? `Nova Codex runtime: ${confirmationValue(options.home)}\n\nSign in once for Nova. The official CLI stores this sign-in in Nova's app-owned runtime, separate from the OEM Codex account and working folders. Nothing is copied from the OEM credential store; your OEM sign-in is not changed. ` : "\nThis changes the account managed by Claude Code. Claude Desktop maintains a separate sign-in session. Finish other Claude Code work before continuing. "}Credentials remain with the official tool; Nova does not read, copy, or exchange tokens. Signing in makes no model request. Provider usage limits still apply.`,
+      ...(provider === "claude" ? {
+        checkboxLabel: "Other Claude Code workers are idle.",
+        checkboxChecked: false,
+      } : {}),
     });
-    if (confirmation.response !== 1 || !confirmation.checkboxChecked)
+    if (confirmation.response !== 1 || (provider === "claude" && !confirmation.checkboxChecked))
       throw new Error("Sign-in cancelled. The official login process was not started.");
     const current = await accountOptions(provider);
     if (accountIdentity(current) !== before)
@@ -342,15 +350,16 @@ function registerHandlers(service: WorkspaceService) {
     await assertAccountIdle(service);
     return accounts.start(provider, current);
   });
-  handle("codex:installation", async () =>
-    inspectCodexInstallation(
-      (await service.snapshot()).state.settings.codexHome,
+  handle("codex:installation", async () => {
+    const identity = await confirmImportSource();
+    return inspectCodexInstallation(
+      identity.home,
       {
         documents: app.getPath("documents"),
         appData: app.getPath("appData"),
       },
-    ),
-  );
+    );
+  });
   handle("storage:choose", async (payload) => {
     if (payload !== "codex-home" && payload !== "worktrees")
       throw new Error("Unknown storage location.");
@@ -358,7 +367,7 @@ function registerHandlers(service: WorkspaceService) {
     const result = await dialog.showOpenDialog(window!, {
       title:
         payload === "codex-home"
-          ? "Choose the existing Codex home folder"
+          ? "Choose the read-only Codex import source"
           : "Choose storage for new Nova worktrees",
       buttonLabel: "Use folder",
       properties: ["openDirectory"],
@@ -373,63 +382,55 @@ function registerHandlers(service: WorkspaceService) {
   });
   handle("codex:threads", async (payload) => {
     const query = objectPayload(payload) as unknown as CodexThreadQuery;
-    const identity = await confirmConnection();
+    const identity = await confirmImportSource();
     return service.listCodexThreads(query, identity);
   });
   handle("codex:history", async (payload) => {
     const query = objectPayload(payload) as unknown as CodexHistoryQuery;
-    const identity = await confirmConnection();
+    const identity = await confirmImportSource();
     return service.readCodexHistory(query, identity);
   });
   handle("codex:refresh-thread", async (payload) => {
     const threadId = identifier(payload);
-    const identity = await confirmConnection();
+    const identity = await confirmImportSource();
     return service.refreshCodexThread(threadId, identity);
   });
-  handle("codex:publish-handoff", async (payload) => {
-    const threadId = identifier(payload);
-    const identity = await confirmConnection();
-    const review = await service.reviewCodexHandoff(threadId, identity);
-    const confirmation = await dialog.showMessageBox(window!, {
-      type: "question", buttons: ["Cancel", review.unchanged ? "Check existing handoff" : "Share with Codex"],
-      defaultId: 0, cancelId: 0,
-      title: "Publish this conversation's context to Codex?",
-      message: review.unchanged ? "Check the already-published native handoff?" : `Create ${confirmationValue(review.title)} in your installed Codex?`,
-      detail: `Codex home: ${confirmationValue(review.home)}\nWorking folder: ${confirmationValue(review.cwd)}\nShared reference: ${review.characters.toLocaleString()} characters\n\nNova uses the official engine to fork an existing Codex conversation or create a new one, then adds bounded visible messages and selected project memories. Codex keeps its own history; Claude/local hidden state, credentials, and binary attachments are not copied. No model turn starts now. Later Codex requests can send this context to OpenAI. Subsequent Codex work in this Nova thread uses the native handoff. The original native conversation remains untouched.\n\n${review.warnings.slice(0, 6).map((warning) => confirmationValue(warning)).join("\n")}`,
-    });
-    if (confirmation.response !== 1) throw new Error("Codex handoff cancelled before publishing.");
-    return service.publishCodexHandoff(threadId, review.fingerprint, identity);
+  handle("codex:publish-handoff", async () => {
+    throw new Error("OEM Codex is import-only. Publishing native handoffs is disabled; export a copy instead.");
   });
   handle("codex:import-thread", async (payload) => {
     const request = objectPayload(payload) as unknown as CodexImportRequest;
     identifier(request.threadId);
-    const identity = await confirmConnection();
+    const identity = await confirmImportSource();
     const result = await dialog.showMessageBox(window!, {
       type: "question",
       buttons: ["Cancel", "Open in Nova"],
       defaultId: 0,
       cancelId: 0,
-      title: "Add this conversation to Nova?",
+      title: "Copy this conversation into Nova?",
       message:
-        "Keep a visible-history snapshot and a link to the original Codex conversation?",
+        "Create an independent copy of the visible conversation in Nova's own workspace?",
       detail:
-        "Importing sends no model turn. Codex Plan can continue the original native conversation; isolated Build forks native history into a Nova-owned worktree. Archived originals are forked, never automatically unarchived. Claude and local models use an explicitly bounded visible-history handoff in this Nova thread, not hidden provider state. Original conversation files are not rewritten by the importer.",
+        "Importing sends no model turn. Nova copies a bounded visible transcript into an app-owned folder; the recorded source working folder is not opened or adopted. Codex, Claude, and local models all use this independent copy. No native session is resumed or forked, and no hidden state, credentials, or configuration is copied. The original conversation and its archive state remain untouched. There is no automatic sync; Copy latest is another explicit read-only import.",
     });
     if (result.response !== 1)
       throw new Error("Conversation import cancelled.");
     return service.importCodexThread(request, identity);
   });
-  handle("codex:resources", (payload) =>
-    service.listCodexResources(
+  handle("codex:resources", async (payload) => {
+    await confirmImportSource();
+    return service.listCodexResources(
       objectPayload(payload) as unknown as CodexResourceQuery,
-    ),
-  );
-  handle("codex:preview-resource", (payload) =>
-    service.previewCodexResource(
+    );
+  });
+  handle("codex:preview-resource", async (payload) => {
+    await confirmImportSource();
+    return service.previewCodexResource(
       objectPayload(payload) as unknown as CodexResourceRequest,
-    ),
-  );
+    );
+  });
   handle("codex:import-memory", async (payload) => {
+    await confirmImportSource();
     const request = objectPayload(
       payload,
     ) as unknown as CodexMemoryImportRequest;
@@ -501,14 +502,7 @@ function registerHandlers(service: WorkspaceService) {
     const linked = before.state.threads.find(
       (entry) => entry.id === input.threadId,
     )?.codex;
-    const expectedNativeConnection =
-      linked && input.provider === "codex"
-        ? await confirmConnection()
-        : undefined;
-    if (
-      linked &&
-      (input.provider === "claude" || input.provider === "ollama")
-    ) {
+    if (linked) {
       const handoffKey = `${input.threadId}\0${input.provider}`;
       if (!approvedHandoffs.has(handoffKey)) {
         const result = await dialog.showMessageBox(window!, {
@@ -518,11 +512,13 @@ function registerHandlers(service: WorkspaceService) {
           cancelId: 0,
           title: "Share this conversation's visible context?",
           message:
-            input.provider === "claude"
-              ? "Continue this Nova thread with Claude Code?"
-              : "Continue this Nova thread with the configured local model?",
+            input.provider === "codex"
+              ? "Continue this independent Nova copy with Codex?"
+              : input.provider === "claude"
+                ? "Continue this independent Nova copy with Claude Code?"
+                : "Continue this independent Nova copy with the configured local model?",
           detail:
-            "A bounded selection of imported visible messages, Nova turns, and selected project memories will be sent to this provider when you continue. Private reasoning, credentials, native session state, and binary attachments are not transferred. Original Codex history is preserved. The Context inspector shows Nova's reference selection and omissions.",
+            "A bounded selection of copied visible messages, Nova turns, and selected project memories will be sent to this provider when you continue. Private reasoning, credentials, native session state, and binary attachments are not transferred. The original Codex conversation and working folder remain separate: no native resume or fork occurs. The Context inspector shows Nova's reference selection and omissions.",
         });
         if (result.response !== 1)
           throw new Error("Provider handoff cancelled before execution.");
@@ -551,7 +547,7 @@ function registerHandlers(service: WorkspaceService) {
       if (confirmation.response !== 1)
         throw new Error("Build cancelled before execution.");
     }
-    return service.startRun(input, expectedNativeConnection);
+    return service.startRun(input);
   });
   handle("run:cancel", (value) => service.cancelRun(identifier(value)));
   handle("run:diff", (value) => service.getDiff(identifier(value)));

@@ -31,20 +31,20 @@ export const ImportedHistory = memo(function ImportedHistory({
         <span>Visible transcript · not a new agent run</span>
         <p>
           {source.history.length} retained messages
-          {source.historyTruncated ? " · snapshot truncated" : ""}. Claude and
-          local models use a bounded subset of this visible history.
+          {source.historyTruncated ? " · snapshot truncated" : ""}. All agents use
+          a bounded subset of this independent copy. The source stays untouched.
         </p>
         <details>
           <summary>Source and import details</summary>
           <dl>
             <div>
-              <dt>Source folder</dt>
+              <dt>Recorded source folder · not opened</dt>
               <dd>
                 <code>{source.sourceCwd}</code>
               </dd>
             </div>
             <div>
-              <dt>Codex home</dt>
+              <dt>Read-only import source</dt>
               <dd>
                 <code>{source.home}</code>
               </dd>
@@ -93,8 +93,8 @@ export const ImportedHistory = memo(function ImportedHistory({
       )}
       {!source.history.length && (
         <p className="muted">
-          No visible text was retained. Native Codex history remains
-          engine-managed.
+          No visible text was retained. The source Codex conversation remains
+          separate from Nova.
         </p>
       )}
       <div className="imported-history-end">

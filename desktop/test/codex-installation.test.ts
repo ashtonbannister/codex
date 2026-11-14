@@ -28,7 +28,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   return { root, home: await realpath(home) };
 }
 
-test("Codex inventory resolves redirected Documents and excludes credentials without reading their contents", async (t) => {
+test("Codex import inventory excludes external working folders and credentials without reading their contents", async (t) => {
   const { root, home } = await fixture(t);
   const documents = path.join(root, "other drive", "Documents");
   await mkdir(path.join(documents, "Codex"), { recursive: true });
@@ -42,17 +42,14 @@ test("Codex inventory resolves redirected Documents and excludes credentials wit
   });
   assert.equal(result.exists, true);
   assert.equal(result.home, home);
-  assert.equal(
-    result.locations.find((entry) => entry.id === "outputs")?.resolvedPath,
-    await realpath(path.join(documents, "Codex")),
-  );
+  assert.equal(result.locations.some((entry) => entry.id === "outputs"), false);
   assert.equal(
     result.locations.find((entry) => entry.id === "auth.json")?.access,
     "excluded",
   );
   assert.equal(
     result.locations.find((entry) => entry.id === "config.toml")?.access,
-    "engine-managed",
+    "excluded",
   );
   assert.doesNotMatch(JSON.stringify(result), /AUTH_MUST|SECRET_CONFIG/);
   assert.equal(

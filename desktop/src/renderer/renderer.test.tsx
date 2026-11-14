@@ -86,7 +86,7 @@ test("preview provider accounts never imply a real login or share credentials", 
   assert.equal((await api.getAccountStatus("claude")).state, "unknown");
 });
 
-test("preview memory sharing and handoffs retain synthetic provenance and no run evidence", async () => {
+test("preview memory sharing stays synthetic and OEM Codex publishing is disabled", async () => {
   const api = createPreviewAPI(true);
   const before = await api.getSnapshot();
   const preview = await api.previewSharedMemory("preview-project");
@@ -97,9 +97,7 @@ test("preview memory sharing and handoffs retain synthetic provenance and no run
   assert.deepEqual((await api.getSnapshot()).state.sharedMemoryProjects, ["preview-project"]);
   await api.disableSharedMemory("preview-project");
   assert.deepEqual((await api.getSnapshot()).state.sharedMemoryProjects, []);
-  const handoff = await api.publishCodexHandoff("preview-thread");
-  assert.equal(handoff.nativeThreadId, "synthetic-native-handoff");
-  assert.match(handoff.warnings.join(" "), /No native thread or model turn/);
+  await assert.rejects(api.publishCodexHandoff("preview-thread"), /import-only/);
   assert.deepEqual((await api.getSnapshot()).state.runs, before.state.runs);
 });
 
@@ -242,6 +240,9 @@ test("synthetic conversation import retains recent visible history without a mod
   const thread = await api.importCodexThread({ threadId: "sample-codex-city" });
   assert.equal(thread.codex?.history.length, 2);
   assert.ok(thread.codex?.historyTruncated);
+  const copiedProject = (await api.getSnapshot()).state.projects.find((item) => item.id === thread.projectId)!;
+  assert.notEqual(copiedProject.path, thread.codex?.sourceCwd);
+  assert.equal(copiedProject.kind, "folder");
   const same = await api.importCodexThread({ threadId: "sample-codex-city" });
   assert.equal(same.id, thread.id);
   const context = await api.previewContext({

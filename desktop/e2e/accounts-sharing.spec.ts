@@ -45,7 +45,7 @@ test("account controls distinguish CLI detection, signed-in state, browser progr
   expect(recorded.requests).toEqual([]);
   await dialog.getByRole("textbox", { name: "Codex executable", exact: true }).fill("D:\\Changed\\codex.exe");
   await expect(accounts.getByRole("button", { name: "Check Codex account", exact: true })).toBeDisabled();
-  await expect(accounts).toContainText("Save executable and Codex-home changes");
+  await expect(accounts).toContainText("Save executable changes");
 });
 
 test("shared memory previews exact files, rejects a stale preview and publishes only the reviewed fingerprint", async ({ page }) => {
@@ -73,23 +73,22 @@ test("shared memory previews exact files, rejects a stale preview and publishes 
   expect((await calls(page)).requests).toEqual([]);
 });
 
-test("imported thread refresh and native handoff preserve local runs without starting a model", async ({ page }) => {
+test("explicit history copy preserves Nova data and never offers publishing back into Codex", async ({ page }) => {
   await installFakeDesktopBridge(page, { seed: true, complete: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Codex library", exact: true }).click();
+  await page.getByRole("button", { name: "Read Codex import source", exact: true }).click();
   await page.getByRole("button", { name: "Open in Nova", exact: true }).click();
   const before = await page.evaluate(() => window.workbench!.getSnapshot());
-  await page.getByRole("button", { name: "Refresh conversation from Codex", exact: true }).click();
+  await page.getByRole("button", { name: "Copy latest history from Codex", exact: true }).click();
   await expect(page.getByRole("region", { name: "Imported visible history" })).toContainText("New visible message from the synthetic official Codex thread.");
-  await expect(page.getByRole("status")).toContainText("Existing Nova runs and project memory were preserved");
-  await page.getByRole("button", { name: "Publish handoff to Codex", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("fixture-native-handoff");
-  await expect(page.getByRole("status")).toContainText("No model turn was started.");
+  await expect(page.getByRole("status")).toContainText("existing Nova runs and memory were preserved");
+  await expect(page.getByRole("button", { name: "Publish handoff to Codex", exact: true })).toHaveCount(0);
   const after = await page.evaluate(() => window.workbench!.getSnapshot());
   expect(after.state.runs).toEqual(before.state.runs);
   expect(after.state.memories).toEqual(before.state.memories);
   expect((await calls(page)).nativeRefreshes).toHaveLength(1);
-  expect((await calls(page)).nativePublishes).toHaveLength(1);
+  expect((await calls(page)).nativePublishes).toHaveLength(0);
   expect((await calls(page)).requests).toEqual([]);
   await screenshot(page, "sharing-codex-handoff");
 });

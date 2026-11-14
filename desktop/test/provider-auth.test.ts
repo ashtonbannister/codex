@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import {
   ProviderAuthService,
   officialLoginUrl,
 } from "../src/main/services/provider-auth";
+import { ensureNovaCodexHome } from "../src/main/services/nova-runtime";
 
 // Synthetic CLI/RPC only. Tests never start installed tools, read credentials,
 // open a browser, contact a provider, or issue model requests.
@@ -15,11 +16,17 @@ const fake = String.raw`
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-const cwd = process.cwd();
+import { fileURLToPath } from 'node:url';
+const cwd = path.dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(fs.readFileSync(path.join(cwd,'fixture.json'),'utf8'));
 const log = value => fs.appendFileSync(path.join(cwd,'calls.jsonl'),JSON.stringify(value)+'\n');
 const args = process.argv.slice(2);
-log({args});
+const configuration = {};
+for(let i=0;i<args.length-1;i++) if(args[i]==='--config') {
+ const split=args[i+1].indexOf('=');
+ try {configuration[args[i+1].slice(0,split)]=JSON.parse(args[i+1].slice(split+1));} catch {}
+}
+log({args,cwd:process.cwd(),home:process.env.CODEX_HOME,sqlite:process.env.CODEX_SQLITE_HOME});
 process.once('exit',()=>log({kind:'exit'}));
 const signed = () => config.signedIn || fs.existsSync(path.join(cwd,'signed-in'));
 if(args.includes('--print-startup-config')){
@@ -49,6 +56,7 @@ if(args.includes('--print-startup-config')){
   const req=JSON.parse(line);log(req);
   if(req.method==='initialize'){reply(req,{userAgent:'fixture-only'});return}
   if(req.method==='initialized')return;
+  if(req.method==='config/read'){reply(req,{config:configuration,origins:{},layers:null});return}
   if(req.method==='account/read'){
    reply(req,{account:signed()?{type:'chatgpt',email:'fixture@example.invalid',planType:'pro',workspaceName:'Synthetic workspace',accessToken:'SECRET_CREDENTIAL'}:null,requiresOpenaiAuth:true,userId:'DO_NOT_EXPOSE'});return;
   }
@@ -73,8 +81,7 @@ type OperationHooks = Pick<ConstructorParameters<typeof ProviderAuthService>[0],
 
 async function fixture(t: { after(fn: () => Promise<void>): void }, config = {}, hooks: OperationHooks = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "nova-account-")));
-  const home = path.join(root, "codex home");
-  await mkdir(home);
+  const home = await ensureNovaCodexHome(root);
   const executable = path.join(root, "official-fixture.mjs");
   await writeFile(executable, fake);
   await writeFile(path.join(root, "fixture.json"), JSON.stringify(config));
@@ -124,6 +131,8 @@ test("Codex account status is metadata-only and exposes only whitelisted fields"
   assert.equal(status.label, "fixture@example.invalid");
   assert.doesNotMatch(JSON.stringify(status), /SECRET|DO_NOT_EXPOSE/);
   const calls = await f.calls();
+  assert.ok(calls.filter((x) => x.args).every((x) => x.cwd === f.home && x.home === f.home && x.sqlite === path.join(f.home, "state")));
+  assert.match(status.message!, /separate Codex sign-in/);
   assert.equal(calls.find((x) => x.method === "account/read").params.refreshToken, false);
   assert.ok(!calls.some((x) => /^(thread|turn)\//.test(x.method ?? "")));
   assert.equal(f.service.busy, false);
@@ -190,6 +199,7 @@ test("Claude status and browser sign-in use official commands without sharing cr
   assert.doesNotMatch(JSON.stringify(status), /SECRET|configDirectory|accessToken/);
   assert.deepEqual(f.urls, []); // The official Claude CLI owns browser launch.
   const commands = (await f.calls()).filter((x) => x.args).map((x) => x.args);
+  assert.ok((await f.calls()).filter((x) => x.args).every((x) => x.cwd === f.home && x.home === f.home));
   assert.ok(commands.some((args) => JSON.stringify(args) === JSON.stringify(["--safe-mode", "auth", "login"])));
   assert.ok(commands.every((args) => args.includes("--safe-mode")));
 });

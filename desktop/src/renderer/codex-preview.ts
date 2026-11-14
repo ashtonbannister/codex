@@ -197,9 +197,9 @@ export function createPreviewLibrary(
             name: "Conversations",
             path: `${home()}\\sessions`,
             exists: true,
-            access: "engine-managed",
+            access: "content",
             detail:
-              "Synthetic engine-managed location. Native history is read through the installed Codex engine, not raw session parsing.",
+              "Synthetic read-only conversation source. No engine is started and the source is never changed.",
           },
           {
             id: "credentials",
@@ -250,16 +250,15 @@ export function createPreviewLibrary(
         (thread) => thread.codex?.sourceThreadId === source.id,
       );
       if (existing) return structuredClone(existing);
-      let project = state.projects.find((item) => item.path === source.cwd);
+      const projectPath = `D:\\Synthetic\\Nova imports\\${source.id}`;
+      let project = state.projects.find((item) => item.path === projectPath);
       if (!project) {
         project = {
           id: `preview-project-${source.id}`,
-          name: source.id.includes("folder")
-            ? "Project notes (example)"
-            : "Henday Heat (example)",
-          path: source.cwd,
-          branch: source.id.includes("folder") ? "" : "main",
-          kind: source.id.includes("folder") ? "folder" : "git",
+          name: "Imported conversation (example)",
+          path: projectPath,
+          branch: "",
+          kind: "folder",
           createdAt: now,
         };
         state.projects.push(project);

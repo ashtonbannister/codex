@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   writeFile,
@@ -20,6 +21,18 @@ await writeFile(
   path.join(codexFixture, "AGENTS.md"),
   "Synthetic native-bridge reference.\n",
 );
+const sourceId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const rolloutName = `rollout-2026-11-13-synthetic-${sourceId}.jsonl`;
+const recordedSourceFolder = path.join(userData, "source-project-not-opened");
+const rollout = [
+  { type: "session_meta", payload: { id: sourceId, cwd: recordedSourceFolder, timestamp: "2026-11-13T00:00:00Z", source: "cli" } },
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Synthetic copied question." }] } },
+  { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Synthetic copied answer." }] } },
+].map((item) => JSON.stringify(item)).join("\n") + "\n";
+await mkdir(path.join(codexFixture, "sessions"));
+await writeFile(path.join(codexFixture, "sessions", rolloutName), rollout);
+// This invalid source config must never be loaded by an engine during import.
+await writeFile(path.join(codexFixture, "config.toml"), "not valid TOML [ source only\n");
 const codexHome = await realpath(codexFixture);
 const errors = [];
 let application;
@@ -39,6 +52,20 @@ const launch = async () => {
     chromiumSandbox: true,
     timeout: 30_000,
   });
+  await application.evaluate(({ dialog }, home) => {
+    const confirmations = [];
+    globalThis.__novaSmokeImportConfirmations = confirmations;
+    // Accept only this synthetic read-only confirmation. No login, execution,
+    // recovery cleanup, or broader native permission is approved by the test.
+    dialog.showMessageBox = async (...args) => {
+      const options = args.at(-1);
+      if (options?.title !== "Read this Codex import source?" ||
+        !options.detail?.includes(home) || options.buttons?.[1] !== "Read import source")
+        throw new Error("Unexpected native confirmation in isolated import smoke test.");
+      confirmations.push(options.title);
+      return { response: 1, checkboxChecked: false };
+    };
+  }, codexHome);
   const page = await application.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await page.waitForFunction(
@@ -75,11 +102,26 @@ try {
       localProtocol: "chat-completions",
     });
   }, codexHome);
+  await page.getByRole("button", { name: "Codex library", exact: true }).click();
+  await page.getByRole("button", { name: "Read Codex import source", exact: true }).waitFor();
+  assert.equal(await application.evaluate(() => globalThis.__novaSmokeImportConfirmations.length), 0,
+    "opening the library must not request or start source access");
+  await page.getByRole("button", { name: "Read Codex import source", exact: true }).click();
+  await page.locator(".library-thread").first().waitFor();
+  assert.equal(await application.evaluate(() => globalThis.__novaSmokeImportConfirmations.length), 1,
+    "concurrent explicit library reads share one source-only confirmation");
   const installation = await page.evaluate(() =>
     window.workbench.inspectCodexInstallation(),
   );
   assert.equal(installation.home, codexHome);
   assert.equal(installation.exists, true);
+  const history = await page.evaluate((threadId) => window.workbench.readCodexHistory({ threadId }), sourceId);
+  assert.deepEqual(history.messages.map((item) => item.text), ["Synthetic copied question.", "Synthetic copied answer."]);
+  const refusedPublish = await page.evaluate(async () => {
+    try { await window.workbench.publishCodexHandoff("missing-thread"); return false; }
+    catch (error) { return /import-only/.test(String(error)); }
+  });
+  assert.equal(refusedPublish, true, "native handoff IPC must fail closed without another confirmation or engine");
   const references = await page.evaluate(() =>
     window.workbench.listCodexResources({ section: "instructions" }),
   );
@@ -148,6 +190,10 @@ try {
   );
   assert.equal(saved.settings.theme, "light");
   assert.equal(saved.settings.codexHome, codexHome);
+  assert.deepEqual((await readdir(codexHome)).sort(), ["AGENTS.md", "config.toml", "sessions"]);
+  assert.deepEqual(await readdir(path.join(codexHome, "sessions")), [rolloutName]);
+  assert.equal(await readFile(path.join(codexHome, "sessions", rolloutName), "utf8"), rollout);
+  assert.equal(await readFile(path.join(codexHome, "config.toml"), "utf8"), "not valid TOML [ source only\n");
 
   const reopened = await launch();
   const restored = await reopened.evaluate(() =>
@@ -158,6 +204,8 @@ try {
   assert.equal(restored.state.settings.localProvider, "custom");
   assert.equal(restored.state.settings.localBaseUrl, "http://127.0.0.1:8080/v1");
   assert.equal(restored.state.settings.localProtocol, "chat-completions");
+  assert.equal(await application.evaluate(() => globalThis.__novaSmokeImportConfirmations.length), 0,
+    "restart must not reconnect to the saved import source");
   const rejected = await reopened.evaluate(async () => {
     try {
       await window.workbench.updateThread({
@@ -172,7 +220,7 @@ try {
   assert.equal(rejected, true, "native bridge must reject invalid identifiers");
   assert.deepEqual(errors, [], "renderer must start without uncaught errors");
   console.log(
-    "Native Electron smoke passed: custom protocol, isolated preload, validated action IPC, local endpoint rejection, synthetic Codex inventory/reference preview, settings, recovery listing, and restart persistence. No native history server or model was started.",
+    "Native Electron smoke passed: custom protocol, isolated preload, explicit read-only source confirmation, synthetic conversation/reference copies, native publish rejection, unchanged source files, validated action IPC, local endpoint rejection, settings, recovery listing, and restart persistence. No account, native history server, or model was started.",
   );
 } finally {
   if (application) await application.close();

@@ -1,758 +1,253 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import {
-  mkdtemp,
-  mkdir,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import fs from "node:fs";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { emptyWorkspace, type Run } from "../src/shared/types";
 import { buildRunContext } from "../src/main/services/context";
+import { WorkspaceService, validateWorkspaceState } from "../src/main/services/workspace-service";
 import {
-  providerArguments,
-  resolveExecutable,
-  runProvider,
-} from "../src/main/services/providers";
-import {
-  WorkspaceService,
-  validateWorkspaceState,
-} from "../src/main/services/workspace-service";
-import {
-  validateCodexHistoryQuery,
-  validateCodexMemoryImportRequest,
-  validateCodexResourceRequest,
-  validateSettings,
+  validateCodexHistoryQuery, validateCodexMemoryImportRequest,
+  validateCodexResourceRequest, validateSettings,
 } from "../src/main/services/validation";
 
 const SOURCE_ID = "01900000-0000-7000-8000-000000000001";
+const at = "2026-11-13T00:00:00.000Z";
+const row = (type: string, payload: object) => ({ type, timestamp: at, payload });
+const message = (id: string, role: "user" | "assistant", text: string) =>
+  row("event_msg", { type: "item_completed", turn_id: "turn-" + id, item: role === "user"
+    ? { type: "UserMessage", id, content: [{ type: "text", text }] }
+    : { type: "AgentMessage", id, phase: "final_answer", content: [{ type: "Text", text }] } });
+const visible = [
+  message("old-u", "user", "Earlier visible request."),
+  message("old-a", "assistant", "Earlier visible answer."),
+  message("new-u", "user", "Keep the original design requirement."),
+  message("new-a", "assistant", "Current visible native answer."),
+  row("event_msg", { type: "item_completed", item: { type: "Reasoning", content: [{ type: "Text", text: "PRIVATE_REASONING_SENTINEL" }] } }),
+];
+
+// This fixture has no live app-server implementation. Imports must work even when
+// the CLI is absent; actual independent runs use ordinary, isolated CLI exec.
 const fakeCli = `
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
-import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+const log = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli-invocations.jsonl');
+fs.appendFileSync(log, JSON.stringify({args:process.argv.slice(2),home:process.env.CODEX_HOME,cwd:process.cwd()})+'\\n');
+if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture',configRequirements:{requirements:null}}));process.exit(0)}
+if(process.argv.includes('app-server'))throw Error('Native app-server must not be used for imported histories');
 if(process.argv.includes('--version')){console.log('compatibility-fixture 1');process.exit(0)}
 if(process.argv.includes('--help')){console.log('--json --sandbox --skip-git-repo-check --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools --stdio --strict-config');process.exit(0)}
-if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture',configRequirements:{requirements:null}}));process.exit(0)}
-const file=path.join(process.env.CODEX_HOME||path.dirname(new URL(import.meta.url).pathname),'native-fixture.json');
-if(!process.argv.includes('app-server')){
-  if(process.argv.includes('exec')){
-    let folder=process.cwd(),git=false;
-    for(;;){if(fs.existsSync(path.join(folder,'.git'))){git=true;break}const parent=path.dirname(folder);if(parent===folder)break;folder=parent;}
-    if(!git&&!process.argv.includes('--skip-git-repo-check')){console.log(JSON.stringify({type:'turn.failed',error:{message:'GIT_GUARD_REQUIRES_FLAG'}}));process.exit(1)}
-  }
-  let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);
-  process.stdin.on('end',()=>{
-    if(process.argv.includes('--safe-mode')){console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:prompt}]}}));console.log(JSON.stringify({type:'result',subtype:'success',result:prompt}));}
-    else {console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:prompt}}));console.log(JSON.stringify({type:'turn.completed'}));}
-  });
-}else{
-  const lines=readline.createInterface({input:process.stdin});
-  let active;
-  const send=value=>console.log(JSON.stringify(value));
-  const summary=thread=>{const {turns,pages,...value}=thread;return value};
-  lines.on('line',line=>{
-    const request=JSON.parse(line);if(request.id===undefined)return;
-    const data=JSON.parse(fs.readFileSync(file,'utf8'));
-    data.calls.push({method:request.method,params:request.params});
-    const params=request.params||{};
-    const thread=data.threads.find(entry=>entry.id===params.threadId);
-    let result={};
-    if(request.method==='initialize')result={userAgent:'fake-codex'};
-    else if(request.method==='thread/list')result={data:data.threads.filter(entry=>entry.visible!==false&&(!params.cwd||entry.cwd===params.cwd)).map(summary),nextCursor:null};
-    else if(request.method==='thread/read')result={thread:summary(thread)};
-    else if(request.method==='thread/turns/list')result={data:params.cursor?thread.turns.slice(1):thread.turns.slice(0,thread.pages?1:undefined),nextCursor:!params.cursor&&thread.pages?'older':null};
-    else if(request.method==='config/read')result={config:{mcp_servers:{}}};
-    else if(request.method==='thread/start'){
-      const target={id:randomUUID(),name:'New native thread',preview:'',cwd:params.cwd,modelProvider:'openai',createdAt:1700000100,updatedAt:1700000100,source:'appServer',status:{type:'notLoaded'},turns:[]};
-      data.threads.push(target);
-      result={thread:summary(target),modelProvider:'openai',cwd:params.cwd,approvalPolicy:'never',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}};
-    }else if(request.method==='thread/name/set')thread.name=params.name;
-    else if(request.method==='thread/inject_items'){
-      const saved=JSON.parse(fs.readFileSync(data.workspaceFile,'utf8'));
-      const receipt=saved.threads.find(entry=>entry.codexHandoff?.nativeThreadId===params.threadId)?.codexHandoff;
-      if(!receipt||receipt.state!=='pending')throw Error('Handoff receipt not durably pending before injection');
-      if(data.failInjection){fs.writeFileSync(file,JSON.stringify(data));send({id:request.id,error:{code:-32603,message:'PRIVATE_FIXTURE_ERROR_DO_NOT_EXPOSE'}});return;}
-      thread.injectedItems=params.items;
-    }
-    else if(request.method==='thread/fork'||request.method==='thread/resume'){
-      const target=request.method==='thread/fork'?{...thread,id:randomUUID(),cwd:params.cwd}:thread;
-      if(request.method==='thread/fork')data.threads.push(target);
-      target.cwd=params.cwd;
-      const write=params.sandbox==='workspace-write';
-      result={thread:summary(target),modelProvider:'openai',cwd:params.cwd,approvalPolicy:'never',approvalsReviewer:'user',sandbox:write?{type:'workspaceWrite',writableRoots:[params.cwd],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}:{type:'readOnly',networkAccess:false}};
-    }else if(request.method==='turn/start'){
-      const saved=JSON.parse(fs.readFileSync(data.workspaceFile,'utf8'));
-      const savedRun=saved.runs.find(entry=>entry.providerSessionId===params.threadId&&entry.status==='running');
-      if(!savedRun)throw Error('Native ID was not durably saved before turn/start');
-      const prompt=params.input[0].text;
-      active={threadId:params.threadId,turnId:randomUUID()};
-      result={turn:{id:active.turnId,status:'inProgress'}};
-      if(prompt.includes('WRITE_NATIVE'))fs.writeFileSync(path.join(params.cwd,'native-change.txt'),'isolated native change');
-      fs.writeFileSync(file,JSON.stringify(data));send({id:request.id,result});
-      if(prompt.includes('WAIT_NATIVE'))return;
-      send({method:'item/completed',params:{...active,item:{type:'agentMessage',id:randomUUID(),text:'Native continuation finished.'}}});
-      send({method:'turn/completed',params:{threadId:active.threadId,turn:{id:active.turnId,status:'completed'}}});return;
-    }else if(request.method==='turn/interrupt'){
-      if(active)send({method:'turn/completed',params:{threadId:active.threadId,turn:{id:active.turnId,status:'interrupted'}}});
-    }else throw Error('Unexpected RPC '+request.method);
-    fs.writeFileSync(file,JSON.stringify(data));send({id:request.id,result});
-  });
-}
+let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);
+process.stdin.on('end',()=>{
+  if(prompt.includes('WAIT_NOVA')){setInterval(()=>{},1000);return;}
+  if(process.argv.includes('--safe-mode')){console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:prompt}]}}));console.log(JSON.stringify({type:'result',subtype:'success',result:prompt}));}
+  else {console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:prompt}}));console.log(JSON.stringify({type:'turn.completed'}));}
+});
 `;
 
-async function fixture(
-  t: TestContext,
-  options: { folder?: boolean; archived?: boolean; pages?: boolean } = {},
-) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "nova-compatibility-"));
-  const project = path.join(root, "project");
-  const cwd = path.join(project, "nested");
+async function fixture(t: TestContext, options: {
+  archived?: boolean; rows?: object[]; sourceCwd?: string; missingCli?: boolean;
+} = {}) {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "nova-import-service-")));
+  const cwd = path.join(root, "oem-worktree", "nested");
   const home = path.join(root, "codex-home");
   const dataDir = path.join(root, "nova");
-  await Promise.all([
-    mkdir(cwd, { recursive: true }),
-    mkdir(home),
-    mkdir(dataDir),
-  ]);
-  await writeFile(path.join(project, "README.md"), "source fixture\n");
-  await writeFile(path.join(cwd, "local.txt"), "native working folder\n");
-  if (!options.folder) {
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-C", project, ...args], { stdio: "ignore" });
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Nova fixture");
-    git("config", "user.email", "fixture@example.invalid");
-    git("config", "core.autocrlf", "false");
-    git("add", ".");
-    git("commit", "-m", "initial fixture");
-  }
+  const sessions = path.join(home, options.archived ? "archived_sessions" : "sessions", "2026", "11", "13");
+  await Promise.all([mkdir(cwd, { recursive: true }), mkdir(sessions, { recursive: true }), mkdir(dataDir)]);
+  await writeFile(path.join(cwd, "original.txt"), "Original working folder must stay independent.\n");
+  await writeFile(path.join(home, "auth.json"), "CREDENTIAL_SENTINEL");
+  await writeFile(path.join(home, "config.toml"), "UNSUPPORTED_OEM_CONFIG_SENTINEL");
+  await writeFile(path.join(home, "state_5.sqlite"), "DATABASE_SENTINEL");
+  await writeFile(path.join(home, "session_index.jsonl"), JSON.stringify({ id: SOURCE_ID, thread_name: "Existing Codex work", updated_at: at }) + "\n");
+  const sourceFile = path.join(sessions, `rollout-2026-11-13T00-00-00-${SOURCE_ID}.jsonl`);
+  await writeFile(sourceFile, [
+    row("session_meta", { id: SOURCE_ID, timestamp: at, cwd: options.sourceCwd ?? cwd, model_provider: "openai" }),
+    ...(options.rows ?? visible),
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   const executable = path.join(root, "fake-cli.mjs");
-  await writeFile(executable, fakeCli);
+  if (!options.missingCli) await writeFile(executable, fakeCli);
   const state = emptyWorkspace();
-  state.settings = {
-    ...state.settings,
-    codexPath: executable,
-    claudePath: executable,
-    codexHome: home,
-    localModel: "fixture-local",
-  };
-  await writeFile(path.join(dataDir, "workspace.json"), JSON.stringify(state));
-  const nativeFile = path.join(home, "native-fixture.json");
-  await writeFile(
-    nativeFile,
-    JSON.stringify({
-      workspaceFile: path.join(dataDir, "workspace.json"),
-      calls: [],
-      threads: [
-        {
-          id: SOURCE_ID,
-          name: "Existing Codex work",
-          preview: "Preserve my work",
-          cwd: await realpath(cwd),
-          modelProvider: "openai",
-          createdAt: 1_700_000_000,
-          updatedAt: 1_700_000_001,
-          source: "appServer",
-          status: { type: "notLoaded" },
-          pages: options.pages,
-          turns: [
-            {
-              id: "turn-new",
-              items: [
-                {
-                  type: "userMessage",
-                  id: "new-u",
-                  content: [
-                    {
-                      type: "text",
-                      text: "Keep the original design requirement.",
-                    },
-                  ],
-                },
-                {
-                  type: "agentMessage",
-                  id: "new-a",
-                  text: "Current visible native answer.",
-                },
-                {
-                  type: "reasoning",
-                  id: "private",
-                  text: "PRIVATE_REASONING_SENTINEL",
-                },
-              ],
-            },
-            {
-              id: "turn-old",
-              items: [
-                {
-                  type: "userMessage",
-                  id: "old-u",
-                  content: [{ type: "text", text: "Earlier visible request." }],
-                },
-                {
-                  type: "agentMessage",
-                  id: "old-a",
-                  text: "Earlier visible answer.",
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    }),
-  );
+  state.settings = { ...state.settings, codexPath: executable, claudePath: executable, codexHome: home, localModel: "fixture-local" };
+  const stateFile = path.join(dataDir, "workspace.json");
+  await writeFile(stateFile, JSON.stringify(state));
   const service = new WorkspaceService(dataDir, () => undefined);
-  t.after(async () => {
-    await service.dispose();
-    await rm(root, { recursive: true, force: true });
-  });
+  t.after(async () => { await service.dispose(); await rm(root, { recursive: true, force: true }); });
   await service.initialize();
-  const connection = { home: await realpath(home), codexPath: executable };
-  const importThread = () =>
-    service.importCodexThread(
-      { threadId: SOURCE_ID, archived: options.archived },
-      connection,
-    );
-  const nativeState = async () =>
-    JSON.parse(await readFile(nativeFile, "utf8"));
-  return {
-    root,
-    project: await realpath(project),
-    cwd: await realpath(cwd),
-    home: connection.home,
-    dataDir,
-    executable,
-    nativeFile,
-    nativeState,
-    service,
-    connection,
-    importThread,
+  const connection = { home, codexPath: executable };
+  const calls = async (): Promise<Array<{ args: string[]; home: string; cwd: string }>> => {
+    try { return (await readFile(path.join(root, "cli-invocations.jsonl"), "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   };
+  return { root, cwd, home, dataDir, stateFile, sourceFile, executable, service, connection, calls,
+    runtimeHome: path.join(dataDir, "codex-runtime"),
+    importThread: () => service.importCodexThread({ threadId: SOURCE_ID, archived: options.archived }, connection) };
 }
 
 async function finish(service: WorkspaceService, id: string): Promise<Run> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const run = (await service.snapshot()).state.runs.find(
-      (entry) => entry.id === id,
-    )!;
+    const run = (await service.snapshot()).state.runs.find((entry) => entry.id === id)!;
     if (!["queued", "running"].includes(run.status)) return run;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("Fixture run did not finish within its bounded wait.");
 }
 
-test("refresh native history sees official-app changes and preserves Nova turns and project notes", async (t) => {
-  const f = await fixture(t, { pages: true });
+/** Reject even metadata reads, not just writes, during independent Nova work. */
+async function withoutSourceAccess<T>(roots: string[], action: () => Promise<T>): Promise<T> {
+  type Operation = (...args: unknown[]) => unknown;
+  const methods = fs.promises as unknown as Record<string, Operation>;
+  const originals = new Map<string, Operation>();
+  const attempts: string[] = [];
+  for (const name of ["lstat", "stat", "realpath", "readFile", "readdir", "open", "opendir", "access"]) {
+    const original = methods[name]!;
+    originals.set(name, original);
+    methods[name] = (...args) => {
+      const file = String(args[0]);
+      if (roots.some((root) => file === root || file.startsWith(root + path.sep))) {
+        attempts.push(name + ": " + file);
+        throw new Error("Unexpected OEM source filesystem access");
+      }
+      return original.apply(fs.promises, args);
+    };
+  }
+  syncBuiltinESMExports();
+  try {
+    const result = await action();
+    assert.deepEqual(attempts, [], "Copied state must not probe, refresh, or read its OEM provenance");
+    return result;
+  } finally {
+    for (const [name, original] of originals) methods[name] = original;
+    syncBuiltinESMExports();
+  }
+}
+
+test("read-only import retains paginated visible history without a CLI and creates only a detached Nova project", async (t) => {
+  const rows = Array.from({ length: 405 }, (_, index) => message(`m-${index}`, index % 2 ? "assistant" : "user", `Visible ${index}`));
+  const f = await fixture(t, { rows: [...rows, visible[4]!], missingCli: true });
+  const sourceBefore = await readFile(f.sourceFile);
+  assert.equal((await f.service.listCodexThreads({}, f.connection)).threads[0]?.id, SOURCE_ID);
+  const thread = await f.importThread();
+  assert.equal(thread.codex?.copyOnly, true);
+  assert.equal(thread.codex?.history.length, 405);
+  assert.equal(thread.codex?.history[0]?.text, "Visible 0");
+  assert.equal(thread.codex?.history.at(-1)?.text, "Visible 404");
+  assert.equal(thread.codex?.historyTruncated, false);
+  assert.doesNotMatch(JSON.stringify(thread), /PRIVATE_REASONING_SENTINEL|CREDENTIAL_SENTINEL|DATABASE_SENTINEL|UNSUPPORTED_OEM_CONFIG_SENTINEL/);
+  assert.equal((await f.importThread()).id, thread.id);
+  const state = (await f.service.snapshot()).state;
+  assert.equal(state.threads.length, 1);
+  assert.equal(state.projects[0]?.kind, "folder");
+  assert.equal(state.projects[0]?.path, path.join(f.dataDir, "imported-conversations", thread.id));
+  assert.equal(thread.codex?.sourceCwd, f.cwd);
+  assert.equal(thread.worktreePath, undefined);
+  assert.deepEqual(await readFile(f.sourceFile), sourceBefore);
+  assert.deepEqual(await f.calls(), []);
+  await f.service.dispose();
+  const restored = new WorkspaceService(f.dataDir, () => undefined);
+  try {
+    await withoutSourceAccess([f.home, f.cwd], async () => {
+      await restored.initialize();
+      assert.deepEqual((await restored.snapshot()).state.threads[0]?.codex, thread.codex);
+    });
+  } finally { await restored.dispose(); }
+});
+
+test("missing and empty original working directories do not block import or copied context", async (t) => {
+  for (const sourceCwd of ["", path.join(os.tmpdir(), "nova-nonexistent-original-cwd")]) {
+    const f = await fixture(t, { sourceCwd, missingCli: true });
+    const thread = await f.importThread();
+    assert.equal(thread.codex?.sourceCwd, sourceCwd);
+    const preview = await withoutSourceAccess([f.home, f.cwd], () => f.service.previewContext({
+      projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Continue the imported request",
+    }));
+    assert.match(preview.prompt, /original design requirement/);
+  }
+});
+
+test("explicit refresh copies changed source history but preserves Nova turns and notes", async (t) => {
+  const f = await fixture(t);
   const thread = await f.importThread();
   await f.service.saveMemory({ projectId: thread.projectId, title: "Nova decision", content: "Preserve the user's constraints.", kind: "decision", source: "User" });
-  const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Continue with the current project." });
+  const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Continue the current request." });
   assert.equal((await finish(f.service, run.id)).status, "completed");
   const before = (await f.service.snapshot()).state;
-  const native = await f.nativeState();
-  native.threads[0].updatedAt += 60;
-  native.threads[0].turns.unshift({ id: "official-new", items: [{ type: "agentMessage", id: "official-answer", text: "New answer from the official Codex app." }] });
-  await writeFile(f.nativeFile, JSON.stringify(native));
+  await appendFile(f.sourceFile, JSON.stringify(message("official-answer", "assistant", "New visible answer from the official Codex app.")) + "\n");
+  // Invalidate the old bounded snapshot without changing the retained copy.
+  await assert.rejects(f.service.refreshCodexThread(thread.id, f.connection), /source.*changed/i);
+  assert.deepEqual((await f.service.snapshot()).state.threads[0]?.codex, thread.codex);
+  const sourceBefore = await readFile(f.sourceFile);
+  const callsBefore = await f.calls();
   const refreshed = await f.service.refreshCodexThread(thread.id, f.connection);
-  assert.ok(refreshed.codex?.history.some((message) => message.id === "official-answer"));
   assert.equal(refreshed.codex?.history.length, 5);
+  assert.ok(refreshed.codex?.history.some((entry) => entry.id === "official-answer"));
   const after = (await f.service.snapshot()).state;
   assert.deepEqual(after.runs, before.runs);
   assert.deepEqual(after.memories, before.memories);
-  const listCall = (await f.nativeState()).calls.find((call: any) => call.method === "thread/list");
-  assert.equal(listCall.params.currentAccountOnly, true);
-  assert.equal(listCall.params.cwd, f.cwd);
+  assert.deepEqual(await readFile(f.sourceFile), sourceBefore);
+  assert.deepEqual(await f.calls(), callsBefore);
+  await rm(f.sourceFile);
+  await assert.rejects(f.service.refreshCodexThread(thread.id, f.connection));
+  assert.deepEqual((await f.service.snapshot()).state.threads[0]?.codex, refreshed.codex);
 });
 
-test("refresh rejects threads outside the current account catalog without reading or replacing their snapshots", async (t) => {
+test("native handoff and writeback are rejected while export remains a visible copy", async (t) => {
   const f = await fixture(t);
   const thread = await f.importThread();
-  const native = await f.nativeState();
-  native.calls = [];
-  native.threads[0].visible = false;
-  await writeFile(f.nativeFile, JSON.stringify(native));
-  await assert.rejects(f.service.refreshCodexThread(thread.id, f.connection), /not in the current account/);
-  assert.deepEqual((await f.service.snapshot()).state.threads[0], thread);
-  assert.ok((await f.nativeState()).calls.every((call: any) => call.method !== "thread/turns/list"));
+  const sourceBefore = await readFile(f.sourceFile);
+  await assert.rejects(f.service.reviewCodexHandoff(thread.id, f.connection), /import-only|disabled/);
+  await assert.rejects(f.service.publishCodexHandoff(thread.id, "0".repeat(64), f.connection), /import-only|disabled/);
+  const exported = await f.service.exportConversation(thread.id);
+  assert.match(exported.content, /Current visible native answer/);
+  assert.doesNotMatch(exported.content, /PRIVATE_REASONING_SENTINEL|CREDENTIAL_SENTINEL/);
+  assert.deepEqual(await readFile(f.sourceFile), sourceBefore);
+  assert.deepEqual(await f.calls(), []);
 });
 
-test("native handoff publishes Claude-visible context and memory with durable receipt, new native identity and idempotence", async (t) => {
-  const f = await fixture(t);
+test("Codex, Claude and local Plan use copied context and Nova cwd, never native resume or forks", async (t) => {
+  const f = await fixture(t, { archived: true });
   const thread = await f.importThread();
-  const memory = await f.service.saveMemory({ projectId: thread.projectId, title: "Shared engineering decision", content: "Preserve the same geometry across providers.", kind: "decision", source: "User" });
-  const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Review the shared engineering decision." });
-  assert.equal((await finish(f.service, run.id)).status, "completed");
-  const original = structuredClone((await f.nativeState()).threads[0]);
-  const review = await f.service.reviewCodexHandoff(thread.id, f.connection);
-  const published = await f.service.publishCodexHandoff(thread.id, review.fingerprint, f.connection);
-  assert.equal(published.unchanged, false);
-  assert.notEqual(published.nativeThreadId, SOURCE_ID);
-  const state = (await f.service.snapshot()).state;
-  const linked = state.threads.find((entry) => entry.id === thread.id)!;
-  assert.equal(linked.codexHandoff?.state, "published");
-  assert.equal(linked.codexHandoff?.nativeThreadId, published.nativeThreadId);
-  assert.equal(linked.codex?.sourceThreadId, SOURCE_ID);
-  assert.equal(linked.codex?.forkedThreadId, published.nativeThreadId);
-  assert.ok(state.memories.some((entry) => entry.id === memory.id));
-  assert.ok(state.runs.some((entry) => entry.id === run.id));
-  const native = await f.nativeState();
-  assert.deepEqual(native.threads[0], original);
-  const copy = native.threads.find((entry: any) => entry.id === published.nativeThreadId);
-  assert.deepEqual(copy.turns, original.turns, "native-owned history stays in the native fork");
-  assert.match(copy.injectedItems[0].content[0].text, /Preserve the same geometry across providers/);
-  assert.match(copy.injectedItems[0].content[0].text, /Current visible native answer/);
-  assert.match(copy.injectedItems[0].content[0].text, /claude/);
-  assert.doesNotMatch(copy.injectedItems[0].content[0].text, /PRIVATE_REASONING_SENTINEL/);
-  assert.equal(native.calls.filter((call: any) => call.method === "turn/start").length, 0);
-  const nextReview = await f.service.reviewCodexHandoff(thread.id, f.connection);
-  assert.equal(nextReview.unchanged, true);
-  const again = await f.service.publishCodexHandoff(thread.id, nextReview.fingerprint, f.connection);
-  assert.equal(again.unchanged, true);
-  assert.equal(again.nativeThreadId, published.nativeThreadId);
-  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "thread/start" || call.method === "thread/fork").length, 1);
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ models: [{ name: "fixture-local" }] }), { status: 200 }));
+  await withoutSourceAccess([f.home, f.cwd], async () => {
+    for (const provider of ["codex", "claude", "ollama"] as const) {
+      const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider, mode: "plan", prompt: "Continue from copied requirements." });
+      const result = await finish(f.service, run.id);
+      assert.equal(result.status, "completed", result.error);
+      const text = result.events.filter((entry) => entry.kind === "message").map((entry) => entry.text).join("\n");
+      assert.match(text, /original design requirement/);
+      assert.doesNotMatch(text, /PRIVATE_REASONING_SENTINEL/);
+      assert.equal(result.providerSessionId, undefined);
+    }
+    await assert.rejects(f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "codex", mode: "build", prompt: "Do not build in the original folder." }), /committed Git/);
+  });
+  const calls = await f.calls();
+  assert.ok(calls.length >= 3);
+  assert.ok(calls.filter((call) => !call.args.includes("--help") && !call.args.includes("--version")).every((call) => call.home === f.runtimeHome));
+  assert.ok(calls.every((call) => !call.args.some((arg) => ["resume", "fork", SOURCE_ID].includes(arg))));
+  assert.ok(calls.every((call) => !call.args.includes("app-server") || call.args.includes("--print-startup-config")));
+  assert.ok(calls.filter((call) => !call.args.includes("--help") && !call.args.includes("--version")).every(
+    (call) => call.cwd === path.join(f.dataDir, "imported-conversations", thread.id)));
+  assert.equal((await f.service.snapshot()).state.threads[0]?.codex?.forkedThreadId, undefined);
 });
 
-test("a Nova-only Claude conversation receives a real OEM thread link after explicit publishing", async (t) => {
+test("source selection is confirmed independently of the CLI and active Nova runs do not lock read-only history", async (t) => {
   const f = await fixture(t);
-  const imported = await f.importThread();
-  const run = await f.service.startRun({ projectId: imported.projectId, provider: "claude", mode: "plan", prompt: "Start a Nova-only conversation." });
-  assert.equal((await finish(f.service, run.id)).status, "completed");
-  const before = (await f.service.snapshot()).state.threads.find((entry) => entry.id === run.threadId)!;
-  assert.equal(before.codex, undefined);
-  const review = await f.service.reviewCodexHandoff(before.id, f.connection);
-  const published = await f.service.publishCodexHandoff(before.id, review.fingerprint, f.connection);
-  const after = (await f.service.snapshot()).state.threads.find((entry) => entry.id === run.threadId)!;
-  assert.equal(after.codex?.sourceThreadId, published.nativeThreadId);
-  assert.equal(after.codex?.home, f.home);
-  assert.equal(after.codexHandoff?.state, "published");
-  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "thread/start").length, 1);
-  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "turn/start").length, 0);
-});
-
-test("native handoff refuses stale context and retains failed creation receipts without exposing provider diagnostics", async (t) => {
-  const f = await fixture(t);
+  await assert.rejects(f.service.listCodexThreads({}, { ...f.connection, home: path.join(f.root, "different-source") }), /import source changed/);
+  assert.equal((await f.service.listCodexThreads({}, { ...f.connection, codexPath: "unused-for-import" })).threads.length, 1);
   const thread = await f.importThread();
-  const review = await f.service.reviewCodexHandoff(thread.id, f.connection);
-  await f.service.saveMemory({ projectId: thread.projectId, title: "New note", content: "Changed after review.", kind: "note", source: "User" });
-  await assert.rejects(f.service.publishCodexHandoff(thread.id, review.fingerprint, f.connection), /changed|preview|review/i);
-  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "thread/start" || call.method === "thread/fork").length, 0);
-  const current = await f.service.reviewCodexHandoff(thread.id, f.connection);
-  const native = await f.nativeState();
-  const original = structuredClone(native.threads[0]);
-  native.failInjection = true;
-  await writeFile(f.nativeFile, JSON.stringify(native));
-  let failure: unknown;
-  try { await f.service.publishCodexHandoff(thread.id, current.fingerprint, f.connection); }
-  catch (error) { failure = error; }
-  assert.ok(failure instanceof Error);
-  assert.doesNotMatch(failure.message, /PRIVATE_FIXTURE_ERROR_DO_NOT_EXPOSE/);
-  const saved = (await f.service.snapshot()).state.threads.find((entry) => entry.id === thread.id)!;
-  assert.equal(saved.codexHandoff?.state, "failed");
-  assert.ok(saved.codexHandoff?.nativeThreadId);
-  assert.equal(saved.codex?.forkedThreadId, undefined);
-  assert.deepEqual((await f.nativeState()).threads[0], original);
-  const persisted = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
-  assert.equal(persisted.threads.find((entry: any) => entry.id === thread.id).codexHandoff.state, "failed");
-  assert.equal((await f.nativeState()).calls.filter((call: any) => call.method === "turn/start").length, 0);
-});
-
-test("account operation lease is durable before launch, blocks agents, rejects stale finish and clears only its exact marker", async (t) => {
-  const f = await fixture(t);
-  const thread = await f.importThread();
-  const operation = await f.service.beginAccountOperation("codex", f.home);
-  const persisted = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
-  assert.equal(persisted.accountOperation.id, operation);
-  assert.equal(persisted.accountOperation.provider, "codex");
-  assert.equal(persisted.accountOperation.home, f.home);
-  const beforeCalls = (await f.nativeState()).calls;
-  await assert.rejects(f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Must not start during login." }), /provider account cleanup/);
-  await assert.rejects(f.service.finishAccountOperation("stale-operation"), /marker was preserved/);
-  assert.equal((await f.service.snapshot()).state.accountOperation?.id, operation);
-  assert.equal(JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8")).accountOperation.id, operation);
-  assert.deepEqual((await f.nativeState()).calls, beforeCalls);
-  assert.equal((await f.service.snapshot()).state.runs.length, 0);
-  await f.service.finishAccountOperation(operation);
-  assert.equal((await f.service.snapshot()).state.accountOperation, undefined);
-  assert.equal(JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8")).accountOperation, undefined);
-  const failed = await f.service.beginAccountOperation("claude", f.home);
-  await f.service.recordAccountRecovery("claude", f.home);
-  await assert.rejects(f.service.finishAccountOperation(failed), /marker was preserved/);
-  const recovered = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
-  assert.equal(recovered.accountOperation, undefined);
-  assert.equal(recovered.accountRecovery.provider, "claude");
-});
-
-test("orphan account lease becomes durable recovery on restart without probes and requires acknowledgement then explicit tool refresh", async (t) => {
-  const f = await fixture(t);
-  const thread = await f.importThread();
-  const operation = await f.service.beginAccountOperation("claude", f.home);
-  await f.service.dispose();
-  const probeFile = path.join(f.root, "restart-probes.txt");
-  const instrumented = fakeCli.replace("import fs from 'node:fs';", `import fs from 'node:fs';\nfs.appendFileSync(${JSON.stringify(probeFile)}, 'invoked\\n');`);
-  await writeFile(f.executable, instrumented);
-  const restarted = new WorkspaceService(f.dataDir, () => undefined);
+  const run = await f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "codex", mode: "plan", prompt: "WAIT_NOVA" });
   try {
-    await restarted.initialize();
-    const snapshot = await restarted.snapshot();
-    assert.equal(snapshot.state.accountOperation, undefined);
-    assert.equal(snapshot.state.accountRecovery?.provider, "claude");
-    assert.equal(snapshot.state.accountRecovery?.home, f.home);
-    assert.ok(snapshot.providers.every((provider) => !provider.available));
-    await assert.rejects(readFile(probeFile), { code: "ENOENT" });
-    const durable = JSON.parse(await readFile(path.join(f.dataDir, "workspace.json"), "utf8"));
-    assert.equal(durable.accountOperation, undefined);
-    assert.equal(durable.accountRecovery.provider, "claude");
-    await assert.rejects(restarted.finishAccountOperation(operation), /marker was preserved/);
-    await assert.rejects(restarted.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Must remain blocked." }), /provider account cleanup/);
-    const recovery = (await restarted.listRecoveryItems()).find((entry) => entry.id === "provider-accounts")!;
-    assert.equal(recovery.kind, "accounts");
-    await assert.rejects(restarted.acknowledgeRecovery({ id: recovery.id, token: "0".repeat(64) }), /Recovery state changed/);
-    await restarted.acknowledgeRecovery({ id: recovery.id, token: recovery.token });
-    assert.equal((await restarted.snapshot()).state.accountRecovery, undefined);
-    await assert.rejects(readFile(probeFile), { code: "ENOENT" });
-    assert.ok((await restarted.snapshot()).providers.every((provider) => !provider.available), "Acknowledgement does not claim successful redetection");
-    await assert.rejects(restarted.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Detection must be refreshed first." }), /refresh tool detection/);
-    const refreshed = await restarted.refreshProviderStatus();
-    assert.ok(refreshed.providers.find((provider) => provider.id === "codex")?.available);
-    assert.match(await readFile(probeFile, "utf8"), /invoked/);
-  } finally { await restarted.dispose(); }
+    assert.equal((await f.service.readCodexHistory({ threadId: SOURCE_ID })).messages.length, 4);
+    assert.equal((await f.importThread()).id, thread.id);
+    await assert.rejects(f.service.updateThread({ id: thread.id, archived: true }), /active agent/);
+  } finally { await f.service.cancelRun(run.id); }
+  assert.equal((await finish(f.service, run.id)).status, "cancelled");
 });
 
-test("compatibility inputs stay bounded and legacy workspaces retain their defaults", () => {
-  const legacy = validateWorkspaceState(emptyWorkspace());
-  assert.equal(legacy.codexRecoveryHomes, undefined);
-  assert.equal(legacy.settings.codexHome, undefined);
-  assert.throws(
-    () => validateSettings({ ...legacy.settings, codexHome: "relative" }),
-    /absolute/,
-  );
-  assert.throws(
-    () => validateCodexHistoryQuery({ threadId: "--bad" }),
-    /invalid/,
-  );
-  assert.throws(
-    () =>
-      validateCodexResourceRequest({
-        section: "memories",
-        path: "../auth.json",
-      }),
-    /selected section/,
-  );
-  assert.throws(
-    () =>
-      validateCodexResourceRequest({ section: "credentials", path: "note.md" }),
-    /allowed/,
-  );
-  assert.throws(
-    () =>
-      validateCodexMemoryImportRequest({
-        projectId: "p",
-        section: "memories",
-        path: "note.md",
-        expectedSha256: "wrong",
-      }),
-    /SHA-256/,
-  );
-});
-
-test("native import retains paginated visible history, excludes private items, deduplicates and survives restart", async (t) => {
-  const f = await fixture(t, { pages: true });
-  const page = await f.service.listCodexThreads({}, f.connection);
-  assert.equal(page.threads[0].id, SOURCE_ID);
-  const thread = await f.importThread();
-  assert.deepEqual(
-    thread.codex?.history.map((message) => message.id),
-    ["old-u", "old-a", "new-u", "new-a"],
-  );
-  assert.equal(thread.codex?.historyTruncated, false);
-  assert.ok(!JSON.stringify(thread).includes("PRIVATE_REASONING_SENTINEL"));
-  assert.equal((await f.importThread()).id, thread.id);
-  assert.equal((await f.service.snapshot()).state.threads.length, 1);
-  assert.equal((await f.service.snapshot()).state.projects[0].path, f.project);
-  assert.equal(thread.codex?.sourceCwd, f.cwd);
-  await f.service.dispose();
-  const restored = new WorkspaceService(f.dataDir, () => undefined);
-  try {
-    await restored.initialize();
-    assert.deepEqual(
-      (await restored.snapshot()).state.threads[0].codex,
-      thread.codex,
-    );
-  } finally {
-    await restored.dispose();
-  }
-});
-
-test("nested native Plan uses project-root memory provenance without changing its execution cwd", async (t) => {
-  const f = await fixture(t);
-  const thread = await f.importThread();
-  const memory = await f.service.saveMemory({
-    projectId: thread.projectId,
-    title: "Project-root requirement",
-    content: "Retain the project-root README requirement.",
-    kind: "constraint",
-    source: "Reviewed root README",
-    filePath: "README.md",
-  });
-  const request = {
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "codex" as const,
-    mode: "plan" as const,
-    prompt: "Continue with the reviewed project-root requirement",
-  };
-  const preview = await f.service.previewContext(request);
-  assert.equal(
-    preview.memories.find((entry) => entry.id === memory.id)?.freshness,
-    "current",
-  );
-  assert.ok(preview.includedMemoryIds.includes(memory.id));
-  const run = await f.service.startRun(request, f.connection);
-  const result = await finish(f.service, run.id);
-  assert.equal(result.status, "completed", result.error);
-  assert.ok(result.contextMemoryIds.includes(memory.id));
-  const native = await f.nativeState();
-  const resume = native.calls.find(
-    (call: any) => call.method === "thread/resume",
-  );
-  const started = native.calls.find(
-    (call: any) => call.method === "turn/start",
-  );
-  assert.equal(resume.params.cwd, f.cwd);
-  assert.equal(started.params.cwd, f.cwd);
-  assert.equal(started.params.input[0].text, preview.prompt);
-  assert.match(
-    started.params.input[0].text,
-    /Retain the project-root README requirement/,
-  );
-  assert.equal(native.threads[0].cwd, f.cwd);
-});
-
-test("native Plan resumes the original folder, Build forks before execution and reuses its pinned worktree", async (t) => {
-  const f = await fixture(t);
-  const imported = await f.importThread();
-  const base = {
-    projectId: imported.projectId,
-    threadId: imported.id,
-    provider: "codex" as const,
-  };
-  const plan = await f.service.startRun(
-    { ...base, mode: "plan", prompt: "Continue the existing conversation" },
-    f.connection,
-  );
-  assert.equal((await finish(f.service, plan.id)).status, "completed");
-  let native = await f.nativeState();
-  assert.equal(
-    native.calls.find((call: any) => call.method === "thread/resume").params
-      .cwd,
-    f.cwd,
-  );
-  assert.equal(native.threads[0].cwd, f.cwd);
-  const storage = path.join(f.root, "redirected-storage");
-  await f.service.updateSettings({
-    ...(await f.service.snapshot()).state.settings,
-    worktreeStoragePath: storage,
-  });
-  const build = await f.service.startRun(
-    { ...base, mode: "build", prompt: "WRITE_NATIVE" },
-    f.connection,
-  );
-  const result = await finish(f.service, build.id);
-  assert.equal(result.status, "completed", result.error);
-  const thread = (await f.service.snapshot()).state.threads[0];
-  assert.equal(thread.worktreeStoragePath, await realpath(storage));
-  assert.equal(thread.codex?.forkedCwd, thread.worktreePath);
-  assert.notEqual(thread.codex?.forkedThreadId, SOURCE_ID);
-  assert.equal(
-    await readFile(
-      path.join(thread.worktreePath!, "native-change.txt"),
-      "utf8",
-    ),
-    "isolated native change",
-  );
-  await assert.rejects(
-    readFile(path.join(f.project, "native-change.txt")),
-    /ENOENT/,
-  );
-  native = await f.nativeState();
-  assert.equal(
-    native.threads[0].cwd,
-    f.cwd,
-    "the source native thread was never repointed",
-  );
-  assert.equal(
-    native.calls.filter((call: any) => call.method === "thread/fork").length,
-    1,
-  );
-  await f.service.updateSettings({
-    ...(await f.service.snapshot()).state.settings,
-    worktreeStoragePath: path.join(f.root, "different-storage"),
-  });
-  await f.service.dispose();
-  const reopened = new WorkspaceService(f.dataDir, () => undefined);
-  try {
-    await reopened.initialize();
-    const next = await reopened.startRun(
-      { ...base, mode: "plan", prompt: "Continue the managed worktree" },
-      f.connection,
-    );
-    assert.equal((await finish(reopened, next.id)).status, "completed");
-    assert.equal(
-      (await reopened.snapshot()).state.threads[0].worktreePath,
-      thread.worktreePath,
-    );
-    assert.equal(
-      (await reopened.snapshot()).state.threads[0].codex?.forkedThreadId,
-      thread.codex?.forkedThreadId,
-    );
-  } finally {
-    await reopened.dispose();
-  }
-  native = await f.nativeState();
-  assert.equal(
-    native.calls.filter((call: any) => call.method === "thread/fork").length,
-    1,
-  );
-  assert.equal(
-    native.calls.filter((call: any) => call.method === "thread/resume").at(-1)
-      .params.threadId,
-    thread.codex?.forkedThreadId,
-  );
-});
-
-test("archived native Plan forks without unarchiving and a later Build forks its continued history", async (t) => {
-  const f = await fixture(t);
-  const original = await f.importThread();
-  const thread = await f.service.importCodexThread({
-    threadId: SOURCE_ID,
-    archived: true,
-  });
-  assert.equal(
-    thread.id,
-    original.id,
-    "an explicit Archived reimport keeps the same Nova thread",
-  );
-  assert.equal(thread.codex?.sourceArchived, true);
-  const request = {
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "codex" as const,
-  };
-  const plan = await f.service.startRun({
-    ...request,
-    mode: "plan",
-    prompt: "Continue archived context safely",
-  });
-  assert.equal((await finish(f.service, plan.id)).status, "completed");
-  const planFork = (await f.service.snapshot()).state.threads[0].codex!
-    .forkedThreadId;
-  const build = await f.service.startRun({
-    ...request,
-    mode: "build",
-    prompt: "Prepare a separate build",
-  });
-  assert.equal((await finish(f.service, build.id)).status, "completed");
-  const native = await f.nativeState();
-  const forks = native.calls.filter(
-    (call: any) => call.method === "thread/fork",
-  );
-  assert.equal(forks.length, 2);
-  assert.equal(forks[1].params.threadId, planFork);
-  assert.equal(
-    native.calls.some((call: any) => call.method === "thread/unarchive"),
-    false,
-  );
-  assert.equal(native.threads[0].cwd, f.cwd);
-});
-
-test("folder conversations support native Plan and visible provider handoff but refuse Build", async (t) => {
-  const f = await fixture(t, { folder: true });
-  const thread = await f.importThread();
-  const project = (await f.service.snapshot()).state.projects[0];
-  assert.equal(project.kind, "folder");
-  assert.equal(project.path, f.cwd);
-  const guarded = await runProvider({
-    command: {
-      ...(await resolveExecutable(f.executable)),
-      args: providerArguments("codex", f.cwd, "plan", ""),
-    },
-    provider: "codex",
-    cwd: f.cwd,
-    prompt: "A repository guard must reject this fixture invocation",
-    signal: new AbortController().signal,
-    timeoutMs: 10_000,
-    maxBytes: 64 * 1024,
-    onEvent: () => undefined,
-  });
-  assert.equal(guarded.completed, false);
-  assert.match(guarded.error || "", /GIT_GUARD_REQUIRES_FLAG/);
-  const request = {
-    projectId: project.id,
-    threadId: thread.id,
-    mode: "plan" as const,
-    prompt: "Continue from the imported requirements",
-  };
-  const plan = await f.service.startRun({ ...request, provider: "codex" });
-  assert.equal((await finish(f.service, plan.id)).status, "completed");
-  const claude = await f.service.startRun({ ...request, provider: "claude" });
-  const claudeResult = await finish(f.service, claude.id);
-  assert.equal(claudeResult.status, "completed", claudeResult.error);
-  const text = claudeResult.events
-    .filter((event) => event.kind === "message")
-    .map((event) => event.text)
-    .join("\n");
-  assert.match(text, /original design requirement/);
-  assert.match(text, /Native continuation finished/);
-  assert.ok(!text.includes("PRIVATE_REASONING_SENTINEL"));
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async () =>
-      new Response(JSON.stringify({ models: [{ name: "fixture-local" }] }), {
-        status: 200,
-      }),
-  );
-  const local = await f.service.startRun({ ...request, provider: "ollama" });
-  assert.equal((await finish(f.service, local.id)).status, "completed");
-  const fresh = await f.service.startRun({
-    projectId: project.id,
-    provider: "codex",
-    mode: "plan",
-    prompt: "Start a fresh Codex Plan in this folder",
-  });
-  const freshResult = await finish(f.service, fresh.id);
-  assert.equal(freshResult.status, "completed", freshResult.error);
-  assert.equal(
-    (await f.service.snapshot()).state.threads.find(
-      (entry) => entry.id === fresh.threadId,
-    )?.codex,
-    undefined,
-  );
-  await assert.rejects(
-    f.service.startRun({ ...request, provider: "codex", mode: "build" }),
-    /committed Git/,
-  );
-  assert.equal(
-    (await f.service.snapshot()).state.threads[0].worktreePath,
-    undefined,
-  );
-  await f.service.dispose();
-  const restored = new WorkspaceService(f.dataDir, () => undefined);
-  try {
-    await restored.initialize();
-    assert.equal((await restored.snapshot()).state.projects[0].kind, "folder");
-    assert.equal((await restored.snapshot()).state.runs.length, 4);
-  } finally {
-    await restored.dispose();
-  }
-});
-
-test("selected Codex references are digest-confirmed, idempotent, freshness-scoped and editable only as user notes", async (t) => {
+test("imported memory remains an independent snapshot when its source changes or disappears", async (t) => {
   const f = await fixture(t);
   const thread = await f.importThread();
   await mkdir(path.join(f.home, "memories"));
@@ -760,307 +255,151 @@ test("selected Codex references are digest-confirmed, idempotent, freshness-scop
   await writeFile(source, "Keep the original wheel geometry.");
   const request = { section: "memories" as const, path: "MEMORY.md" };
   const preview = await f.service.previewCodexResource(request);
-  const imported = await f.service.importCodexMemory(
-    { ...request, projectId: thread.projectId, expectedSha256: preview.sha256 },
-    f.home,
-  );
-  assert.equal(
-    (
-      await f.service.importCodexMemory({
-        ...request,
-        projectId: thread.projectId,
-        expectedSha256: preview.sha256,
-      })
-    ).id,
-    imported.id,
-  );
-  let context = await f.service.previewContext({
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "claude",
-    mode: "plan",
-    prompt: "wheel geometry",
+  const imported = await f.service.importCodexMemory({ ...request, projectId: thread.projectId, expectedSha256: preview.sha256 }, f.home);
+  assert.equal((await f.service.importCodexMemory({ ...request, projectId: thread.projectId, expectedSha256: preview.sha256 })).id, imported.id);
+  await writeFile(source, "Changed OEM requirement must not replace the imported copy.");
+  await assert.rejects(f.service.importCodexMemory({ ...request, projectId: thread.projectId, expectedSha256: preview.sha256 }), /changed after preview/);
+  await rm(source);
+  await withoutSourceAccess([f.home, f.cwd], async () => {
+    const context = await f.service.previewContext({ projectId: thread.projectId, threadId: thread.id, provider: "ollama", mode: "plan", prompt: "wheel geometry" });
+    assert.equal(context.memories.find((entry) => entry.id === imported.id)?.freshness, "unlinked");
+    assert.ok(context.includedMemoryIds.includes(imported.id));
+    assert.match(context.prompt, /Keep the original wheel geometry/);
+    assert.doesNotMatch(context.prompt, /Changed OEM requirement/);
+    const sharing = await f.service.previewSharedMemory(thread.projectId);
+    assert.match(sharing.files[0]?.after ?? "", /Keep the original wheel geometry/);
   });
-  assert.ok(context.includedMemoryIds.includes(imported.id));
-  await writeFile(source, "Changed wheel requirement.");
-  await assert.rejects(
-    f.service.importCodexMemory({
-      ...request,
-      projectId: thread.projectId,
-      expectedSha256: preview.sha256,
-    }),
-    /changed after preview/,
-  );
-  context = await f.service.previewContext({
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "ollama",
-    mode: "plan",
-    prompt: "wheel geometry",
-  });
-  assert.equal(
-    context.memories.find((memory) => memory.id === imported.id)?.freshness,
-    "changed",
-  );
-  assert.ok(context.omittedMemoryIds.includes(imported.id));
-  const edited = await f.service.saveMemory({
-    ...imported,
-    content: "My reviewed user note",
-  });
+  const edited = await f.service.saveMemory({ ...imported, content: "My reviewed user note" });
   assert.equal(edited.codexSource, undefined);
-  context = await f.service.previewContext({
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "claude",
-    mode: "plan",
-    prompt: "note",
-  });
-  assert.equal(
-    context.memories.find((memory) => memory.id === imported.id)?.freshness,
-    "unlinked",
-  );
 });
 
-test("connection confirmation is rechecked and active native work prevents competing import, read and archive", async (t) => {
+test("legacy imported threads detach during startup without using original folders or losing previous evidence", async (t) => {
   const f = await fixture(t);
-  const wrong = { ...f.connection, codexPath: `${f.executable}.different` };
-  await assert.rejects(
-    f.service.listCodexThreads({}, wrong),
-    /connection changed/,
-  );
-  assert.equal((await f.nativeState()).calls.length, 0);
   const thread = await f.importThread();
-  const request = {
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "codex" as const,
-    mode: "plan" as const,
-    prompt: "WAIT_NATIVE",
-  };
-  await assert.rejects(
-    f.service.startRun(request, wrong),
-    /connection changed/,
-  );
-  const run = await f.service.startRun(request, f.connection);
-  await assert.rejects(f.importThread(), /active Nova worker/);
-  await assert.rejects(
-    f.service.readCodexHistory({ threadId: SOURCE_ID }),
-    /active Nova worker/,
-  );
-  await assert.rejects(
-    f.service.updateThread({ id: thread.id, archived: true }),
-    /active agent/,
-  );
-  await f.service.cancelRun(run.id);
-  assert.equal((await finish(f.service, run.id)).status, "cancelled");
+  const note = await f.service.saveMemory({ projectId: thread.projectId, title: "Retained note", content: "Do not lose the reviewed decision.", kind: "decision", source: "User" });
+  await f.service.dispose();
+  const saved = JSON.parse(await readFile(f.stateFile, "utf8"));
+  saved.projects[0].path = f.cwd;
+  saved.threads[0].codex.copyOnly = false;
+  saved.threads[0].codex.forkedThreadId = "01900000-0000-7000-8000-000000000002";
+  saved.threads[0].codex.forkedCwd = f.cwd;
+  saved.threads[0].worktreePath = f.cwd;
+  saved.threads[0].worktreeStoragePath = f.home;
+  saved.threads[0].branch = "old-native-branch";
+  saved.threads[0].baseCommit = "a".repeat(40);
+  saved.codexRecoveryHomes = [f.home];
+  saved.accountRecovery = { provider: "codex", home: f.home, recordedAt: at };
+  await writeFile(f.stateFile, JSON.stringify(saved));
+  const restored = new WorkspaceService(f.dataDir, () => undefined);
+  try {
+    await withoutSourceAccess([f.home, f.cwd], async () => {
+      await restored.initialize();
+      const state = (await restored.snapshot()).state;
+      const copied = state.threads.find((entry) => entry.id === thread.id)!;
+      assert.equal(copied.codex?.copyOnly, true);
+      assert.equal(copied.worktreePath, undefined);
+      assert.equal(state.projects.find((entry) => entry.id === copied.projectId)?.path, path.join(f.dataDir, "imported-conversations", thread.id));
+      assert.deepEqual(copied.codex?.history, thread.codex?.history);
+      assert.ok(state.memories.some((entry) => entry.id === note.id && entry.content === note.content));
+      assert.equal(state.accountRecovery, undefined);
+      assert.deepEqual(state.codexRecoveryHomes, [f.home]);
+      assert.ok((await restored.listRecoveryItems()).some((entry) => entry.kind === "codex-home"));
+      const preview = await restored.previewContext({ projectId: copied.projectId, threadId: copied.id, provider: "codex", mode: "plan", prompt: "Continue the independent copy" });
+      assert.match(preview.prompt, /original design requirement/);
+    });
+    assert.equal((await restored.listCodexThreads({})).threads.length, 1);
+  } finally { await restored.dispose(); }
 });
 
-test("import persistence rollback preserves existing state and native recovery locks survive restart", async (t) => {
+test("import rollback preserves workspace state and a failed run save starts no execution worker", async (t) => {
   const f = await fixture(t);
   const internals = f.service as unknown as { persist: () => Promise<void> };
   const persist = internals.persist;
-  internals.persist = async () => {
-    throw new Error("injected import disk failure");
-  };
-  await assert.rejects(f.importThread(), /import disk failure/);
-  assert.equal((await f.service.snapshot()).state.projects.length, 0);
-  assert.equal((await f.service.snapshot()).state.threads.length, 0);
-  internals.persist = persist;
-  const thread = await f.importThread();
-  await f.service.dispose();
-  const file = path.join(f.dataDir, "workspace.json");
-  const saved = JSON.parse(await readFile(file, "utf8"));
-  saved.codexRecoveryHomes = [f.home];
-  saved.threads[0].codex.history[0].text += "\0bounded visible text";
-  await writeFile(file, JSON.stringify(saved));
-  const restored = new WorkspaceService(f.dataDir, () => undefined);
+  internals.persist = async () => { throw new Error("injected disk failure"); };
   try {
-    await restored.initialize();
-    assert.deepEqual((await restored.snapshot()).state.codexRecoveryHomes, [
-      f.home,
-    ]);
-    await assert.rejects(
-      restored.listCodexThreads({}),
-      /restarting Nova does not clear/,
-    );
-    await assert.rejects(
-      restored.startRun({
-        projectId: thread.projectId,
-        threadId: thread.id,
-        provider: "codex",
-        mode: "plan",
-        prompt: "Continue",
-      }),
-      /restarting Nova does not clear/,
-    );
-    assert.equal(
-      (await restored.listCodexResources({ section: "memories" })).resources
-        .length,
-      0,
-    );
-  } finally {
-    await restored.dispose();
-  }
-});
-
-test("an interrupted Claude handoff locks project Build but not native Codex history after restart", async (t) => {
-  const f = await fixture(t);
+    await assert.rejects(f.importThread(), /disk failure/);
+    assert.equal((await f.service.snapshot()).state.threads.length, 0);
+    assert.equal((await f.service.snapshot()).state.projects.length, 0);
+  } finally { internals.persist = persist; }
   const thread = await f.importThread();
-  const run = await f.service.startRun({
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "claude",
-    mode: "plan",
-    prompt: "Inspect the imported requirements",
-  });
-  assert.equal((await finish(f.service, run.id)).status, "completed");
-  await f.service.dispose();
-  // Model a crash-time saved state without leaving a real fixture process alive.
-  const file = path.join(f.dataDir, "workspace.json");
-  const saved = JSON.parse(await readFile(file, "utf8"));
-  const interrupted = saved.runs.find((entry: Run) => entry.id === run.id);
-  interrupted.status = "running";
-  delete interrupted.finishedAt;
-  delete interrupted.terminationUnconfirmed;
-  await writeFile(file, JSON.stringify(saved));
-  const restored = new WorkspaceService(f.dataDir, () => undefined);
+  const callsBefore = await f.calls();
+  internals.persist = async () => { throw new Error("injected disk failure"); };
   try {
-    await restored.initialize();
-    const state = (await restored.snapshot()).state;
-    assert.equal(
-      state.runs.find((entry) => entry.id === run.id)?.status,
-      "interrupted",
-    );
-    assert.equal(
-      state.runs.find((entry) => entry.id === run.id)?.terminationUnconfirmed,
-      true,
-    );
-    assert.deepEqual(state.codexRecoveryHomes ?? [], []);
-    assert.equal(
-      (await restored.listCodexThreads({}, f.connection)).threads[0].id,
-      SOURCE_ID,
-    );
-    await assert.rejects(
-      restored.startRun(
-        {
-          projectId: thread.projectId,
-          threadId: thread.id,
-          provider: "codex",
-          mode: "build",
-          prompt: "Build after the interrupted handoff",
-        },
-        f.connection,
-      ),
-      /Build is locked/,
-    );
-    assert.equal(
-      (await restored.snapshot()).state.threads[0].worktreePath,
-      undefined,
-    );
-  } finally {
-    await restored.dispose();
-  }
+    await assert.rejects(f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "codex", mode: "plan", prompt: "No process until save" }), /no worker was started/);
+    assert.equal((await f.service.snapshot()).state.runs.length, 0);
+    assert.deepEqual((await f.calls()).filter((call) => !call.args.includes("--help") && !call.args.includes("--version")), callsBefore);
+  } finally { internals.persist = persist; }
 });
 
-test("a native fork is never executed until its identity is durably saved", async (t) => {
+test("private-runtime account operation lease is durable, blocks agents and requires its exact finish marker", async (t) => {
   const f = await fixture(t);
   const thread = await f.importThread();
-  const internals = f.service as unknown as {
-    persist: () => Promise<void>;
-    state: { runs: Run[] };
-  };
-  const persist = internals.persist;
-  let injected = false;
-  internals.persist = async () => {
-    if (
-      !injected &&
-      internals.state.runs.some(
-        (run) => run.providerSessionId && run.status === "running",
-      )
-    ) {
-      injected = true;
-      throw new Error("injected native-identity save failure");
-    }
-    await persist.call(f.service);
-  };
-  const run = await f.service.startRun({
-    projectId: thread.projectId,
-    threadId: thread.id,
-    provider: "codex",
-    mode: "build",
-    prompt: "WRITE_NATIVE",
-  });
-  const result = await finish(f.service, run.id);
-  assert.equal(injected, true);
-  assert.equal(result.status, "failed");
-  const native = await f.nativeState();
-  assert.equal(
-    native.calls.filter((call: any) => call.method === "thread/fork").length,
-    1,
-  );
-  assert.equal(
-    native.calls.some((call: any) => call.method === "turn/start"),
-    false,
-  );
-  assert.equal(native.threads[0].cwd, f.cwd);
-  const saved = (await f.service.snapshot()).state.threads[0];
-  assert.ok(
-    saved.codex?.forkedThreadId,
-    "the unused engine-created fork remains attributable after terminal persistence",
-  );
-  await assert.rejects(
-    readFile(path.join(saved.worktreePath!, "native-change.txt")),
-    /ENOENT/,
-  );
-  internals.persist = persist;
+  const operation = await f.service.beginAccountOperation("codex", f.runtimeHome);
+  const persisted = JSON.parse(await readFile(f.stateFile, "utf8"));
+  assert.equal(persisted.accountOperation.id, operation);
+  assert.equal(persisted.accountOperation.home, f.runtimeHome);
+  await assert.rejects(f.service.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Must not start during login" }), /provider account cleanup/);
+  await assert.rejects(f.service.finishAccountOperation("stale-operation"), /marker was preserved/);
+  assert.equal((await f.service.snapshot()).state.accountOperation?.id, operation);
+  await f.service.finishAccountOperation(operation);
+  assert.equal((await f.service.snapshot()).state.accountOperation, undefined);
+  const failed = await f.service.beginAccountOperation("claude", f.runtimeHome);
+  await f.service.recordAccountRecovery("claude", f.runtimeHome);
+  await assert.rejects(f.service.finishAccountOperation(failed), /marker was preserved/);
+  assert.equal((await f.service.snapshot()).state.accountRecovery?.provider, "claude");
+  assert.deepEqual(await f.calls(), []);
 });
 
-test("shared imported context is bounded while native previews disclose retained provider context", async (t) => {
+test("an orphan Nova account lease becomes durable recovery without startup probes", async (t) => {
   const f = await fixture(t);
-  const source = await f.nativeState();
-  source.threads[0].turns = [
-    {
-      id: "bounded-turn",
-      items: Array.from({ length: 16 }, (_, index) => ({
-        type: "agentMessage",
-        id: `escaped-${index}`,
-        text: "\0".repeat(16_000),
-      })),
-    },
-  ];
-  await writeFile(f.nativeFile, JSON.stringify(source));
   const thread = await f.importThread();
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(thread.codex?.history)) <= 1_048_576,
-  );
-  assert.equal(thread.codex?.historyTruncated, true);
+  const operation = await f.service.beginAccountOperation("codex", f.runtimeHome);
+  await f.service.dispose();
+  const restarted = new WorkspaceService(f.dataDir, () => undefined);
+  try {
+    await restarted.initialize();
+    const snapshot = await restarted.snapshot();
+    assert.equal(snapshot.state.accountOperation, undefined);
+    assert.equal(snapshot.state.accountRecovery?.home, f.runtimeHome);
+    assert.ok(snapshot.providers.every((provider) => !provider.available));
+    assert.deepEqual(await f.calls(), []);
+    await assert.rejects(restarted.finishAccountOperation(operation), /marker was preserved/);
+    await assert.rejects(restarted.startRun({ projectId: thread.projectId, threadId: thread.id, provider: "claude", mode: "plan", prompt: "Must remain blocked" }), /provider account cleanup/);
+    const recovery = (await restarted.listRecoveryItems()).find((entry) => entry.id === "provider-accounts")!;
+    await assert.rejects(restarted.acknowledgeRecovery({ id: recovery.id, token: "0".repeat(64) }), /Recovery state changed/);
+    await restarted.acknowledgeRecovery({ id: recovery.id, token: recovery.token });
+    assert.equal((await restarted.snapshot()).state.accountRecovery, undefined);
+    assert.deepEqual(await f.calls(), []);
+    assert.ok((await restarted.snapshot()).providers.every((provider) => !provider.available));
+    const refreshed = await restarted.refreshProviderStatus();
+    assert.ok(refreshed.providers.find((provider) => provider.id === "codex")?.available);
+    assert.ok((await f.calls()).length > 0);
+  } finally { await restarted.dispose(); }
+});
+
+test("all providers get the same bounded imported context, never implicit native history", async (t) => {
+  const f = await fixture(t);
+  const thread = await f.importThread();
   const state = (await f.service.snapshot()).state;
-  state.threads[0].codex!.history = Array.from({ length: 200 }, (_, index) => ({
-    id: `i-${index}`,
-    turnId: `t-${index}`,
-    role: index % 2 ? ("assistant" as const) : ("user" as const),
+  state.threads[0]!.codex!.history = Array.from({ length: 200 }, (_, index) => ({
+    id: `i-${index}`, turnId: `t-${index}`, role: index % 2 ? "assistant" as const : "user" as const,
     text: `message-${index} ` + "x".repeat(16_000),
   }));
-  state.threads[0].codex!.historyTruncated = true;
-  const shared = await buildRunContext(state, thread, "Continue", f.cwd);
-  assert.ok(shared.prompt.length < 15_000);
-  assert.ok(
-    shared.warnings.some((warning) =>
-      warning.includes("12000-character budget"),
-    ),
-  );
-  assert.ok(
-    shared.warnings.some((warning) =>
-      warning.includes("snapshot is incomplete"),
-    ),
-  );
-  const native = await buildRunContext(state, thread, "Continue", f.cwd, {
-    nativeCodex: true,
-  });
-  assert.ok(
-    native.warnings.some((warning) =>
-      warning.includes("not the full native context"),
-    ),
-  );
-  assert.ok(!native.prompt.includes("importedCodexVisibleHistory"));
+  state.threads[0]!.codex!.historyTruncated = true;
+  const preview = await withoutSourceAccess([f.home, f.cwd], () => buildRunContext(state, thread, "Continue", path.join(f.dataDir, "imported-conversations", thread.id)));
+  assert.ok(preview.prompt.length < 15_000);
+  assert.match(preview.prompt, /importedCodexVisibleHistory/);
+  assert.ok(preview.warnings.some((warning) => warning.includes("12000-character budget")));
+  assert.ok(preview.warnings.some((warning) => warning.includes("snapshot is incomplete")));
+});
+
+test("compatibility inputs stay bounded and legacy workspaces retain their defaults", () => {
+  const legacy = validateWorkspaceState(emptyWorkspace());
+  assert.equal(legacy.codexRecoveryHomes, undefined);
+  assert.equal(legacy.settings.codexHome, undefined);
+  assert.throws(() => validateSettings({ ...legacy.settings, codexHome: "relative" }), /absolute/);
+  assert.throws(() => validateCodexHistoryQuery({ threadId: "--bad" }), /invalid/);
+  assert.throws(() => validateCodexResourceRequest({ section: "memories", path: "../auth.json" }), /selected section/);
+  assert.throws(() => validateCodexResourceRequest({ section: "credentials", path: "note.md" }), /allowed/);
+  assert.throws(() => validateCodexMemoryImportRequest({ projectId: "p", section: "memories", path: "note.md", expectedSha256: "wrong" }), /SHA-256/);
 });

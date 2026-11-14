@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
+  lstat,
   readFile,
   realpath,
   rename,
@@ -9,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import type {
   DiffSnapshot,
   ContextPreview,
@@ -68,13 +70,10 @@ import {
   resolveCodexHome,
 } from "./codex-installation";
 import {
-  CodexAppServerError,
-  listCodexThreads as listNativeThreads,
-  readCodexHistory as readNativeHistory,
-  publishNativeHandoff,
-  runNativeCodex,
-  type CodexServerOptions,
-} from "./codex-app-server";
+  listCodexThreads as listCopiedThreads,
+  readCodexHistory as readCopiedHistory,
+} from "./codex-readonly";
+import { ensureNovaCodexHome } from "./nova-runtime";
 import {
   createIsolatedWorktree,
   getWorkspaceDiff,
@@ -219,7 +218,8 @@ function codexThreadLink(value: unknown): CodexThreadLink | undefined {
   return {
     home: absoluteDirectory(input.home, "Codex home"),
     sourceThreadId,
-    sourceCwd: absoluteDirectory(input.sourceCwd, "Codex source directory"),
+    sourceCwd: text(input.sourceCwd, "Codex source directory", 32_768, true),
+    copyOnly: optionalBoolean(input.copyOnly, "Copy-only conversation"),
     importedAt: text(input.importedAt, "Import date", 80),
     sourceArchived: input.sourceArchived,
     forkedThreadId,
@@ -775,13 +775,20 @@ export class WorkspaceService {
         this.state.accountRecovery ??= { provider: pending.provider, home: pending.home, recordedAt: pending.startedAt };
         delete this.state.accountOperation;
       }
+      const runtimeHome = await ensureNovaCodexHome(this.dataDir, this.state.settings.codexHome);
+      if (this.state.accountRecovery?.provider === "codex" && !samePath(this.state.accountRecovery.home, runtimeHome)) {
+        // Retain the old cleanup warning, but it no longer locks an unrelated Nova runtime.
+        this.markCodexRecovery(this.state.accountRecovery.home);
+        delete this.state.accountRecovery;
+      }
+      await this.detachLegacyCodexConversations();
       this.initialized = true;
-      await this.refreshProviders();
+      await this.refreshProviders(false);
       await this.persist();
     });
   }
 
-  private async refreshProviders(): Promise<void> {
+  private async refreshProviders(probe = true): Promise<void> {
     if (this.state.accountRecovery) {
       this.providers = (["codex", "claude", "ollama"] as const).map((id) => ({
         id, name: id === "codex" ? "Codex" : id === "claude" ? "Claude Code" : "Local models",
@@ -793,7 +800,13 @@ export class WorkspaceService {
     // instead of launching duplicate metadata processes and cleanup queries.
     const [codex, claude] = await Promise.all(
       (["codex", "claude"] as const).map((provider) =>
-        probeProvider(provider, this.state.settings, this.dataDir),
+        probe
+          ? probeProvider(provider, this.state.settings, this.dataDir)
+          : resolveExecutable(provider === "codex" ? this.state.settings.codexPath : this.state.settings.claudePath)
+            .then(() => ({ id: provider, name: provider === "codex" ? "Codex" : "Claude Code", available: true,
+              detail: "Executable found. No process started; compatibility is checked on your first run." } as ProviderStatus))
+            .catch(() => ({ id: provider, name: provider === "codex" ? "Codex" : "Claude Code", available: false,
+              detail: "Select the installed CLI in Settings." } as ProviderStatus)),
       ),
     );
     const ollama: ProviderStatus = {
@@ -830,89 +843,66 @@ export class WorkspaceService {
     });
   }
 
-  private assertCodexHomeReady(home: string): void {
-    if (this.state.accountRecovery || this.state.accountOperation)
-      throw new Error("Provider account cleanup is unconfirmed. Resolve Settings → Recovery before starting Codex operations.");
-    if (this.state.codexRecoveryHomes?.some((entry) => samePath(entry, home)))
-      throw new Error(
-        "Codex history access is locked because a previous engine process could not be confirmed stopped. Inspect and stop the remaining processes before deliberately clearing the saved recovery lock; restarting Nova does not clear it.",
-      );
-  }
-
-  private assertNativeSourceIdle(home: string, threadId: string): void {
-    const owners = this.state.threads.filter(
-      (thread) =>
-        thread.codex &&
-        samePath(thread.codex.home, home) &&
-        [thread.codex.sourceThreadId, thread.codex.forkedThreadId].includes(
-          threadId,
-        ),
-    );
-    if (
-      this.state.runs.some(
-        (run) =>
-          ACTIVE.has(run.status) &&
-          owners.some((thread) => thread.id === run.threadId),
-      )
-    )
-      throw new Error(
-        "This imported conversation already has an active Nova worker. Stop it before reading, importing, or continuing its native source.",
-      );
-  }
-
   private markCodexRecovery(home: string): void {
     const homes = (this.state.codexRecoveryHomes ??= []);
     if (!homes.some((entry) => samePath(entry, home))) homes.push(home);
   }
 
-  /** Called under the mutation queue; discovery never reads credentials itself. */
-  private async codexOperation<T>(
-    action: (options: CodexServerOptions) => Promise<T>,
+  /** Explicit read-only import operation. It never starts a native engine or takes its locks. */
+  private async codexImportOperation<T>(
+    action: (options: { home: string }) => Promise<T>,
     expectedConnection?: { home: string; codexPath: string },
   ): Promise<T> {
     this.ready();
-    const settings = clone(this.state.settings);
-    const controller = new AbortController();
-    this.compatibilityControllers.add(controller);
-    let home: string | undefined;
-    try {
-      home = await resolveCodexHome(settings.codexHome);
-      this.ready();
-      if (
-        expectedConnection &&
-        (!samePath(expectedConnection.home, home) ||
-          expectedConnection.codexPath !== settings.codexPath)
-      )
-        throw new Error(
-          "The Codex connection changed while confirmation was open. Review and confirm the current installation again.",
-        );
-      this.assertCodexHomeReady(home);
-      return await action({
-        settings,
-        home,
-        cwd: this.dataDir,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (
-        home &&
-        error instanceof CodexAppServerError &&
-        error.terminationUnconfirmed
-      ) {
-        this.markCodexRecovery(home);
-        try {
-          await this.persist();
-        } catch (saveError) {
-          this.publish();
-          throw new Error(
-            "Codex engine termination could not be confirmed and its recovery lock could not be saved. Stop remaining CLI processes before reopening Nova.",
-            { cause: saveError },
-          );
-        }
+    const home = await resolveCodexHome(this.state.settings.codexHome);
+    if (expectedConnection && !samePath(expectedConnection.home, home))
+      throw new Error("The import source changed. Review and confirm the selected source again.");
+    return action({ home });
+  }
+
+  /** A copied conversation never adopts the source's recorded working folder. */
+  private async copiedConversationProject(threadId: string, title: string): Promise<Project> {
+    const base = await realpath(this.dataDir);
+    let parent = base;
+    for (const component of ["imported-conversations", identifier(threadId)]) {
+      const candidate = path.join(parent, component);
+      let metadata;
+      try { metadata = await lstat(candidate); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await mkdir(candidate, { mode: 0o700 });
+        metadata = await lstat(candidate);
       }
-      throw error;
-    } finally {
-      this.compatibilityControllers.delete(controller);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || !samePath(await realpath(candidate), candidate))
+        throw new Error("Nova's imported-conversation folder was redirected. No original Codex folder was opened.");
+      parent = candidate;
+    }
+    const existing = this.state.projects.find((project) => samePath(project.path, parent));
+    if (existing) return existing;
+    const project: Project = {
+      id: randomUUID(), name: ("Imported · " + title).slice(0, 160),
+      path: parent, branch: "", kind: "folder", createdAt: now(),
+    };
+    this.state.projects.unshift(project);
+    return project;
+  }
+
+  private async detachLegacyCodexConversations(): Promise<void> {
+    for (const thread of this.state.threads) {
+      if (!thread.codex || thread.codex.copyOnly) continue;
+      const project = await this.copiedConversationProject(thread.id, thread.title);
+      thread.projectId = project.id;
+      thread.codex.copyOnly = true;
+      thread.codex.warnings = [...thread.codex.warnings,
+        "This is now an independent Nova copy. Original Codex files and previous working folders were not moved or deleted. Native resume and write-back are disabled.",
+      ].slice(-100);
+      delete thread.worktreePath;
+      delete thread.worktreeStoragePath;
+      delete thread.branch;
+      delete thread.baseCommit;
+      // Preserve old run/check evidence, but never reuse its previous source worktree.
+      for (const run of this.state.runs) if (run.threadId === thread.id) run.projectId = project.id;
+      for (const check of this.state.verifications) if (check.threadId === thread.id) check.projectId = project.id;
     }
   }
 
@@ -923,8 +913,8 @@ export class WorkspaceService {
     this.ready();
     const query = validateCodexThreadQuery(value);
     return this.exclusive(() =>
-      this.codexOperation(
-        (options) => listNativeThreads(options, query),
+      this.codexImportOperation(
+        (options) => listCopiedThreads(options.home, query),
         expectedConnection,
       ),
     );
@@ -937,9 +927,8 @@ export class WorkspaceService {
     this.ready();
     const query = validateCodexHistoryQuery(value);
     return this.exclusive(() =>
-      this.codexOperation(async (options) => {
-        this.assertNativeSourceIdle(options.home, query.threadId);
-        return readNativeHistory(options, query);
+      this.codexImportOperation(async (options) => {
+        return readCopiedHistory(options.home, query);
       }, expectedConnection),
     );
   }
@@ -951,8 +940,7 @@ export class WorkspaceService {
     this.ready();
     const request = validateCodexImportRequest(value);
     return this.exclusive(() =>
-      this.codexOperation(async (options) => {
-        this.assertNativeSourceIdle(options.home, request.threadId);
+      this.codexImportOperation(async (options) => {
         const existing = this.state.threads.find(
           (thread) =>
             thread.codex &&
@@ -960,9 +948,7 @@ export class WorkspaceService {
             thread.codex.sourceThreadId === request.threadId,
         );
         if (existing) {
-          // Explicitly selecting the same source from Archived is a safe
-          // recovery from an external archive: choose fork semantics, never
-          // silently unarchive or duplicate the retained Nova conversation.
+          // Archive status is copied as provenance, never changed in Codex.
           if (request.archived && !existing.codex!.sourceArchived) {
             const before = {
               sourceArchived: existing.codex!.sourceArchived,
@@ -980,7 +966,7 @@ export class WorkspaceService {
           }
           return clone(existing);
         }
-        let page = await readNativeHistory(options, request);
+        let page = await readCopiedHistory(options.home, request);
         if (page.thread.id !== request.threadId)
           throw new Error(
             "The native engine returned a different conversation; nothing was imported.",
@@ -990,10 +976,7 @@ export class WorkspaceService {
             "This Codex conversation is active. Stop its current work before importing it.",
           );
         const summary = page.thread;
-        const sourceCwd = absoluteDirectory(
-          summary.cwd,
-          "Codex conversation folder",
-        );
+        const sourceCwd = text(summary.cwd, "Codex source folder", 32_768, true);
         let history: ImportedMessage[] = [];
         let bytes = 2;
         let truncated = page.truncated;
@@ -1021,7 +1004,7 @@ export class WorkspaceService {
             );
           cursors.add(page.nextCursor);
           this.ready();
-          page = await readNativeHistory(options, {
+          page = await readCopiedHistory(options.home, {
             ...request,
             cursor: page.nextCursor,
           });
@@ -1061,30 +1044,9 @@ export class WorkspaceService {
             "Import stopped at its bounded page/message budget. Use the source browser to inspect older history.",
           );
         }
-        let projectPath = sourceCwd;
-        let branch = "";
-        let kind: Project["kind"] = "folder";
-        try {
-          projectPath = await realpath(sourceCwd);
-          if (!(await stat(projectPath)).isDirectory())
-            throw new Error("Not a folder");
-          try {
-            const repository = await inspectRepository(projectPath);
-            projectPath = repository.path;
-            branch = repository.branch;
-            kind = "git";
-          } catch {
-            warnings.push(
-              "This conversation has no available committed Git baseline. It can be browsed and used in Plan; Build requires a Git project.",
-            );
-          }
-        } catch {
-          warnings.push(
-            "The recorded conversation folder is unavailable. Its retained transcript can be browsed, but Plan cannot start until that folder is available again.",
-          );
-        }
         this.ready();
         const link = codexThreadLink({
+          copyOnly: true,
           home: options.home,
           sourceThreadId: request.threadId,
           sourceCwd,
@@ -1096,23 +1058,11 @@ export class WorkspaceService {
             .slice(0, 100)
             .map((warning) => warning.slice(0, 2_000)),
         });
-        const originalProjects = this.state.projects.length;
-        let project = this.state.projects.find((entry) =>
-          samePath(entry.path, projectPath),
-        );
-        if (!project) {
-          project = {
-            id: randomUUID(),
-            name: path.basename(projectPath) || "Imported folder",
-            path: projectPath,
-            branch,
-            kind,
-            createdAt: now(),
-          };
-          this.state.projects.push(project);
-        }
+        const previousProjects = [...this.state.projects];
+        const localThreadId = randomUUID();
+        const project = await this.copiedConversationProject(localThreadId, summary.title);
         const thread: Thread = {
-          id: randomUUID(),
+          id: localThreadId,
           projectId: project.id,
           title:
             summary.title
@@ -1131,7 +1081,7 @@ export class WorkspaceService {
           this.state.threads = this.state.threads.filter(
             (entry) => entry.id !== thread.id,
           );
-          this.state.projects.splice(originalProjects);
+          this.state.projects = previousProjects;
           throw error;
         }
         return clone(thread);
@@ -1150,20 +1100,16 @@ export class WorkspaceService {
       const link = thread.codex;
       if (!link) throw new Error("This conversation has no linked native Codex history.");
       this.assertActionsIdle(thread.projectId);
-      return this.codexOperation(async (options) => {
+      return this.codexImportOperation(async (options) => {
         if (!samePath(options.home, link.home))
           throw new Error("Select the Codex home linked to this conversation before refreshing its history.");
-        const nativeId = link.forkedThreadId ?? link.sourceThreadId;
-        const nativeCwd = link.forkedCwd ?? link.sourceCwd;
-        this.assertNativeSourceIdle(options.home, nativeId);
-        // The app-server reader checks current-account catalog membership in
-        // its own connection before reading native history. Do not treat a
-        // saved thread ID as authority after the official account is switched.
-        const archived = link.forkedThreadId ? false : link.sourceArchived;
-        let page = await readNativeHistory(options, { threadId: nativeId, archived });
+        const nativeId = link.sourceThreadId;
+        // Refresh is an explicit read-only copy of the original source, never a native fork.
+        const archived = link.sourceArchived;
+        let page = await readCopiedHistory(options.home, { threadId: nativeId, archived });
         const initial = page.thread;
         const validPage = (candidate: CodexHistoryPage) => candidate.thread.id === nativeId &&
-          samePath(candidate.thread.cwd, nativeCwd) && candidate.thread.status !== "active" &&
+          candidate.thread.status !== "active" &&
           candidate.thread.updatedAt === initial.updatedAt;
         if (!validPage(page))
           throw new Error("The linked Codex conversation is active or moved. No retained history was changed.");
@@ -1199,15 +1145,17 @@ export class WorkspaceService {
             throw new Error("Codex repeated a history cursor. No retained history was changed.");
           cursors.add(page.nextCursor);
           this.ready();
-          page = await readNativeHistory(options, { threadId: nativeId, archived, cursor: page.nextCursor });
+          page = await readCopiedHistory(options.home, { threadId: nativeId, archived, cursor: page.nextCursor });
         }
         if (truncated)
           warnings.push("Refresh retained bounded recent visible history only; inspect older pages in the source library when completeness matters.");
-        warnings.push(`Refreshed visible history from native ${link.forkedThreadId ? "fork" : "source"} ${nativeId}. Nova turns and project notes were preserved; matching native turns may also appear in the retained snapshot.`);
+        warnings.push(`Copied visible history from source ${nativeId}. Nova turns and project notes were preserved. No native worker or source writes were used.`);
         const before = { codex: thread.codex, updatedAt: thread.updatedAt };
         thread.codex = codexThreadLink({
           ...link,
-          sourceArchived: link.forkedThreadId ? link.sourceArchived : archived,
+          sourceArchived: archived,
+          sourceCwd: initial.cwd,
+          copyOnly: true,
           importedAt: now(),
           history,
           historyTruncated: truncated,
@@ -1232,131 +1180,16 @@ export class WorkspaceService {
     );
   }
 
-  private async prepareCodexHandoff(
-    threadId: string,
-    expectedConnection?: { home: string; codexPath: string },
-  ) {
-    this.ready();
-    const thread = this.getThread(identifier(threadId));
-    const project = this.getProject(thread.projectId);
-    this.assertActionsIdle(project.id);
-    if (this.state.accountRecovery || this.hasTerminationIssue(project.id))
-      throw new Error("Resolve worker cleanup in Settings → Recovery before sharing this conversation.");
-    if (thread.archivedAt) throw new Error("Restore this conversation before publishing its handoff.");
-    const home = await resolveCodexHome(this.state.settings.codexHome);
-    this.assertCodexHomeReady(home);
-    if ((expectedConnection && (!samePath(expectedConnection.home, home) || expectedConnection.codexPath !== this.state.settings.codexPath)) ||
-      (thread.codex && !samePath(thread.codex.home, home)))
-      throw new Error("The Codex connection changed or differs from this conversation's linked home. Select its home and review again.");
-    const cwd = thread.worktreePath
-      ? await this.validateWorktree(thread)
-      : await this.originalThreadCwd(project, thread);
-    const referenceState = clone(this.state);
-    const referenceThread = referenceState.threads.find((entry) => entry.id === thread.id)!;
-    // Attaching an initially unlinked thread must not change the content digest
-    // merely by adding an empty native-history link after publication.
-    if (!referenceThread.codex?.history.length) delete referenceThread.codex;
-    const context = await buildRunContext(referenceState, referenceThread,
-      "Retain these visible references for the next explicit user request. This handoff is not a request to perform work. Do not begin tools or inference on its own.",
-      thread.worktreePath ? cwd : project.path);
-    const title = `Nova · ${thread.title}`.slice(0, 160);
-    const fingerprint = createHash("sha256").update(JSON.stringify([
-      thread.id, title, home, cwd, this.state.settings.codexPath, context.prompt,
-    ])).digest("hex");
-    const receipt = thread.codexHandoff;
-    const unchanged = Boolean(receipt?.state === "published" && receipt.fingerprint === fingerprint &&
-      samePath(receipt.home, home) && samePath(receipt.cwd, cwd));
-    return { threadId: thread.id, title, cwd, home, fingerprint, characters: context.characters,
-      warnings: context.warnings, unchanged, prompt: context.prompt };
-  }
-
-  async reviewCodexHandoff(threadId: string, expectedConnection?: { home: string; codexPath: string }) {
-    return this.exclusive(async () => {
-      const { prompt: _prompt, ...review } = await this.prepareCodexHandoff(threadId, expectedConnection);
-      return review;
-    });
+  async reviewCodexHandoff(_threadId: string, _expectedConnection?: { home: string; codexPath: string }): Promise<never> {
+    throw new Error("OEM Codex is import-only. Publishing native handoffs is disabled; export a copy instead.");
   }
 
   async publishCodexHandoff(
-    threadId: string,
-    expectedFingerprint: string,
-    expectedConnection?: { home: string; codexPath: string },
+    _threadId: string,
+    _expectedFingerprint: string,
+    _expectedConnection?: { home: string; codexPath: string },
   ): Promise<CodexHandoffResult> {
-    return this.exclusive(async () => {
-      const prepared = await this.prepareCodexHandoff(threadId, expectedConnection);
-      if (prepared.fingerprint !== expectedFingerprint)
-        throw new Error("The conversation, memory, or connection changed while confirmation was open. Review its handoff again.");
-      const thread = this.getThread(prepared.threadId);
-      return this.codexOperation(async (options) => {
-        if (!samePath(options.home, prepared.home)) throw new Error("The Codex home changed. Review the handoff again.");
-        const makeResult = (warnings: string[], unchanged: boolean): CodexHandoffResult => ({
-          threadId: thread.id,
-          nativeThreadId: thread.codexHandoff!.nativeThreadId,
-          title: prepared.title,
-          createdAt: thread.codexHandoff!.createdAt,
-          warnings: [...new Set([...prepared.warnings, ...warnings])],
-          unchanged,
-        });
-        if (prepared.unchanged) {
-          // A different login can share the same home: don't report an old
-          // account's receipt as an accessible current-account conversation.
-          const page = await readNativeHistory(options, { threadId: thread.codexHandoff!.nativeThreadId });
-          if (!samePath(page.thread.cwd, prepared.cwd))
-            throw new Error("The published native conversation moved. Review it in the Codex library before continuing.");
-          return makeResult(["The same handoff is already published and is visible to the current Codex account. No duplicate or model turn was created."], true);
-        }
-        const previousLink = clone(thread.codex);
-        const previousUpdatedAt = thread.updatedAt;
-        let createdId: string | undefined;
-        try {
-          const result = await publishNativeHandoff({ ...options, cwd: prepared.cwd,
-            title: prepared.title, text: prepared.prompt,
-            sourceThreadId: previousLink?.forkedThreadId ?? previousLink?.sourceThreadId,
-            sourceArchived: Boolean(previousLink?.sourceArchived && !previousLink.forkedThreadId),
-            onThreadCreated: async (id) => {
-              createdId = identifier(id, "Native handoff thread");
-              thread.codexHandoff = {
-                nativeThreadId: createdId, home: prepared.home, cwd: prepared.cwd,
-                fingerprint: prepared.fingerprint, createdAt: now(), state: "pending",
-              };
-              await this.persist();
-            },
-          });
-          if (result.nativeThreadId !== createdId) throw new Error("Codex returned a mismatched handoff ID.");
-          thread.codexHandoff!.state = "published";
-          // Subsequent Codex work in THIS Nova conversation continues the
-          // engine-created handoff. Claude/local still use visible references.
-          thread.codex = previousLink ? {
-            ...previousLink, forkedThreadId: result.nativeThreadId, forkedCwd: prepared.cwd,
-          } : {
-            home: prepared.home, sourceThreadId: result.nativeThreadId, sourceCwd: prepared.cwd,
-            importedAt: now(), sourceArchived: false, history: [], historyTruncated: false,
-            warnings: [...result.warnings],
-          };
-          thread.updatedAt = now();
-          await this.persist();
-          return makeResult(result.warnings, false);
-        } catch (error) {
-          thread.codex = previousLink;
-          thread.updatedAt = previousUpdatedAt;
-          if (createdId && thread.codexHandoff) {
-            thread.codexHandoff.state = "failed";
-            try { await this.persist(); }
-            catch {
-              this.markCodexRecovery(prepared.home);
-              this.publish();
-              throw new Error(`A native handoff may exist as ${createdId}, but its local receipt could not be saved. Stop remaining Codex processes and inspect that ID in the official app before retrying.`, { cause: error });
-            }
-          }
-          // Preserve typed cleanup failures so codexOperation records its
-          // durable home lock. The receipt itself contains no credentials.
-          if (error instanceof CodexAppServerError && error.terminationUnconfirmed) throw error;
-          if (createdId)
-            throw new Error(`Native conversation ${createdId} was created, but publishing its context did not finish. The original conversation is unchanged. Inspect the retained native ID before creating another handoff.`, { cause: error });
-          throw error;
-        }
-      }, expectedConnection);
-    });
+    throw new Error("OEM Codex is import-only. Publishing native handoffs is disabled; export a copy instead.");
   }
 
   async previewCodexResource(
@@ -1441,7 +1274,7 @@ export class WorkspaceService {
     this.ready();
     return this.exclusive(async () => {
       const repository = await inspectRepository(
-        text(inputPath, "Project path", 32_768),
+        await this.independentPath(text(inputPath, "Project path", 32_768)),
       );
       const existing = this.state.projects.find((project) =>
         process.platform === "win32"
@@ -1570,7 +1403,6 @@ export class WorkspaceService {
       // Linked memory paths belong to the checkout, not a native thread's
       // possibly nested execution directory. Keep those two roots separate.
       usesOriginalCheckout ? project.path : cwd,
-      { nativeCodex: request.provider === "codex" && Boolean(thread?.codex) },
     );
     if (project.kind === "folder" && request.mode === "build")
       preview.warnings.unshift(
@@ -1650,11 +1482,11 @@ export class WorkspaceService {
     if (!thread.worktreePath || !thread.branch || !thread.baseCommit)
       throw new Error("Thread has no isolated worktree.");
     const expected = path.join(
-      await realpath(thread.worktreeStoragePath || this.dataDir),
+      await this.independentPath(thread.worktreeStoragePath || this.dataDir),
       "worktrees",
       thread.id,
     );
-    const actual = await realpath(thread.worktreePath);
+    const actual = await this.independentPath(thread.worktreePath);
     if (actual !== expected)
       throw new Error("Worktree path changed. No agent was started.");
     const repository = await inspectRepository(actual);
@@ -1668,12 +1500,9 @@ export class WorkspaceService {
   async getProjectPath(id: string): Promise<string> {
     this.ready();
     const project = this.getProject(id);
+    const independent = await this.independentPath(project.path);
     if (project.kind === "folder") {
-      const actual = await realpath(project.path).catch(() => {
-        throw new Error(
-          "The conversation folder is unavailable. Restore its recorded location before starting Plan.",
-        );
-      });
+      const actual = independent;
       if (
         !samePath(actual, project.path) ||
         !(await stat(actual)).isDirectory()
@@ -1683,7 +1512,7 @@ export class WorkspaceService {
         );
       return actual;
     }
-    const repository = await inspectRepository(project.path);
+    const repository = await inspectRepository(independent);
     if (repository.path !== project.path)
       throw new Error(
         "The selected repository path changed. Open the project again.",
@@ -1691,31 +1520,45 @@ export class WorkspaceService {
     return repository.path;
   }
 
+  /** Validate only the selected operation target, never scan or open an OEM source. */
+  private assertIndependentPath(candidate: string): void {
+    const roots = [
+      path.join(os.homedir(), ".codex"),
+      process.env.CODEX_HOME,
+      this.state.settings.codexHome,
+      ...this.state.threads.map((thread) => thread.codex?.home),
+    ].filter((root): root is string => Boolean(root && path.isAbsolute(root)));
+    const normalized = path.resolve(candidate);
+    const inside = (root: string) => {
+      const left = process.platform === "win32" ? root.toLowerCase() : root;
+      const right = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+      const relative = path.relative(path.resolve(left), right);
+      return !relative || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    };
+    if (roots.some(inside))
+      throw new Error("Codex source folders are import-only. Choose a separate project or Nova worktree-storage folder; no engine or project action was started.");
+  }
+
+  private async independentPath(input: string, allowMissing = false): Promise<string> {
+    const candidate = absoluteDirectory(input, "Nova working folder");
+    this.assertIndependentPath(candidate);
+    let actual: string;
+    try { actual = await realpath(candidate); }
+    catch (error) {
+      if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(candidate) === candidate)
+        throw error;
+      actual = path.join(await this.independentPath(path.dirname(candidate), true), path.basename(candidate));
+    }
+    this.assertIndependentPath(actual);
+    return actual;
+  }
+
   private async originalThreadCwd(
     project: Project,
-    thread?: Thread,
+    _thread?: Thread,
   ): Promise<string> {
-    const root = await this.getProjectPath(project.id);
-    if (!thread?.codex) return root;
-    const source = thread.codex.forkedCwd || thread.codex.sourceCwd;
-    const actual = await realpath(source).catch(() => {
-      throw new Error(
-        "The imported conversation's working folder is unavailable. Its transcript remains saved; restore the original folder before continuing.",
-      );
-    });
-    const relative = path.relative(root, actual);
-    if (
-      !(await stat(actual)).isDirectory() ||
-      relative === ".." ||
-      relative.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(relative) ||
-      (project.kind === "folder" && relative !== "")
-    )
-      throw new Error(
-        "The imported conversation folder no longer belongs to the selected project. No native session was repointed.",
-      );
-    // Preserve the source's own path spelling/junction path on native resume.
-    return source;
+    // sourceCwd/forkedCwd are provenance only, never execution targets.
+    return this.getProjectPath(project.id);
   }
 
   async getWorktreePath(runId: string): Promise<string> {
@@ -1892,7 +1735,7 @@ export class WorkspaceService {
         this.state.threads.some((thread) => thread.id === run.threadId && thread.codex && samePath(thread.codex.home, home)));
       items.push({
         id: `codex-home-${digest(home)}`, kind: "codex-home", label: home,
-        detail: "A Codex history engine could not be confirmed stopped. Stop remaining Codex processes for this home before acknowledging. No process is killed automatically.",
+        detail: "A previous Nova version left an unconfirmed Codex worker. This is a retained cleanup warning, not a lock on import or Nova’s separate runtime. Check that old worker before acknowledging; Nova will not start another worker against this source or kill an OEM process.",
         token: digest([home, this.state.codexRecoveryAcknowledgements?.filter((entry) => samePath(entry.home, home)), nativeRuns.map((run) => [run.id, run.finishedAt])]),
       });
     }
@@ -1919,7 +1762,7 @@ export class WorkspaceService {
     return this.exclusive(async () => {
       this.ready();
       if (provider !== "codex" && provider !== "claude") throw new Error("Invalid account provider.");
-      if (this.state.accountOperation || this.recoveryItems().length || this.active.size || this.activeVerifications.size || this.compatibilityControllers.size)
+      if (this.state.accountOperation || this.recoveryItems().some((item) => item.kind !== "codex-home") || this.active.size || this.activeVerifications.size || this.compatibilityControllers.size)
         throw new Error("Finish active work and resolve recovery before starting an account process.");
       const id = randomUUID();
       this.state.accountOperation = { id, provider, home: absoluteDirectory(home, "Account home"), startedAt: now() };
@@ -2016,7 +1859,7 @@ export class WorkspaceService {
 
   async startRun(
     value: RunRequest,
-    expectedNativeConnection?: { home: string; codexPath: string },
+    _expectedNativeConnection?: { home: string; codexPath: string },
   ): Promise<Run> {
     this.ready();
     const request = validateRunRequest(value);
@@ -2033,9 +1876,15 @@ export class WorkspaceService {
         throw new Error(
           "Build is locked because a previous worker's termination could not be confirmed. Inspect and stop remaining CLI processes, then acknowledge cleanup in Settings → Recovery.",
         );
-      const providerStatus = this.providers.find(
+      let providerStatus = this.providers.find(
         (provider) => provider.id === request.provider,
       );
+      if (providerStatus?.available && !providerStatus.version) {
+        // Startup is process-free. Probe required safety flags only on an
+        // explicit run (or explicit detection refresh), and cache that result.
+        providerStatus = await probeProvider(request.provider, this.state.settings, this.dataDir);
+        this.providers = this.providers.map((provider) => provider.id === request.provider ? providerStatus! : provider);
+      }
       if (!providerStatus?.available)
         throw new Error(
           providerStatus?.detail ||
@@ -2050,17 +1899,6 @@ export class WorkspaceService {
         throw new Error(
           "Restore this archived thread before starting another run.",
         );
-      if (thread?.codex) {
-        this.assertNativeSourceIdle(
-          thread.codex.home,
-          thread.codex.sourceThreadId,
-        );
-        if (thread.codex.forkedThreadId)
-          this.assertNativeSourceIdle(
-            thread.codex.home,
-            thread.codex.forkedThreadId,
-          );
-      }
       if (
         this.projectHasCheck(project.id) &&
         (request.mode === "build" ||
@@ -2108,37 +1946,18 @@ export class WorkspaceService {
           ? this.state.settings.claudePath
           : this.state.settings.codexPath,
       );
+      const projectPath = await this.getProjectPath(project.id);
       const source =
         project.kind === "folder"
           ? undefined
-          : await inspectRepository(project.path);
+          : await inspectRepository(projectPath);
       if (source && source.path !== project.path)
         throw new Error(
           "The selected repository path changed. Open the project again.",
         );
       if (source) project.branch = source.branch;
-      const nativeLink =
-        request.provider === "codex" ? thread.codex : undefined;
-      let nativeHome: string | undefined;
-      if (nativeLink) {
-        nativeHome = await resolveCodexHome(nativeLink.home);
-        if (!samePath(nativeHome, nativeLink.home))
-          throw new Error(
-            "The linked Codex home moved or changed. Reconfirm the installation before continuing.",
-          );
-        if (
-          expectedNativeConnection &&
-          (!samePath(expectedNativeConnection.home, nativeHome) ||
-            expectedNativeConnection.codexPath !==
-              this.state.settings.codexPath)
-        )
-          throw new Error(
-            "The native Codex connection changed while confirmation was open. Review and confirm it again.",
-          );
-        this.assertCodexHomeReady(nativeHome);
-      }
       if (request.mode === "build" && !thread.worktreePath) {
-        const storage = this.state.settings.worktreeStoragePath || this.dataDir;
+        const storage = await this.independentPath(this.state.settings.worktreeStoragePath || this.dataDir, true);
         await mkdir(storage, { recursive: true, mode: 0o700 });
         const canonicalStorage = await realpath(storage);
         Object.assign(
@@ -2154,25 +1973,13 @@ export class WorkspaceService {
       const cwd = thread.worktreePath
         ? await this.validateWorktree(thread)
         : await this.originalThreadCwd(project, thread);
-      const nativeThreadId =
-        nativeLink?.forkedThreadId || nativeLink?.sourceThreadId;
-      const forkNative = Boolean(
-        nativeLink &&
-          ((nativeLink.sourceArchived && !nativeLink.forkedThreadId) ||
-            !samePath(nativeLink.forkedCwd || nativeLink.sourceCwd, cwd)),
-      );
-      const workerHome =
-        nativeHome ||
-        (request.provider !== "claude" && this.state.settings.codexHome
-          ? await resolveCodexHome(this.state.settings.codexHome)
-          : undefined);
+      const workerHome = await ensureNovaCodexHome(this.dataDir, this.state.settings.codexHome);
       this.ready(); // Shutdown may have started during Git / provider preparation.
       const context = await buildRunContext(
         this.state,
         thread,
         request.prompt,
         thread.worktreePath ? cwd : project.path,
-        { nativeCodex: Boolean(nativeLink) },
       );
       this.ready();
       const run: Run = {
@@ -2265,55 +2072,13 @@ export class WorkspaceService {
             : undefined;
           let result: Awaited<ReturnType<typeof runProvider>>;
           try {
-            result =
-            nativeLink && nativeHome && nativeThreadId
-              ? await runNativeCodex({
-                  settings,
-                  home: nativeHome,
-                  cwd,
-                  mode: request.mode,
-                  model,
-                  threadId: nativeThreadId,
-                  fork: forkNative,
-                  sourceArchived: nativeLink.sourceArchived && !nativeLink.forkedThreadId,
-                  prompt: context.prompt,
-                  signal: controller.signal,
-                  timeoutMs: settings.timeoutMinutes * 60_000,
-                  maxBytes: settings.maxOutputKb * 1024,
-                  onEvent: receiveEvent,
-                  onThreadReady: async (nativeId) => {
-                    const validatedId = identifier(
-                      nativeId,
-                      "Codex native thread",
-                    );
-                    await this.exclusive(async () => {
-                      if (forkNative) {
-                        if (
-                          validatedId === nativeThreadId ||
-                          validatedId === nativeLink.sourceThreadId
-                        )
-                          throw new Error(
-                            "Codex did not create a distinct fork. The original conversation was not continued in the worktree.",
-                          );
-                        nativeLink.forkedThreadId = validatedId;
-                        nativeLink.forkedCwd = cwd;
-                      } else if (validatedId !== nativeThreadId)
-                        throw new Error(
-                          "Codex resumed a different native conversation.",
-                        );
-                      run.providerSessionId = validatedId;
-                      // The engine waits for this durable callback before turn/start.
-                      await this.persist();
-                    });
-                  },
-                })
-              : await runProvider({
+            result = await runProvider({
                   command: {
                     ...executable,
                     env: {
                       ...executable.env,
                       ...local?.env,
-                      ...(workerHome ? { CODEX_HOME: workerHome } : {}),
+                      CODEX_HOME: workerHome,
                     },
                     args: providerArguments(
                       request.provider,
@@ -2347,8 +2112,6 @@ export class WorkspaceService {
                   ? "failed"
                   : "completed";
             run.terminationUnconfirmed = result.terminationUnconfirmed;
-            if (result.terminationUnconfirmed && nativeHome)
-              this.markCodexRecovery(nativeHome);
             run.finishedAt = now();
             if (persistenceFailure || result.error) {
               run.error = (persistenceFailure || result.error)?.slice(
@@ -2369,14 +2132,6 @@ export class WorkspaceService {
         })
         .catch(async (error) => {
           await this.exclusive(async () => {
-            if (
-              nativeHome &&
-              error instanceof CodexAppServerError &&
-              error.terminationUnconfirmed
-            ) {
-              this.markCodexRecovery(nativeHome);
-              run.terminationUnconfirmed = true;
-            }
             run.status = persistenceFailure
               ? "failed"
               : controller.signal.aborted
@@ -2755,6 +2510,7 @@ export class WorkspaceService {
           const result = await runVerificationCommand({
             profile,
             cwd,
+            codexHome: await ensureNovaCodexHome(this.dataDir, this.state.settings.codexHome),
             signal: controller.signal,
             maxBytes,
             onOutput,

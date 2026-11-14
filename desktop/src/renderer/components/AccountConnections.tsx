@@ -108,7 +108,7 @@ export function AccountConnections({ hidden, disabledReason, onBusyChange }: {
 
   return <section className="account-connections" hidden={hidden} aria-label="Provider accounts">
     <h3>Provider accounts</h3>
-    <p className="panel-intro">Use your existing sign-in or connect through the official tool. A detected executable is not proof that an account is signed in.</p>
+    <p className="panel-intro">Sign in to Codex once for Nova’s separate runtime, or use your Claude Code account. A detected executable is not proof that an account is signed in.</p>
     <div className="account-list">
       {(["codex", "claude"] as const).map((provider) => {
         const account = accounts[provider];
@@ -132,7 +132,7 @@ export function AccountConnections({ hidden, disabledReason, onBusyChange }: {
       {loginActive(login) && pollPaused && <button type="button" className="secondary-button" onClick={() => setPollRevision((value) => value + 1)} disabled={pending !== null}><RefreshCw size={13} />Check sign-in progress</button>}
     </div>}
     {error && <p className="form-error" role="alert">{error}</p>}
-    <p className="field-hint">Codex uses the selected Codex home, including its existing official-app sign-in. Claude Code keeps its own account. Neither credential store is copied or shared with local models. Nova does not sign the official apps out.</p>
+    <p className="field-hint">Codex sign-in is stored by the official CLI in Nova’s app-owned runtime home, not the OEM Codex folder. Claude Code keeps its own account. Credentials are never copied from import sources or shared with local models. Nova does not sign the OEM Codex app out.</p>
     {isPreview && <p className="panel-note">Synthetic account controls. This preview cannot launch sign-in, inspect credentials, or contact a provider.</p>}
   </section>;
 }

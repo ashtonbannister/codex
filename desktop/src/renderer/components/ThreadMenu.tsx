@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil, RefreshCw, Share2 } from "lucide-react";
+import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil, RefreshCw } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { Thread } from "../../shared/types";
 
@@ -12,7 +12,6 @@ export function ThreadMenu({
   onExport,
   exporting,
   onRefreshCodex,
-  onPublishCodex,
   sharing,
 }: {
   thread: Thread;
@@ -24,7 +23,6 @@ export function ThreadMenu({
   onExport: () => void;
   exporting: boolean;
   onRefreshCodex: () => void;
-  onPublishCodex: () => void;
   sharing: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -93,11 +91,8 @@ export function ThreadMenu({
         Export as Markdown…
       </button>
       {thread.codex && <button role="menuitem" onClick={onRefreshCodex} disabled={sharing}>
-        <RefreshCw size={14} />Refresh from Codex
+        <RefreshCw size={14} />Copy latest from Codex
       </button>}
-      <button role="menuitem" onClick={onPublishCodex} disabled={sharing}>
-        <Share2 size={14} />Publish handoff to Codex…
-      </button>
     </div>
   );
 }

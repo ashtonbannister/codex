@@ -219,10 +219,8 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
       publish();
       return structuredClone(thread);
     },
-    async publishCodexHandoff(threadId) {
-      const thread = state.threads.find((item) => item.id === threadId);
-      if (!thread) throw new Error("Select a preview conversation first.");
-      return { threadId, nativeThreadId: "synthetic-native-handoff", title: `${thread.title} · Nova handoff`, createdAt: new Date().toISOString(), unchanged: false, warnings: ["Synthetic handoff only. No native thread or model turn was created."] };
+    async publishCodexHandoff() {
+      throw new Error("Codex sources are import-only. Native handoff publishing is disabled; export a copy instead.");
     },
     async chooseExecutable(provider) {
       return `C:\\Example runtimes (synthetic)\\${provider}.exe`;

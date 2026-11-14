@@ -1,5 +1,15 @@
 # Nova Workbench: product and implementation plan
 
+**v0.5.4 boundary update:** the historical v0.3/v0.5 shared OEM-home, native
+resume/fork, and native handoff-publication design below is superseded. Current
+Nova workers/sign-in use a private runtime; OEM folders are explicit read-only
+import sources, never live working state. Imports create independent bounded
+copies in Nova-owned folders, without startup reads, watchers, source workers,
+or writeback. Refer to [the current compatibility contract](docs/codex-compatibility.md)
+and [feature coverage](docs/feature-coverage.md), not historical milestones, for
+implemented behavior. Legacy cleanup uncertainty is retained, not killed or
+automatically cleared. v0.5.3 navigation and no-project model controls remain.
+
 ## Goal
 
 Build a Windows-first engineering workspace in which Codex, Claude Code, and local coding models can work on the same projects, retain useful shared knowledge, and produce changes that can be independently checked.
@@ -226,7 +236,7 @@ Keep model/version, task revision, tool versions, hardware, and verification cri
 
 1. Validate version 0.4.0's local connection, Git action, recovery, export, and draft workflows alongside the existing installation/history integration in Linux and Windows CI; inspect rendered review evidence.
 2. Run Windows-native live-provider smoke tests with each intended CLI, starting with a disposable Git repository and Plan mode. Connect the user's actual Codex history only after native confirmation.
-3. Exercise native resume/fork, archived-source preservation, folder-only Plan, explicit Claude/local handoffs, configured local protocols, source freshness, worktree storage settings, checks, reviewed commit/integration, deliberate recovery, export, and restart before using important projects.
+3. Exercise explicit read-only conversation copies, archived-source preservation, independent-folder Plan, bounded handoffs to every provider, configured local protocols, explicit reference re-import, worktree storage settings, checks, reviewed commit/integration, deliberate recovery, export, and restart before using important projects. Observe OEM Codex responsiveness with the packaged update; do not substitute synthetic tests for that measurement.
 4. Establish repeatable project-specific verification profiles and a baseline task suite, including external dependency/version records.
 5. Expand shared-memory retrieval into incremental repository indexing and explicit context budgets.
 6. Add parallel delegation, routing, and a coordinated multi-agent integration queue only after the preceding boundaries are measured and reliable.

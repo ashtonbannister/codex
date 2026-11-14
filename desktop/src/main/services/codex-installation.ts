@@ -71,229 +71,57 @@ type Locations = {
   localAppData?: string;
 };
 
-/** Metadata-only inventory. No database, credential, browser-storage, or config contents are read. */
+/** Explicit import inventory only. No OEM app folders, runtime state, or packages are scanned. */
 export async function inspectCodexInstallation(
   input?: string,
-  locations: Locations = {},
+  _locations: Locations = {},
 ): Promise<CodexInstallation> {
   const candidate = candidateHome(input);
   let home = candidate;
   let exists = false;
   const warnings: string[] = [];
-  try {
-    home = await resolveCodexHome(candidate);
-    exists = true;
-  } catch {
-    warnings.push(
-      "No readable Codex home found. Select the existing installation in Settings.",
-    );
-  }
-  const profile =
-    locations.userProfile || process.env.USERPROFILE || os.homedir();
-  const documents = locations.documents || path.join(profile, "Documents");
-  const appData =
-    locations.appData ||
-    process.env.APPDATA ||
-    path.join(profile, "AppData", "Roaming");
-  const localAppData =
-    locations.localAppData ||
-    process.env.LOCALAPPDATA ||
-    path.join(profile, "AppData", "Local");
-  const entries: Array<Omit<CodexLocation, "exists" | "resolvedPath">> = [];
-  const add = (
-    id: string,
-    name: string,
-    file: string,
-    access: CodexLocation["access"],
-    detail: string,
-  ) => entries.push({ id, name, path: file, access, detail });
-  add(
-    "home",
-    "Codex home",
-    candidate,
-    "engine-managed",
-    "Existing engine state. Nova does not copy or migrate the entire directory.",
-  );
-  add(
-    "outputs",
-    "Projectless outputs",
-    path.join(documents, "Codex"),
-    "engine-managed",
-    "Location resolved from the Windows Documents folder. Open linked conversations to use their working folders.",
-  );
-  add(
-    "runtimes",
-    "Runtime dependencies",
-    path.join(profile, ".cache", "codex-runtimes"),
-    "engine-managed",
-    "Installed runtime and cache ownership stays with Codex.",
-  );
-  add(
-    "agent-plugins",
-    "Agent plugins",
-    path.join(profile, ".agents", "plugins"),
-    "engine-managed",
-    "Not automatically enabled, copied, or executed.",
-  );
-  add(
-    "web",
-    "App web data",
-    path.join(appData, "Codex", "web"),
-    "excluded",
-    "Browser storage is not imported or shared with providers.",
-  );
-  add(
-    "app-logs",
-    "App logs",
-    path.join(localAppData, "Codex", "Logs"),
-    "engine-managed",
-    "Log contents are not scanned or uploaded.",
-  );
-  const content: Array<[string, string]> = [
+  try { home = await resolveCodexHome(candidate); exists = true; }
+  catch { warnings.push("No readable Codex import source found. Select an existing source folder in Settings."); }
+  const locations: CodexLocation[] = [];
+  const sources: Array<[string, string]> = [
+    ["sessions", "Conversations"],
+    ["archived_sessions", "Archived conversations"],
     ["memories", "Memory notes"],
     ["memories_v2", "Memory v2 notes"],
-    ["skills", "Skills"],
+    ["skills", "Skill reference text"],
     ["plans", "Saved plans"],
+    ...[...INSTRUCTIONS].map((file): [string, string] => [file, file]),
   ];
-  for (const [folder, name] of content)
-    add(
-      folder,
-      name,
-      path.join(home, folder),
-      "content",
-      "Selected Markdown can be previewed and explicitly imported as shared project reference text.",
-    );
-  for (const file of INSTRUCTIONS)
-    add(
-      file,
-      file,
-      path.join(home, file),
-      "content",
-      "Previewable reference text; importing does not automatically grant permissions or run a skill.",
-    );
-  for (const folder of [
-    "sessions",
-    "archived_sessions",
-    "worktrees",
-    "visualizations",
-    "attachments",
-    "generated_images",
-    "automations",
-    "plugins",
-    "rules",
-    "bin",
-    "vendor_imports",
-    "process_manager",
-    "state",
-    "sqlite",
-    "rollout-migrations",
-    "project-metadata-locks",
-    "thread-writer-locks",
-    "cache",
-    "tmp",
-    ".tmp",
-  ])
-    add(
-      folder,
-      folder.replaceAll("_", " "),
-      path.join(home, folder),
-      "engine-managed",
-      folder.includes("sessions")
-        ? "Conversation history is accessed through the installed Codex engine, never by editing its records."
-        : "Owned by the installed engine. No automatic migration, deletion, or cross-provider execution.",
-    );
-  for (const file of [
-    "config.toml",
-    "thread_history_1.sqlite",
-    "state_5.sqlite",
-    "goals_1.sqlite",
-    "queue_1.sqlite",
-    "logs_2.sqlite",
-    "memories_1.sqlite",
-    "memories_v2_1.sqlite",
-    "session_index.jsonl",
-    ".codex-global-state.json",
-    "models_cache.json",
-    "models_cache.codex_work_desktop.json",
-  ])
-    add(
-      file,
-      file,
-      path.join(home, file),
-      "engine-managed",
-      "Version-specific engine state; database sidecars and locks are left untouched.",
-    );
-  for (const folder of [
-    "auth.json",
-    ".credentials.json",
-    "browser",
-    "computer-use",
-    ".sandbox-secrets",
-    ".sandbox",
-    ".sandbox-bin",
-    ".hook-trust",
-    "cap_sid",
-    "installation_id",
-    "chrome-native-hosts-v2.json",
-    "dictation-history",
-    "transcription-history.jsonl",
-    "realtime-voice-continuity.json",
-    "node_repl",
-    "shell_snapshots",
-    "pets",
-    ".chatgpt-projects",
-    "ambient-suggestions",
-    "code-review-plugin",
-  ])
-    add(
-      folder,
-      folder,
-      path.join(home, folder),
-      "excluded",
-      "Not a shared-context source. Credential, browser, runtime, and app-private contents are never read by this importer.",
-    );
-  const packages = path.join(localAppData, "Packages");
-  try {
-    const names = (await readdir(packages))
-      .filter((name) => /^OpenAI\.Codex(?:_|PrimaryRuntime\.)/.test(name))
-      .sort();
-    for (const name of names.slice(0, 64))
-      add(
-        `package-${name}`,
-        name,
-        path.join(packages, name),
-        "excluded",
-        "Windows-managed package data; no browser storage or package contents are imported.",
-      );
-    if (names.length > 64)
-      warnings.push(
-        "Only the first 64 matching Windows package locations are shown.",
-      );
-  } catch {
-    /* The Windows Packages folder may not exist on this platform. */
+  for (const [id, name] of sources) {
+    const file = path.join(home, id);
+    const entry: CodexLocation = {
+      id, name, path: file, exists: false, access: "content",
+      detail: id.includes("sessions")
+        ? "Read-only supported JSONL snapshots. No engine, database, migration, or source lock is opened."
+        : "Read-only selected Markdown reference; copying never enables or executes a skill.",
+    };
+    if (exists) {
+      try {
+        if ((await lstat(file)).isSymbolicLink()) throw new Error("Linked source");
+        const resolved = await realpath(file);
+        if (!within(home, resolved)) throw new Error("Source outside import root");
+        await stat(resolved);
+        entry.exists = true;
+        entry.resolvedPath = resolved;
+      } catch { /* Missing, linked, and unavailable sources remain uninspected. */ }
+    }
+    locations.push(entry);
   }
-  const found: CodexLocation[] = [];
-  for (let offset = 0; offset < entries.length; offset += 8) {
-    found.push(
-      ...(await Promise.all(
-        entries.slice(offset, offset + 8).map(async (entry) => {
-          try {
-            const resolvedPath = await realpath(entry.path);
-            await stat(resolvedPath);
-            return { ...entry, exists: true, resolvedPath };
-          } catch {
-            return { ...entry, exists: false };
-          }
-        }),
-      )),
-    );
+  // These rows describe exclusions without stat/open/read calls on those paths.
+  for (const id of ["auth.json", "config.toml", "sqlite", "state", "worktrees", "browser", "process_manager"]) {
+    locations.push({
+      id, name: id, path: path.join(home, id), exists: false, access: "excluded",
+      detail: "Not inspected or used. Nova has separate runtime state and credentials; only selected conversations and reference text are copied.",
+    });
   }
-  warnings.push(
-    "Folder presence is not a feature or schema guarantee. The installed Codex engine owns history, migrations, queues, and authentication.",
-  );
-  return { home, exists, locations: found, warnings };
+  warnings.push("Import-only source. Nova does not run Codex here, share its credentials, manage its working folders, or write to its state.");
+  return { home, exists, locations, warnings };
 }
-
 function section(value: unknown): CodexResourceSection {
   if (
     typeof value !== "string" ||

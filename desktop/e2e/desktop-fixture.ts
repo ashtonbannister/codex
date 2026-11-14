@@ -35,6 +35,7 @@ export interface FixtureCalls {
   checks: VerificationRequest[];
   checkCancellations: string[];
   libraryQueries: CodexThreadQuery[];
+  installationReads: number;
   historyQueries: CodexHistoryQuery[];
   imports: CodexImportRequest[];
   resourceImports: CodexMemoryImportRequest[];
@@ -224,6 +225,7 @@ export async function installFakeDesktopBridge(
         checks: [],
         checkCancellations: [],
         libraryQueries: [],
+        installationReads: 0,
         historyQueries: [],
         imports: [],
         resourceImports: [],
@@ -388,11 +390,8 @@ export async function installFakeDesktopBridge(
           publish();
           return structuredClone(thread);
         },
-        async publishCodexHandoff(threadId) {
-          calls.nativePublishes.push(threadId);
-          const thread = state.threads.find((item) => item.id === threadId);
-          if (!thread) throw new Error("Fixture thread not found.");
-          return { threadId, nativeThreadId: "fixture-native-handoff", title: `${thread.title} · Nova handoff`, createdAt: new Date().toISOString(), unchanged: calls.nativePublishes.length > 1, warnings: ["Visible context only. Native transcript rendering may vary."] };
+        async publishCodexHandoff() {
+          throw new Error("Codex sources are import-only. Native handoff publishing is disabled.");
         },
         async chooseExecutable(provider) {
           calls.executablePicks.push(provider);
@@ -429,6 +428,7 @@ export async function installFakeDesktopBridge(
           return exportCancelled ? { saved: false } : { saved: true, path: "D:\\Fixtures\\conversation.md" };
         },
         async inspectCodexInstallation() {
+          calls.installationReads++;
           return {
             home: state.settings.codexHome || codexHome,
             exists: true,
@@ -447,9 +447,9 @@ export async function installFakeDesktopBridge(
                 name: "Conversations",
                 path: `${codexHome}\\sessions`,
                 exists: true,
-                access: "engine-managed",
+                access: "content",
                 detail:
-                  "Normal installed Codex engine startup can manage its state; no model call is made for reads.",
+                  "Read-only source for visible conversation copies. No engine is started.",
               },
               {
                 id: "auth",
@@ -527,13 +527,12 @@ export async function installFakeDesktopBridge(
             (item) => item.codex?.sourceThreadId === source.id,
           );
           if (existing) return structuredClone(existing);
-          const folder = source.id === "fixture-codex-folder";
-          const projectId = folder ? "fixture-folder-project" : "test-project";
-          if (folder && !state.projects.some((item) => item.id === projectId))
+          const projectId = `fixture-import-${source.id}`;
+          if (!state.projects.some((item) => item.id === projectId))
             state.projects.push({
               id: projectId,
-              name: "Fixture notes folder",
-              path: source.cwd,
+              name: "Imported fixture conversation",
+              path: `D:\\Fixtures\\Nova imports\\${source.id}`,
               branch: "",
               kind: "folder",
               createdAt: "2026-11-12T00:00:00Z",
@@ -629,7 +628,7 @@ export async function installFakeDesktopBridge(
               name: "Chosen fixture project",
               path: "D:\\Fixtures\\chosen-project",
               branch: "main",
-              createdAt: now,
+              createdAt: "2026-11-12T00:00:00Z",
             });
             publish();
           }

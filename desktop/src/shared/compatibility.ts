@@ -45,6 +45,8 @@ export interface CodexHistoryPage {
 }
 
 export interface CodexThreadLink {
+  /** Imported visible snapshot only. Never a native session-resume target. */
+  copyOnly?: boolean;
   home: string;
   sourceThreadId: string;
   sourceCwd: string;

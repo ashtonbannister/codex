@@ -35,6 +35,7 @@ import {
 const fakeCli = `
 if(process.argv.includes('--version')){console.log('fake-cli 1');process.exit(0)}
 if(process.argv.includes('--help')){console.log('--json --sandbox --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools');process.exit(0)}
+if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture-1',configRequirements:{requirements:null}}));process.exit(0)}
 let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',value=>input+=value);
 process.stdin.on('end',()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
 `;
@@ -356,7 +357,7 @@ test("context preview is exactly the prompt launched, with honest persisted esti
   assert.deepEqual(run.contextMemoryIds, preview.includedMemoryIds);
   assert.ok(
     preview.warnings.some((warning) =>
-      warning.includes("not been freshness-checked"),
+      warning.includes("not been checked against their original sources"),
     ),
   );
 });

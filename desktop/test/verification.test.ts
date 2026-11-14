@@ -15,6 +15,7 @@ import path from "node:path";
 import test from "node:test";
 import type { VerificationProfile } from "../src/shared/types";
 import { captureRevisionSnapshot } from "../src/main/services/revision";
+import { ensureNovaCodexHome } from "../src/main/services/nova-runtime";
 import {
   CleanupFailure,
   classifyWindowsInventoryFailure,
@@ -475,6 +476,7 @@ for (const runner of ["verification", "provider"] as const) {
       let stopFile: string | undefined;
       t.after(() => stopFixture(stopFile));
       const { root, repo } = await fixture(t);
+      const codexHome = await ensureNovaCodexHome(path.join(root, "nova-state"));
       const entry = path.join(root, "ignored-stdio-leader.cjs");
       const marker = path.join(root, "background-writes.txt");
       stopFile = path.join(root, "stop-descendant");
@@ -482,7 +484,7 @@ for (const runner of ["verification", "provider"] as const) {
       const background = `const fs=require('node:fs');process.on('SIGTERM',()=>{});let writes=0;setInterval(()=>{if(fs.existsSync(${JSON.stringify(stopFile)})||!fs.existsSync(${JSON.stringify(root)}))process.exit(0);fs.appendFileSync(${JSON.stringify(marker)},'write\\n');if(++writes===3)process.send(process.pid);},20);setTimeout(()=>process.exit(0),30000).unref();`;
       await writeFile(
         entry,
-        `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(background)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{c.disconnect();process.stdout.write('READY:'+pid+'\\n'+JSON.stringify({type:'turn.completed'})+'\\n',()=>{${cancel ? "" : "process.exit(0);"}});});setInterval(()=>{},1000);`,
+        `if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture',configRequirements:{requirements:null}}));process.exit(0)}const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(background)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{c.disconnect();process.stdout.write('READY:'+pid+'\\n'+JSON.stringify({type:'turn.completed'})+'\\n',()=>{${cancel ? "" : "process.exit(0);"}});});setInterval(()=>{},1000);`,
       );
       const controller = new AbortController();
       let log = "";
@@ -501,12 +503,13 @@ for (const runner of ["verification", "provider"] as const) {
           ? await runVerificationCommand({
               profile: profile(entry),
               cwd: repo,
+              codexHome,
               signal: controller.signal,
               maxBytes: 4096,
               onOutput: observe,
             })
           : await runProvider({
-              command: { command: process.execPath, prefix: [entry], args: [] },
+              command: { command: process.execPath, prefix: [entry], args: [], env: { CODEX_HOME: codexHome } },
               provider: "codex",
               cwd: repo,
               prompt: "",
