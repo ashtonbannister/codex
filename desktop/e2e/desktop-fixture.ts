@@ -80,11 +80,12 @@ export async function installFakeDesktopBridge(
     extraThreads?: number;
     libraryFailure?: string;
     finishing?: boolean;
+    noProjects?: boolean;
   } = {},
 ) {
   const initial = emptyWorkspace();
   const now = "2026-11-12T00:00:00Z";
-  initial.projects.push({
+  if (!options.noProjects) initial.projects.push({
     id: "test-project",
     name: "Fixture repository",
     path: "D:\\Fixtures\\repository",
@@ -622,6 +623,16 @@ export async function installFakeDesktopBridge(
           return snapshot();
         },
         async chooseProject() {
+          if (!state.projects.length) {
+            state.projects.push({
+              id: "chosen-project",
+              name: "Chosen fixture project",
+              path: "D:\\Fixtures\\chosen-project",
+              branch: "main",
+              createdAt: now,
+            });
+            publish();
+          }
           return state.projects[0];
         },
         async updateThread(input: ThreadUpdate) {

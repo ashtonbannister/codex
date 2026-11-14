@@ -17,8 +17,8 @@ const sections: { id: Section; label: string }[] = [
 ];
 const backendNames = { ollama: "Ollama", lmstudio: "LM Studio", custom: "Custom endpoint" };
 
-export function SettingsForm({ settings, providers, workActive = false, onClose, onSaved }: {
-  settings: Settings; providers: ProviderStatus[]; workActive?: boolean; onClose: () => void; onSaved: () => Promise<void>;
+export function SettingsForm({ settings, providers, workActive = false, initialSection = "general", onClose, onSaved }: {
+  settings: Settings; providers: ProviderStatus[]; workActive?: boolean; initialSection?: Section; onClose: () => void; onSaved: () => Promise<void>;
 }) {
   const [values, setValues] = useState<Settings>(() => ({
     ...settings,
@@ -26,7 +26,7 @@ export function SettingsForm({ settings, providers, workActive = false, onClose,
     localBaseUrl: settings.localBaseUrl ?? LOCAL_DEFAULTS[settings.localProvider ?? "ollama"].baseUrl,
     localProtocol: settings.localProtocol ?? LOCAL_DEFAULTS[settings.localProvider ?? "ollama"].protocol,
   }));
-  const [section, setSection] = useState<Section>("general");
+  const [section, setSection] = useState<Section>(initialSection);
   const [saving, setSaving] = useState(false);
   const [choosing, setChoosing] = useState<string | null>(null);
   const [error, setError] = useState("");

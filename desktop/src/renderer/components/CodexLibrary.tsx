@@ -51,6 +51,8 @@ export function CodexLibrary({
   onOpenThread,
   onMemory,
   onSettings,
+  onRecovery,
+  onOpenProject,
   onBack,
 }: {
   projects: Project[];
@@ -60,6 +62,8 @@ export function CodexLibrary({
   onOpenThread: (thread: Thread) => Promise<void>;
   onMemory: (projectId: string) => void;
   onSettings: () => void;
+  onRecovery: () => void;
+  onOpenProject: () => void;
   onBack: () => void;
 }) {
   const [tab, setTab] = useState<LibraryTab>(
@@ -349,6 +353,12 @@ export function CodexLibrary({
           Workspace
         </button>
       </header>
+      {!projects.length && (
+        <div className="library-start-note">
+          <span>Want to work with another agent? Choose Codex, Claude Code, or a local model above, then open a project to start chatting. Codex Library access is separate.</span>
+          <button className="secondary-button" onClick={onOpenProject}>Open a project</button>
+        </div>
+      )}
       <div className="library-source-bar">
         <Folder size={14} />
         <code title={installation?.home}>
@@ -478,9 +488,12 @@ export function CodexLibrary({
             </div>
             <Warnings warnings={threads?.warnings ?? []} />
             {threadsError && (
-              <p className="form-error" role="alert">
-                {threadsError}
-              </p>
+              <div className="library-error-block">
+                <p className="form-error" role="alert">{threadsError}</p>
+                {/history access is locked|cleanup is unconfirmed/i.test(threadsError) && (
+                  <button className="secondary-button" onClick={onRecovery}>Open Settings → Recovery</button>
+                )}
+              </div>
             )}
             <div className="library-items">
               {threads?.threads.map((item) => (

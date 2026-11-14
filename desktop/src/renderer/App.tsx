@@ -114,6 +114,7 @@ export function App() {
   const [layout, setLayout] = useWorkspaceLayout();
   const [archived, setArchived] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [settingsSection, setSettingsSection] = useState<"general" | "storage" | "recovery">("general");
   const [editingMemory, setEditingMemory] = useState<MemoryEntry | undefined>();
   const [editingThread, setEditingThread] = useState<Thread | undefined>();
   const [threadMenu, setThreadMenu] = useState<{
@@ -345,6 +346,10 @@ export function App() {
     setArchived(!!next.archivedAt);
   };
   const newThread = () => {
+    if (!project) {
+      void addProject();
+      return;
+    }
     setSurface("workspace");
     setThreadId(null);
     setArchived(false);
@@ -391,6 +396,10 @@ export function App() {
   };
   const changeProvider = (value: ProviderId) => {
     composerDraft.update({ provider: value, model: "" });
+  };
+  const openSettings = (section: "general" | "storage" | "recovery" = "general") => {
+    setSettingsSection(section);
+    setDialog("settings");
   };
   const exportThread = async (id: string) => {
     if (exporting) return;
@@ -472,7 +481,7 @@ export function App() {
                 <button
                   className="new-thread-button"
                   onClick={newThread}
-                  disabled={!project}
+                  title={project ? "Start a new conversation" : "Open a project to start a conversation"}
                 >
                   <SquarePen size={16} />
                   <span>New thread</span>
@@ -650,7 +659,7 @@ export function App() {
                 </div>
                 <button
                   className="settings-button"
-                  onClick={() => setDialog("settings")}
+                  onClick={() => openSettings()}
                 >
                   <Settings2 size={16} />
                   <span>Settings</span>
@@ -707,6 +716,22 @@ export function App() {
                   : (thread?.title ?? "New thread")}
               </strong>
             </div>
+            {surface === "library" && (
+              <div className="library-agent-controls" role="group" aria-label="Next conversation agent and model">
+                <label>
+                  <span>Agent</span>
+                  <select aria-label="Choose agent" value={provider} onChange={(event) => changeProvider(event.target.value as ProviderId)}>
+                    <option value="codex">Codex</option>
+                    <option value="claude">Claude Code</option>
+                    <option value="ollama">{localLabel}</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Model</span>
+                  <input aria-label="Model override" title="Optional model ID; empty uses the agent default" placeholder="Provider default" value={model} maxLength={256} onChange={(event) => setModel(event.target.value)} />
+                </label>
+              </div>
+            )}
             {surface === "workspace" && (
               <div className="toolbar-actions">
                 {thread && <button className="icon-button" aria-label="Export conversation as Markdown" title="Export conversation as Markdown" disabled={exporting} onClick={() => void exportThread(thread.id)}>{exporting ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}</button>}
@@ -788,7 +813,9 @@ export function App() {
                 selectProject(id);
                 showPanel("memory");
               }}
-              onSettings={() => setDialog("settings")}
+              onSettings={() => openSettings("storage")}
+              onRecovery={() => openSettings("recovery")}
+              onOpenProject={() => void addProject()}
               onBack={() => setSurface("workspace")}
             />
           ) : (
@@ -1440,7 +1467,8 @@ export function App() {
           settings={state.settings}
           providers={providers}
           workActive={workActive}
-          onClose={() => setDialog(null)}
+          initialSection={settingsSection}
+          onClose={() => { setDialog(null); void refreshSnapshot(); }}
           onSaved={refreshSnapshot}
         />
       )}
@@ -1470,7 +1498,7 @@ export function App() {
             setLibraryResource(undefined);
             setSurface("library");
           }}
-          onSettings={() => setDialog("settings")}
+          onSettings={() => openSettings()}
           onClose={() => setDialog(null)}
         />
       )}

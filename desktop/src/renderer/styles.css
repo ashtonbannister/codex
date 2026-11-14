@@ -328,6 +328,29 @@ kbd {
 .library-inline-error {
   margin: 0 24px 12px;
 }
+.library-start-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 24px;
+  border-block: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.library-start-note .secondary-button {
+  flex-shrink: 0;
+}
+.library-error-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.library-error-block .form-error {
+  margin: 0;
+}
 .library-tabs {
   display: flex;
   flex-shrink: 0;
@@ -1068,6 +1091,36 @@ kbd {
   display: flex;
   align-items: center;
   gap: 3px;
+}
+.library-agent-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.library-agent-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.library-agent-controls select,
+.library-agent-controls input {
+  height: 28px;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 11px;
+}
+.library-agent-controls select {
+  max-width: 160px;
+}
+.library-agent-controls input {
+  width: 154px;
 }
 .branch-label {
   display: flex;
@@ -2877,6 +2930,15 @@ kbd {
   }
 }
 @media (max-width: 1100px) {
+  .library-agent-controls label > span {
+    display: none;
+  }
+  .library-agent-controls input {
+    width: 120px;
+  }
+  .library-start-note {
+    padding-inline: 18px;
+  }
   .inspector {
     position: absolute;
     right: 0;

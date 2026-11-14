@@ -29,6 +29,24 @@ const chooseTheme = async (page: Page, theme: "dark" | "light") => {
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 };
 
+test("locked Codex history still allows agent selection, project opening, and Recovery navigation", async ({ page }) => {
+  await installFakeDesktopBridge(page, {
+    noProjects: true,
+    libraryFailure: "Codex history access is locked because a previous engine process could not be confirmed stopped.",
+  });
+  await page.goto("/");
+  await openLibrary(page);
+  await expect(page.getByRole("alert")).toContainText("history access is locked");
+  await page.getByRole("combobox", { name: "Choose agent" }).selectOption("claude");
+  await page.getByRole("textbox", { name: "Model override" }).fill("fixture-claude-model");
+  await page.getByRole("button", { name: "Open Settings → Recovery" }).click();
+  await expect(page.getByRole("tab", { name: "Recovery" })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Open a project", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Choose agent" })).toHaveValue("claude");
+  await expect(page.getByRole("textbox", { name: "Model override" })).toHaveValue("fixture-claude-model");
+});
+
 test("Codex library is inline, discoverable, and distinguishes excluded locations", async ({
   page,
 }) => {

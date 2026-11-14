@@ -29,7 +29,7 @@ function readDrafts(): Drafts {
     if (!value || typeof value !== "object" || !("version" in value) || value.version !== 1 || !("drafts" in value) || !value.drafts || typeof value.drafts !== "object") return {};
     const valid: Drafts = {};
     for (const [key, item] of Object.entries(value.drafts)) {
-      if (!/^(thread|project):.{1,200}$/.test(key) || !item || typeof item !== "object") continue;
+      if (!(key === "global:new" || /^(thread|project):.{1,200}$/.test(key)) || !item || typeof item !== "object") continue;
       const entry = item as Partial<ComposerDraft>;
       if (typeof entry.text !== "string" || typeof entry.model !== "string" || !["codex", "claude", "ollama"].includes(entry.provider ?? "") || !["plan", "build"].includes(entry.mode ?? "") || typeof entry.updatedAt !== "number" || !Number.isFinite(entry.updatedAt)) continue;
       valid[key] = { text: entry.text.slice(0, 32_000), model: entry.model.slice(0, 256), provider: entry.provider!, mode: entry.mode!, updatedAt: entry.updatedAt };
@@ -40,7 +40,8 @@ function readDrafts(): Drafts {
 
 /** Drafts stay on this device. Derive by key during render, never load a previous thread's text in an effect. */
 export function useComposerDraft(projectId: string | null, threadId: string | null) {
-  const key = threadId ? `thread:${threadId}` : projectId ? `project:${projectId}:new` : null;
+  // Agent/model selection must work even before any project has been opened.
+  const key = threadId ? `thread:${threadId}` : projectId ? `project:${projectId}:new` : "global:new";
   const [drafts, setDrafts] = useState<Drafts>(readDrafts);
   const [storageWarning, setStorageWarning] = useState("");
   const currentKey = useRef(key);
@@ -53,10 +54,15 @@ export function useComposerDraft(projectId: string | null, threadId: string | nu
       setStorageWarning("Draft storage is unavailable. Keep this window open to retain unsent text.");
     }
   }, [drafts]);
+  const initial = (current: Drafts): ComposerDraft => {
+    const global = current["global:new"];
+    return projectId && !threadId && global
+      ? { ...EMPTY, provider: global.provider, model: global.model, mode: global.mode }
+      : EMPTY;
+  };
   const update = (patch: Partial<Omit<ComposerDraft, "updatedAt">>) => {
-    if (!key) return;
     setDrafts((current) => {
-      const next = { ...(current[key] ?? EMPTY), ...patch, updatedAt: Date.now() };
+      const next = { ...(current[key] ?? initial(current)), ...patch, updatedAt: Date.now() };
       next.text = next.text.slice(0, 32_000);
       next.model = next.model.slice(0, 256);
       return bounded({ ...current, [key]: next });
@@ -74,5 +80,5 @@ export function useComposerDraft(projectId: string | null, threadId: string | nu
       return bounded(next);
     });
   };
-  return { key, currentKey, draft: (key ? drafts[key] : undefined) ?? EMPTY, update, clearSubmitted, storageWarning };
+  return { key, currentKey, draft: drafts[key] ?? initial(drafts), update, clearSubmitted, storageWarning };
 }
