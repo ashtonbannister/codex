@@ -62,7 +62,7 @@ test("installed Codex controls a disposable Windows app through local-model MCP"
   const settings = { ...DEFAULT_SETTINGS, localProvider: "custom" as const, localProtocol: "chat-completions" as const, localBaseUrl: `http://127.0.0.1:${address.port}/v1`, localModel: "fixture-model" };
   const local = await prepareLocalProvider(settings, "fixture-model", controller.signal); t.after(local.dispose);
   const home = await ensureNovaCodexHome(root); const executable = await resolveExecutable("codex");
-  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home, NOVA_DESKTOP_TOKEN: desktop.token }, args: providerArguments("ollama", root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, desktopMcpUrl: desktop.url }) }, provider: "ollama", cwd: root, prompt: "Use desktop control on the test window.", signal: controller.signal, timeoutMs: 75000, maxBytes: 1024 * 1024, allowDesktopImages: true, onEvent: () => {} });
+  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home, NOVA_DESKTOP_TOKEN: desktop.token }, args: providerArguments("ollama", root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, desktopMcpUrl: desktop.url }) }, provider: "ollama", cwd: root, prompt: "Use desktop control on the test window.", signal: controller.signal, timeoutMs: 75000, maxBytes: 64 * 1024, allowDesktopImages: true, onEvent: () => {} });
   assert.equal(result.error, undefined);
   assert.equal(result.completed, true);
   assert.ok(observation && selector, `No inspected button; calls=${count}, approvals=${approvals}, results=${JSON.stringify(results)}`);

@@ -375,7 +375,7 @@ test("desktop control is opt-in for one run", async ({ page }) => {
   const requests = await page.evaluate(() => (window as unknown as { __workbenchTest: { requests: RunRequest[] } }).__workbenchTest.requests);
   expect(requests[0]?.desktopControl).toBe(true);
   await page.getByRole("combobox", { name: "Choose agent" }).selectOption("claude");
-  await expect(control).toBeDisabled();
+  await expect(control).toBeEnabled();
 });
 
 test("discovered local models can be selected from the composer", async ({ page }) => {

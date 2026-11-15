@@ -36,7 +36,7 @@ export type ProviderId = "codex" | "claude" | "ollama";
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
-export const APP_VERSION = "0.5.6";
+export const APP_VERSION = "0.5.7";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -181,6 +181,7 @@ export interface ProviderStatus {
   available: boolean;
   version?: string;
   supportsPartialMessages?: boolean;
+  supportsDesktopMcp?: boolean;
   detail: string;
 }
 

@@ -433,7 +433,6 @@ export function App() {
   };
   const changeProvider = (value: ProviderId) => {
     composerDraft.update({ provider: value, model: "", reasoningEffort: undefined });
-    if (value === "claude") setDesktopControl(false);
   };
   const openSettings = (section: "general" | "storage" | "recovery" = "general") => {
     setSettingsSection(section);
@@ -1074,7 +1073,7 @@ export function App() {
                       {reasoningEffort && !availableEfforts.includes(reasoningEffort) && <option value={reasoningEffort}>{reasoningEffort} (not listed for this model)</option>}
                       {availableEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                     </select>
-                    <label title={provider === "claude" ? "Desktop control is not yet available with Claude’s isolated CLI mode" : "Allow this run to request window observations and actions; each request requires approval"}><input type="checkbox" disabled={provider === "claude"} checked={desktopControl} onChange={(event) => setDesktopControl(event.target.checked)} /> Desktop</label>
+                    <label title="Allow this run to request window observations and actions; each request requires approval"><input type="checkbox" checked={desktopControl} onChange={(event) => setDesktopControl(event.target.checked)} /> Desktop</label>
                     {provider === "codex" && codexModelsError && <span role="alert" title={codexModelsError}>Model list unavailable: {codexModelsError} Refresh to retry.</span>}
                     <div className="composer-right">
                       <div

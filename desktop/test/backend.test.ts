@@ -21,6 +21,7 @@ import { buildRunContext } from "../src/main/services/context";
 import { normalizeProviderLine } from "../src/main/services/provider-events";
 import {
   providerArguments,
+  claudeDesktopImageBytes,
   resolveExecutable,
   runProvider,
 } from "../src/main/services/providers";
@@ -259,10 +260,6 @@ test("run request validation rejects unknown providers, shell-like models, and o
   );
 });
 
-test("desktop control cannot bypass Claude's isolated worker", () => {
-  assert.throws(() => validateRunRequest({ projectId: "p", provider: "claude", mode: "plan", prompt: "Test", desktopControl: true }), /not yet available/);
-});
-
 test("provider argument lists never use bypasses or shell interpolation", () => {
   const cwd = "C:\\Projects\\a & b";
   const codex = providerArguments("codex", cwd, "plan", "gpt-test");
@@ -294,6 +291,15 @@ test("provider argument lists never use bypasses or shell interpolation", () => 
   const codexDesktop = providerArguments("codex", cwd, "plan", "", { desktopMcpUrl: desktopUrl });
   assert.ok(codexDesktop.includes(`mcp_servers.nova_desktop.url="${desktopUrl}"`));
   assert.ok(codexDesktop.includes('mcp_servers.nova_desktop.bearer_token_env_var="NOVA_DESKTOP_TOKEN"'));
+  const claudeDesktop = providerArguments("claude", cwd, "plan", "", { desktopMcpUrl: desktopUrl });
+  assert.ok(claudeDesktop.includes("--restricted"));
+  assert.ok(claudeDesktop.includes("--strict-mcp-config"));
+  assert.ok(claudeDesktop.includes("--disable-slash-commands"));
+  assert.equal(claudeDesktop[claudeDesktop.indexOf("--setting-sources") + 1], "");
+  assert.equal(claudeDesktop[claudeDesktop.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.equal(claudeDesktop[claudeDesktop.indexOf("--tools") + 1], "Read,Grep,Glob");
+  assert.ok(claudeDesktop.includes("mcp__nova_desktop__desktop"));
+  assert.ok(claudeDesktop[claudeDesktop.indexOf("--mcp-config") + 1]!.includes("${NOVA_DESKTOP_TOKEN}"));
   const claude = providerArguments("claude", cwd, "build", "");
   assert.ok(claude.includes("--safe-mode"));
   assert.ok(claude.includes("--restricted"));
@@ -613,6 +619,17 @@ test("protocol failure and output overflow are recorded as failures", async (t) 
   const result = await terminal(service, overflow.id);
   assert.equal(result.status, "failed");
   assert.match(result.error!, /output exceeded/i);
+});
+
+test("Claude image accounting only excludes matched desktop screenshot results", () => {
+  const pending = new Set<string>();
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+  assert.equal(claudeDesktopImageBytes(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "one", name: "mcp__nova_desktop__desktop", input: { action: "screenshot" } }] } }), pending), 0);
+  assert.equal(claudeDesktopImageBytes(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "other", content: [image] }] }, tool_use_result: [image] }), pending), 0);
+  assert.equal(claudeDesktopImageBytes(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "one", content: [image] }] }, tool_use_result: [image] }), pending), 8);
+  assert.equal(pending.size, 0);
+  claudeDesktopImageBytes(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "two", name: "mcp__nova_desktop__desktop", input: { action: "inspect" } }] } }), pending);
+  assert.equal(pending.size, 0);
 });
 
 test("desktop image payloads are separately bounded without exempting other tool output", async (t) => {

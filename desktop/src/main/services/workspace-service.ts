@@ -1960,6 +1960,10 @@ export class WorkspaceService {
           providerStatus?.detail ||
             "Provider unavailable. Save Settings to refresh CLI detection.",
         );
+      if (request.provider === "claude" && request.desktopControl && !providerStatus.supportsDesktopMcp)
+        throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for desktop control.");
+      if (request.provider === "claude" && request.desktopControl && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? ""))
+        throw new Error("Claude Code safe mode is enforced by the current environment and disables desktop MCP. Remove that setting only if you intend to allow desktop control.");
       let thread = request.threadId
         ? this.state.threads.find((entry) => entry.id === request.threadId)
         : undefined;

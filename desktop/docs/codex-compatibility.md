@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.6
+# Codex import and runtime boundaries — v0.5.7
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 
@@ -46,7 +46,7 @@ The Context inspector shows bounded reference selection and omissions. Every pro
 
 ## Desktop control
 
-The Desktop checkbox enables a private, authenticated MCP server for one Codex or local-agent run. Every window listing, selection, observation, screenshot and action asks for user approval. The backend uses Microsoft's separately licensed Windows automation CLI, bundled in Windows builds. It requires a recently listed window, a fresh inspection for element actions, and a stable window identity; protected targets are refused. Window contents and captures may be sent to the selected provider after approval. This is not the proprietary OpenAI desktop-use runtime, and it does not provide general plugin or MCP administration. Claude's current safe-mode worker cannot load the selected server and rejects this combination explicitly. Local screenshots require a vision-capable server and model.
+The Desktop checkbox enables a private, authenticated MCP server for one Codex, compatible Claude Code, or local-agent run. Every window listing, selection, observation, screenshot and action asks for user approval. The backend uses Microsoft's separately licensed Windows automation CLI, bundled in Windows builds. It requires a recently listed window, a fresh inspection for element actions, and a stable window identity; protected targets are refused. Window contents and captures may be sent to the selected provider after approval. This is not the proprietary OpenAI desktop-use runtime, and it does not provide general plugin or MCP administration. Claude desktop-enabled runs use the CLI's restricted mode with user/project setting sources, hooks, slash commands and inherited MCP servers disabled. Its Plan worker exposes only read-only built-in tools; the desktop server separately requires approval. Nova checks the installed version and required flags. Normal Claude runs retain safe mode. Local screenshots require a vision-capable server and model.
 
 ## Skill packages
 

@@ -185,8 +185,6 @@ export function validateRunRequest(
     throw new Error("Claude Code does not support that thinking strength.");
   if (input.desktopControl !== undefined && typeof input.desktopControl !== "boolean")
     throw new Error("Invalid desktop-control setting.");
-  if (input.desktopControl === true && input.provider === "claude")
-    throw new Error("Desktop control is not yet available with Claude Code’s restricted safe-mode integration. Choose Codex or a local agent for desktop control.");
   if (input.mode !== "plan" && input.mode !== "build")
     throw new Error("Choose Plan or Build mode.");
   return {
