@@ -13,7 +13,7 @@ const blockedTitles = /(?:sign[ -]?in|log[ -]?in|password|credential|security|au
 
 type Json = Record<string, unknown>;
 type Runner = (args: string[], signal: AbortSignal) => Promise<string>;
-export type DesktopApproval = (request: { action: string; target?: string; detail: string }) => Promise<boolean>;
+export type DesktopApproval = (request: { action: string; target?: string; targetIdentity?: WindowIdentity; detail: string }) => Promise<boolean>;
 export type DesktopRequest =
   | { action: "list" }
   | { action: "select"; hwnd: number }
@@ -25,7 +25,7 @@ export type DesktopRequest =
   | { action: "scroll"; observation: string; selector: string; direction: "up" | "down" | "left" | "right" }
   | { action: "key"; observation: string; selector: string; key: "enter" | "tab" | "escape" | "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown" | "backspace" | "delete" };
 export type DesktopResult = { text: string; image?: { data: string; mimeType: "image/png" } };
-type WindowIdentity = { hwnd: number; processId: number; processName: string; windowTitle: string };
+export type WindowIdentity = { hwnd: number; processId: number; processName: string; windowTitle: string };
 
 function record(value: unknown): Json {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid desktop control request.");
@@ -44,6 +44,19 @@ function identity(value: unknown, expected: number): WindowIdentity {
   if (!processName || processName.toLowerCase() === "unknown" || !result.windowTitle || blockedProcesses.test(processName) || blockedTitles.test(result.windowTitle)) throw new Error("Desktop control is not available for this protected window.");
   return { hwnd: expected, processId: Number(result.processId), processName, windowTitle: result.windowTitle };
 }
+/** A process creation timestamp prevents saved permissions following a recycled PID/window handle. */
+export async function windowsProcessStartTime(pid: number): Promise<string | undefined> {
+  if (process.platform !== "win32" || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  const root = process.env.SystemRoot; if (!root || !path.isAbsolute(root)) return undefined;
+  const executable = path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  try {
+    const info = await lstat(executable); if (!info.isFile() || info.isSymbolicLink() || (await realpath(executable)).toLowerCase() !== path.resolve(executable).toLowerCase()) return undefined;
+    const script = `$ErrorActionPreference='Stop'; (Get-Process -Id ${pid}).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`;
+    const { stdout } = await exec(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 5000, maxBuffer: 4096 });
+    const value = stdout.trim(); return /^\d{12,24}$/.test(value) ? value : undefined;
+  } catch { return undefined; }
+}
+
 function sameWindow(a: WindowIdentity, b: WindowIdentity): boolean {
   return a.hwnd === b.hwnd && a.processId === b.processId && a.processName === b.processName && a.windowTitle === b.windowTitle;
 }
@@ -88,7 +101,7 @@ export function windowsAutomationRunner(executable: string, cache: string): Runn
   };
 }
 
-/** Per-run window selection and fresh-observation discipline. No action is auto-approved. */
+/** Per-run window selection and fresh-observation discipline. */
 export class DesktopControlSession {
   private target?: WindowIdentity;
   private observation?: { id: string; selectors: Set<string> };
@@ -108,7 +121,7 @@ export class DesktopControlSession {
   }
   private async confirm(action: string, target: WindowIdentity | undefined, detail: string, signal: AbortSignal): Promise<void> {
     if (this.closed || signal.aborted) throw new Error("Desktop control session is closed.");
-    if (!(await this.approve({ action, target: target ? `${target.windowTitle} (${target.processName}, PID ${target.processId})` : undefined, detail })))
+    if (!(await this.approve({ action, target: target ? `${target.windowTitle} (${target.processName}, PID ${target.processId}, HWND ${target.hwnd})` : undefined, targetIdentity: target, detail })))
       throw new Error("Desktop action was declined.");
     if (this.closed || signal.aborted) throw new Error("Desktop control session is closed.");
   }
@@ -134,7 +147,7 @@ export class DesktopControlSession {
         const hwnd = input.hwnd;
         if (!Number.isSafeInteger(hwnd) || Number(hwnd) <= 0 || !this.windows?.handles.has(Number(hwnd)) || Date.now() - this.windows.observedAt > 60_000) throw new Error("Choose a window handle from a recent window list.");
         const before = await this.status(Number(hwnd), signal);
-        await this.confirm("Select window", before, "Allow this run to request observations and actions in this window. Each request requires approval.", signal);
+        await this.confirm("Select window", before, "Allow this run to request observations and actions in this window. Requests require approval unless the identical action was allowed for this chat.", signal);
         const after = await this.status(Number(hwnd), signal);
         if (!sameWindow(before, after)) throw new Error("The selected window changed; select it again.");
         this.target = after;

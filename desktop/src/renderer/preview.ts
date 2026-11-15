@@ -262,6 +262,7 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
     },
     async acknowledgeRecovery() { recoveryAcknowledged = true; },
     async exportConversation() { return { saved: false }; },
+    async clearThreadPermissions() {},
     async deleteThread(id) {
       if (!window.confirm("Delete this synthetic preview thread?")) return false;
       state.threads = state.threads.filter((item) => item.id !== id);

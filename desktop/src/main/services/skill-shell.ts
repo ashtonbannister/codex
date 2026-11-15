@@ -5,6 +5,8 @@ import path from "node:path";
 import { disconnectChild, resolveExecutable, terminateTree, trackOwnedProcess } from "./providers";
 import { McpProcessError } from "./mcp-stdio";
 import type { PluginApproval } from "./plugin-mcp";
+import { verifiedPermissionFileDigest } from "./verified-permission-file";
+import { stablePermissionText } from "./thread-permissions";
 import { renderPluginCommand } from "./plugin-commands";
 import { renderExplicitSkill, type SelectedSkill } from "./skill-selection";
 
@@ -28,22 +30,24 @@ export async function renderSkillWithShell(selected: SelectedSkill, project: str
   const executable = await resolveExecutable(shellName, process.platform, process.env.PATH ?? "");
   const shellInfo = await lstat(executable.command); const directoryInfo = await lstat(project);
   if (!shellInfo.isFile() || shellInfo.isSymbolicLink() || !directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error("The skill shell or working directory is unavailable.");
+  const shellDigest = await verifiedPermissionFileDigest({ path: executable.command, dev: shellInfo.dev, ino: shellInfo.ino, size: shellInfo.size, mtimeMs: shellInfo.mtimeMs }).catch(() => undefined);
+  const environmentNames = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "LANG"];
+  const hostEnvironment: NodeJS.ProcessEnv = Object.fromEntries(environmentNames.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
   const detail = JSON.stringify({ skill: selected.name, source: selected.package, shell: executable.command, workingDirectory: project, commands: commands.map((item) => item.script), note: "These commands run under your user account, outside the agent sandbox, and can change files or access the network. Output is separately reviewed before sharing with the provider." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
   if (detail.length > 32000) throw new Error("Skill commands are too large to review.");
-  signal.throwIfAborted(); if (!await approve({ action: "skill-shell", title: "Run these skill commands?", detail })) throw new Error("Skill command execution was declined.");
+  signal.throwIfAborted(); if (!await approve({ action: "skill-shell", title: "Run these skill commands?", detail, ...(selected.packageId && selected.packageFingerprint && shellDigest ? { scope: { kind: "skill-shell", source: selected.source, packageId: selected.packageId, fingerprint: selected.packageFingerprint, shell: executable.command, shellDigest, project, data: stablePermissionText(selected.data, { package: selected.root }), hostEnvironment, commands: commands.map((item) => stablePermissionText(item.script, { package: selected.root })) } } : {}) })) throw new Error("Skill command execution was declined.");
   for (const command of commands) {
     signal.throwIfAborted(); await verify();
     const now = await lstat(executable.command), cwd = await lstat(project);
     if (!now.isFile() || now.isSymbolicLink() || now.dev !== shellInfo.dev || now.ino !== shellInfo.ino || now.size !== shellInfo.size || now.mtimeMs !== shellInfo.mtimeMs || !cwd.isDirectory() || cwd.isSymbolicLink() || cwd.dev !== directoryInfo.dev || cwd.ino !== directoryInfo.ino) throw new Error("The reviewed shell or working directory changed.");
-    const output = await capture(executable.command, executable.prefix, shellName, command.script, project, selected, signal);
+    const output = await capture(executable.command, executable.prefix, shellName, command.script, project, selected, hostEnvironment, signal);
     if (!rendered.content.includes(command.marker)) throw new Error("Skill command placeholder changed.");
     rendered.content = rendered.content.replace(command.marker, () => output);
   }
   await verify(); return rendered;
 }
-async function capture(executable: string, prefix: string[], shell: "bash" | "powershell", script: string, cwd: string, selected: SelectedSkill, signal: AbortSignal): Promise<string> {
-  const names = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "LANG"];
-  const env: NodeJS.ProcessEnv = Object.fromEntries(names.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+async function capture(executable: string, prefix: string[], shell: "bash" | "powershell", script: string, cwd: string, selected: SelectedSkill, hostEnvironment: NodeJS.ProcessEnv, signal: AbortSignal): Promise<string> {
+  const env: NodeJS.ProcessEnv = { ...hostEnvironment };
   Object.assign(env, { CLAUDE_PLUGIN_ROOT: selected.root, CLAUDE_PLUGIN_DATA: selected.data, CLAUDE_PROJECT_DIR: cwd, CLAUDE_SKILL_DIR: path.dirname(selected.path) });
   const args = shell === "powershell" ? ["-NoProfile", "-NonInteractive", "-Command", script] : ["--noprofile", "--norc", "-c", script];
   return new Promise((resolve, reject) => {

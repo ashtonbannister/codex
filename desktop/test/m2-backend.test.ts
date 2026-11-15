@@ -25,6 +25,7 @@ import { buildRunContext } from "../src/main/services/context";
 import { SkillPackageStore } from "../src/main/services/skill-packages";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
 import type { PluginApproval } from "../src/main/services/plugin-mcp";
+import { authorizeThreadPermission, ThreadPermissionStore } from "../src/main/services/thread-permissions";
 import { DesktopControlSession } from "../src/main/services/desktop-control";
 import {
   captureMemoryFingerprint,
@@ -734,6 +735,26 @@ test("fork-specific skill denylists narrow only the isolated Claude session", as
   const source = path.join(root, "fork-deny"); await mkdir(source); await writeFile(path.join(source, "SKILL.md"), "---\nname: fork-deny\ndescription: Fixture\ncontext: fork\nagent: Explore\ndisallowed-tools: [Grep]\n---\nSKILL_FORK_DENY_CHECK $ARGUMENTS\n");
   const skills = new SkillPackageStore(dataDir); const preview = await skills.preview(source); await skills.install(source, preview.fingerprint);
   const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "claude", mode: "build", prompt: "/fork-deny ECHO_PROMPT" })).id); assert.equal(run.status, "completed", run.error); assert.match(reviews[0]!.detail, /effectiveTools/); assert.deepEqual(reviews.map((item) => item.action), ["skills", "skill-fork"]);
+});
+
+test("saved MCP permission applies to the same chat and exact tool request across runs", async (t) => {
+  let store: ThreadPermissionStore; const prompts: string[] = [];
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => {
+    if (request.scope !== undefined && request.permissionContext) return authorizeThreadPermission(store, request.permissionContext, request.scope, async (remember) => { assert.equal(remember, true); prompts.push(request.action); return 2; });
+    prompts.push(request.action); return true;
+  });
+  const encryption = { isEncryptionAvailable: () => true, encryptString: (text: string) => Buffer.from(Buffer.from(text).map((byte) => byte ^ 0xa5)), decryptString: (data: Buffer) => Buffer.from(data.map((byte) => byte ^ 0xa5)).toString("utf8") };
+  store = new ThreadPermissionStore(dataDir, encryption); await store.load();
+  const source = path.join(root, "permission-plugin"); await mkdir(path.join(source, "skills", "demo"), { recursive: true }); await copyFile(path.resolve("test/fixtures/mcp-server.mjs"), path.join(source, "server.mjs"));
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-plugin-skill\ndescription: Fixture\n---\nSynthetic\n");
+  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: ["${CODEX_PLUGIN_ROOT}/server.mjs"], enabled_tools: ["echo"] } } }));
+  const plugins = new PluginPackageStore(dataDir); const preview = await plugins.preview(source); const pkg = await plugins.install(source, preview.fingerprint); await plugins.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "PLUGIN_MCP_TEST", usePlugins: true };
+  const first = await finishRun(service, (await service.startRun(request)).id); assert.equal(first.status, "completed", first.error); assert.equal(prompts.filter((item) => item === "call").length, 1);
+  const second = await finishRun(service, (await service.startRun({ ...request, threadId: first.threadId })).id); assert.equal(second.status, "completed", second.error); assert.equal(prompts.filter((item) => item === "call").length, 1);
+  const differentModel = await finishRun(service, (await service.startRun({ ...request, threadId: first.threadId, model: "other-model" })).id); assert.equal(differentModel.status, "completed", differentModel.error); assert.equal(prompts.filter((item) => item === "call").length, 2);
+  const otherChat = await finishRun(service, (await service.startRun(request)).id); assert.equal(otherChat.status, "completed", otherChat.error); assert.equal(prompts.filter((item) => item === "call").length, 3);
+  assert.equal(prompts.filter((item) => item === "skills").length, 4); assert.equal(prompts.filter((item) => item === "start").length, 4); assert.equal(prompts.filter((item) => item === "discover").length, 4);
 });
 
 test("explicit skill MCP hooks require tool and hook approval in the real run flow", async (t) => {

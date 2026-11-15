@@ -3,6 +3,7 @@ import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promi
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { authorizeThreadPermission, ThreadPermissionStore, type PermissionContext } from "../src/main/services/thread-permissions";
 import { SkillPackageStore } from "../src/main/services/skill-packages";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
 import { startPluginMcp } from "../src/main/services/plugin-mcp";
@@ -61,4 +62,18 @@ test("hook shell denial and timeout fail closed and settle", async (t) => {
   const command = shell === "powershell" ? "Start-Sleep -Seconds 10" : "sleep 10";
   const timed = skillMcpHookRunner(make(command, 300), root, "run", async () => true, async () => {}, () => { aborted = true; });
   await assert.rejects(timed.beforeCall(call, new AbortController().signal), /hook failed|termination could not be confirmed/); await timed.settle();
+});
+
+
+test("remembered hook permissions match the same chat, package, command, and tool input", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-hook-permission-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(source); const shell = process.platform === "win32" ? "powershell" : "bash"; const command = shell === "powershell" ? "exit 0" : "true";
+  await writeFile(path.join(source, "SKILL.md"), `---\nname: guard\ndescription: Fixture\nshell: ${shell}\nhooks:\n  PreToolUse:\n    - matcher: mcp__fixture__echo\n      hooks:\n        - type: command\n          command: ${JSON.stringify(command)}\n---\nGuard.\n`);
+  const skills = new SkillPackageStore(path.join(root, "data")); const preview = await skills.preview(source); await skills.install(source, preview.fingerprint);
+  const encryption = { isEncryptionAvailable: () => true, encryptString: (text: string) => Buffer.from(text, "utf8"), decryptString: (data: Buffer) => data.toString("utf8") }; const grants = new ThreadPermissionStore(root, encryption); await grants.load();
+  const context: PermissionContext = { threadId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", provider: "codex", model: "fixture", mode: "plan", worker: "parent" }; let prompts = 0;
+  const approve = (request: { scope?: unknown }) => authorizeThreadPermission(grants, context, request.scope, async () => { prompts++; return 2; });
+  for (let i = 0; i < 2; i++) { const run = await skills.prepareRun("/guard", "codex"); const runner = skillMcpHookRunner(prepareSkillMcpHooks(run.invoked, root), root, `run-${i}`, approve, run.verify, () => {}); await runner.beforeCall({ server: "fixture", tool: "echo", alias: "p_echo", args: { message: "same" } }, new AbortController().signal); await runner.settle(); await run.dispose(); }
+  assert.equal(prompts, 1);
+  const run = await skills.prepareRun("/guard", "codex"); const runner = skillMcpHookRunner(prepareSkillMcpHooks(run.invoked, root), root, "run-3", approve, run.verify, () => {}); await runner.beforeCall({ server: "fixture", tool: "echo", alias: "p_echo", args: { message: "different" } }, new AbortController().signal); await runner.settle(); await run.dispose(); assert.equal(prompts, 2);
 });

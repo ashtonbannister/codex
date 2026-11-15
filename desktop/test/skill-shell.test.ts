@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
 import { SkillPackageStore } from "../src/main/services/skill-packages";
+import { authorizeThreadPermission, ThreadPermissionStore, type PermissionContext } from "../src/main/services/thread-permissions";
 import { renderSkillWithShell } from "../src/main/services/skill-shell";
 
 test("skill shell commands require review and do not rescan inserted arguments or output", async (t) => {
@@ -36,4 +37,18 @@ test("plugin skill shell context uses reviewed settings without exposing sensiti
   const run = await store.prepareRun("/fixture:shell", "codex", { values: () => ({ label: "synthetic-label", token: "synthetic-secret" }), paths: {} }, root);
   const detail: string[] = []; const rendered = await renderSkillWithShell(run.invoked[0]!, root, "codex", async (request) => { detail.push(request.detail); return true; }, new AbortController().signal, run.verifyProviders);
   assert.match(rendered.content, /synthetic-label/); assert.match(rendered.content, /sensitive setting withheld/); assert.doesNotMatch(rendered.content + detail.join(""), /synthetic-secret/); await run.dispose();
+});
+
+
+test("a remembered skill command is scoped to the same chat and verified package", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-skill-permission-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(source); const shell = process.platform === "win32" ? "powershell" : "bash"; const command = shell === "powershell" ? "Write-Output 'synthetic'" : "printf synthetic";
+  await writeFile(path.join(source, "SKILL.md"), `---\nname: task\ndescription: Fixture\nshell: ${shell}\n---\nResult: !\`${command}\`\n`);
+  const skills = new SkillPackageStore(path.join(root, "data")); const preview = await skills.preview(source); await skills.install(source, preview.fingerprint);
+  const encryption = { isEncryptionAvailable: () => true, encryptString: (text: string) => Buffer.from(text, "utf8"), decryptString: (data: Buffer) => data.toString("utf8") }; const grants = new ThreadPermissionStore(root, encryption); await grants.load();
+  const context: PermissionContext = { threadId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", provider: "codex", model: "fixture", mode: "plan", worker: "parent" }; let prompts = 0;
+  const approve = (request: { scope?: unknown }) => authorizeThreadPermission(grants, context, request.scope, async () => { prompts++; return 2; });
+  for (let i = 0; i < 2; i++) { const run = await skills.prepareRun("/task", "codex"); assert.match((await renderSkillWithShell(run.invoked[0]!, root, "codex", approve, new AbortController().signal, run.verify)).content, /synthetic/); await run.dispose(); }
+  assert.equal(prompts, 1); await grants.clear(context.threadId);
+  const run = await skills.prepareRun("/task", "codex"); await renderSkillWithShell(run.invoked[0]!, root, "codex", approve, new AbortController().signal, run.verify); await run.dispose(); assert.equal(prompts, 2);
 });

@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Download, Pin, PinOff, Pencil, RefreshCw, ShieldOff, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { Thread } from "../../shared/types";
 
@@ -10,6 +10,7 @@ export function ThreadMenu({
   onPin,
   onArchive,
   onDelete,
+  onClearPermissions,
   onExport,
   exporting,
   onRefreshCodex,
@@ -22,6 +23,7 @@ export function ThreadMenu({
   onPin: () => void;
   onArchive: () => void;
   onDelete: () => void;
+  onClearPermissions: () => void;
   onExport: () => void;
   exporting: boolean;
   onRefreshCodex: () => void;
@@ -69,7 +71,7 @@ export function ThreadMenu({
       aria-label={`Actions for ${thread.title}`}
       style={{
         left: Math.min(anchor.x, window.innerWidth - 218),
-        top: Math.max(8, Math.min(anchor.y, window.innerHeight - (thread.codex ? 305 : 270))),
+        top: Math.max(8, Math.min(anchor.y, window.innerHeight - (thread.codex ? 340 : 305))),
       }}
     >
       <button role="menuitem" onClick={onRename}>
@@ -88,6 +90,7 @@ export function ThreadMenu({
         )}
         {thread.archivedAt ? "Restore thread" : "Archive thread"}
       </button>
+      <button role="menuitem" onClick={onClearPermissions}><ShieldOff size={14} />Clear chat permissions</button>
       <button role="menuitem" onClick={onDelete}><Trash2 size={14} />Delete thread…</button>
       <button role="menuitem" onClick={onExport} disabled={exporting}>
         <Download size={14} />

@@ -3,7 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { DesktopControlSession } from "../src/main/services/desktop-control";
+import { authorizeThreadPermission, ThreadPermissionStore, type PermissionContext } from "../src/main/services/thread-permissions";
+import { DesktopControlSession, windowsProcessStartTime } from "../src/main/services/desktop-control";
 
 async function setup(t: { after(fn: () => Promise<void>): void }) {
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-desktop-test-"));
@@ -76,4 +77,26 @@ test("cancelling while approval is open prevents the action", async () => {
   controller.abort(); release(true);
   await assert.rejects(action, /closed/);
   assert.equal(invocation, 0);
+});
+
+
+test("remembered desktop approvals stay bound to the chat and exact window", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-desktop-permission-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const encryption = { isEncryptionAvailable: () => true, encryptString: (text: string) => Buffer.from(text, "utf8"), decryptString: (data: Buffer) => data.toString("utf8") }; const store = new ThreadPermissionStore(root, encryption); await store.load();
+  let hwnd = 100; let prompts = 0; const context: PermissionContext = { threadId: "test-chat", provider: "codex", model: "fixture", mode: "plan", worker: "parent" };
+  const session = new DesktopControlSession(async (args) => {
+    if (args[0] === "list-windows") return JSON.stringify([{ hwnd }]);
+    if (args[0] === "status") return JSON.stringify({ hwnd: Number(args[args.indexOf("-w") + 1]), processId: 55, processName: "fixture", windowTitle: "Fixture" });
+    if (args[0] === "inspect") return JSON.stringify({ elements: [{ selector: "button" }] }); return "{}";
+  }, (request) => authorizeThreadPermission(store, context, { kind: "desktop", action: request.action, target: request.target ?? null, detail: request.detail }, async () => { prompts++; return 2; }), root);
+  const signal = new AbortController().signal; await session.execute({ action: "list" }, signal); await session.execute({ action: "select", hwnd }, signal); await session.execute({ action: "inspect" }, signal); assert.equal(prompts, 3);
+  await session.execute({ action: "inspect" }, signal); assert.equal(prompts, 3);
+  hwnd = 101; await session.execute({ action: "list" }, signal); await session.execute({ action: "select", hwnd }, signal); await session.execute({ action: "inspect" }, signal); assert.equal(prompts, 5);
+  await store.clear(context.threadId); await session.execute({ action: "inspect" }, signal); assert.equal(prompts, 6); session.close();
+});
+
+
+test("Windows process start identity distinguishes process lifetimes", async () => {
+  assert.equal(await windowsProcessStartTime(-1), undefined);
+  if (process.platform === "win32") { const first = await windowsProcessStartTime(process.pid); assert.match(first ?? "", /^\d+$/); assert.equal(await windowsProcessStartTime(process.pid), first); }
 });

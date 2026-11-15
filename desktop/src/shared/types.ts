@@ -36,7 +36,7 @@ export type ProviderId = "codex" | "claude" | "ollama";
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
-export const APP_VERSION = "0.5.32";
+export const APP_VERSION = "0.5.33";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -385,6 +385,7 @@ export interface WorkbenchAPI {
   refreshProviderStatus(): Promise<WorkspaceSnapshot>;
   updateThread(input: ThreadUpdate): Promise<Thread>;
   deleteThread(threadId: string): Promise<boolean>;
+  clearThreadPermissions(threadId: string): Promise<void>;
   previewContext(request: RunRequest): Promise<ContextPreview>;
   chooseProject(): Promise<Project | null>;
   ensureChatWorkspace(): Promise<Project>;

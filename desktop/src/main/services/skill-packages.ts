@@ -295,7 +295,7 @@ export class SkillPackageStore {
       if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Skill package ${pkg.name} changed before preview.`);
       for (const skill of matched) {
         const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected skill is unavailable.");
-        result.push({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: root, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), agentPrompt: verifiedAgentPrompt(skill, snapshot.files) });
+        result.push({ source: "imported skill", package: pkg.name, packageId: pkg.id, packageFingerprint: pkg.fingerprint, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: root, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), agentPrompt: verifiedAgentPrompt(skill, snapshot.files) });
       }
     }
     return result;
@@ -326,7 +326,7 @@ export class SkillPackageStore {
         }
       }
       const review = this.entries(packages, (pkg) => path.join(directory, pkg.id));
-      const invoked: SelectedSkill[] = packages.flatMap(({ pkg, matched }) => matched.map((skill) => ({ source: "imported skill" as const, package: pkg.name, name: skill.name, description: skill.description, path: path.join(directory, pkg.id, ...skill.path.split("/")), root: path.join(directory, pkg.id), data: path.join(directory, pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: verifiedContents.get(`${pkg.id}\0${skill.path}`), agentPrompt: agentPrompts.get(`${pkg.id}\0${skill.path}`) })));
+      const invoked: SelectedSkill[] = packages.flatMap(({ pkg, matched }) => matched.map((skill) => ({ source: "imported skill" as const, package: pkg.name, packageId: pkg.id, packageFingerprint: pkg.fingerprint, name: skill.name, description: skill.description, path: path.join(directory, pkg.id, ...skill.path.split("/")), root: path.join(directory, pkg.id), data: path.join(directory, pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: verifiedContents.get(`${pkg.id}\0${skill.path}`), agentPrompt: agentPrompts.get(`${pkg.id}\0${skill.path}`) })));
       return {
         prompt: this.catalog(this.entries(packages.map((entry) => ({ ...entry, selected: entry.selected.filter((skill) => !skill.forkAgent) })), (pkg) => path.join(directory, pkg.id))), review, invoked,
         directory,

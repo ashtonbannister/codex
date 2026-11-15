@@ -26,12 +26,13 @@ import { WorkspaceService } from "./services/workspace-service";
 import { LocalKeyStore } from "./services/local-key-store";
 import { PluginCredentialStore } from "./services/plugin-credentials";
 import { BundleConfigStore } from "./services/bundle-config-store";
+import { authorizeThreadPermission, ThreadPermissionStore, type PermissionContext } from "./services/thread-permissions";
 import { expandBundleDefault } from "./services/bundle-config";
 import { PluginOAuthStore } from "./services/plugin-oauth-store";
 import { signInPluginOAuth, pluginOAuthToken, type OAuthReview } from "./services/plugin-oauth";
 import { SkillPackageStore } from "./services/skill-packages";
 import { PluginPackageStore } from "./services/plugin-packages";
-import { DesktopControlSession, windowsAutomationRunner } from "./services/desktop-control";
+import { DesktopControlSession, windowsAutomationRunner, windowsProcessStartTime } from "./services/desktop-control";
 import { lstat } from "node:fs/promises";
 import {
   inspectCodexInstallation,
@@ -238,8 +239,21 @@ let localKeyStore: LocalKeyStore;
 let pluginCredentials: PluginCredentialStore;
 let bundleConfigStore: BundleConfigStore;
 let pluginOAuthStore: PluginOAuthStore;
+let threadPermissions: ThreadPermissionStore | undefined;
+let threadPermissionError: string | undefined;
 let pluginOAuthController: AbortController | undefined;
 const localKey = (connection: ReturnType<typeof validateLocalConnection>) => localKeyStore.get(connection);
+
+async function reviewChatPermission(context: PermissionContext | undefined, scope: unknown | undefined, prompt: { title: string; message: string; detail: string }): Promise<boolean> {
+  if (!window || window.isDestroyed() || quitting) return false;
+  return authorizeThreadPermission(threadPermissions, context, scope, async (remember) => {
+    if (!window || window.isDestroyed() || quitting) return 0;
+    const chat = context ? latestState?.threads.find((thread) => thread.id === context.threadId) : undefined;
+    const note = remember ? "Allow always applies only to the same action, verified package, target, inputs, provider, model and mode in this chat. Window contents and files referenced by commands may change. Clear saved permissions from the chat menu." : threadPermissionError ? `Saved chat permissions are unavailable: ${threadPermissionError}` : threadPermissions && !threadPermissions.available() ? "OS encryption is unavailable; this request requires approval each time." : "This request requires approval each time.";
+    const result = await dialog.showMessageBox(window, { type: "question", buttons: ["Deny", "Allow once", ...(remember ? ["Allow always for this chat"] : [])], defaultId: 0, cancelId: 0, title: prompt.title, message: prompt.message, detail: `${chat ? `Chat: ${confirmationValue(chat.title)}\n\n` : ""}${prompt.detail}\n\n${note}` });
+    return result.response;
+  });
+}
 
 function registerHandlers(service: WorkspaceService) {
   const plugins = new PluginPackageStore(path.join(app.getPath("userData"), "workspace"));
@@ -634,6 +648,11 @@ function registerHandlers(service: WorkspaceService) {
   handle("thread:update", (payload) =>
     service.updateThread(objectPayload(payload) as unknown as ThreadUpdate),
   );
+  handle("thread:clear-permissions", async (payload) => {
+    const id = identifier(payload); if (!(await service.snapshot()).state.threads.some((thread) => thread.id === id)) throw new Error("Thread not found.");
+    if (!threadPermissions) throw new Error(threadPermissionError || "Saved chat permissions are unavailable.");
+    await threadPermissions.clear(id);
+  });
   handle("thread:delete", async (payload) => {
     const id = identifier(payload);
     const thread = (await service.snapshot()).state.threads.find((item) => item.id === id);
@@ -647,6 +666,7 @@ function registerHandlers(service: WorkspaceService) {
       detail: `This permanently removes the conversation and its run and check history from Nova.${thread.worktreePath ? `\n\nThe worktree and its files remain at: ${confirmationValue(thread.worktreePath)}` : ""}\n\nProject files and the source Codex conversation are not deleted.`,
     });
     if (confirmation.response !== 1) return false;
+    if (threadPermissions?.available()) await threadPermissions.clear(id);
     await service.deleteThread(id);
     return true;
   });
@@ -943,11 +963,13 @@ if (!app.requestSingleInstanceLock()) {
       await bundleConfigStore.load();
       pluginOAuthStore = new PluginOAuthStore(dataDir, safeStorage);
       await pluginOAuthStore.load();
+      try { threadPermissions = new ThreadPermissionStore(dataDir, safeStorage); await threadPermissions.load(); }
+      catch (error) { threadPermissions = undefined; threadPermissionError = error instanceof Error ? error.message : "Saved chat permissions could not be read."; }
       workspace = new WorkspaceService(
         dataDir,
         broadcast,
         localKey,
-        async () => {
+        async (getPermissionContext) => {
           if (process.platform !== "win32") throw new Error("Desktop control is available on Windows only.");
           const binary = app.isPackaged
             ? path.join(process.resourcesPath, "winapp", "winapp.exe")
@@ -956,24 +978,21 @@ if (!app.requestSingleInstanceLock()) {
           if (!info.isFile() || info.isSymbolicLink()) throw new Error("The Windows desktop-control component is unavailable. Reinstall this Nova build.");
           const executable = await realpath(binary);
           return new DesktopControlSession(windowsAutomationRunner(executable, path.join(dataDir, "winapp-cache")), async (request) => {
-            if (!window || window.isDestroyed() || quitting) return false;
-            const result = await dialog.showMessageBox(window, {
-              type: "question", buttons: ["Deny", "Allow once"], defaultId: 0, cancelId: 0,
-              title: "Nova desktop action request",
-              message: request.action,
+            const started = request.targetIdentity ? await windowsProcessStartTime(request.targetIdentity.processId) : undefined;
+            const scope = request.targetIdentity && !started ? undefined : { kind: "desktop", action: request.action, target: request.target ?? null, processStarted: started ?? null, detail: request.detail };
+            const approved = await reviewChatPermission(getPermissionContext(), scope, {
+              title: "Nova desktop action request", message: request.action,
               detail: `${request.target ? `Window: ${confirmationValue(request.target)}\n\n` : ""}${confirmationValue(request.detail)}\n\nThis request came from the active agent. Approve only after reviewing the window and action.`,
             });
-            return result.response === 1;
+            if (approved && request.targetIdentity && started && await windowsProcessStartTime(request.targetIdentity.processId) !== started) return false;
+            return approved;
           }, path.join(dataDir, "desktop-captures"));
         },
         async (request) => {
-          if (!window || window.isDestroyed() || quitting) return false;
-          const result = await dialog.showMessageBox(window, {
-            type: "question", buttons: ["Deny", "Allow once"], defaultId: 0, cancelId: 0,
+          return reviewChatPermission(request.permissionContext, request.scope, {
             title: "Nova plugin permission", message: request.title,
             detail: `${request.detail}\n\nApprove only after reviewing the plugin and requested action.`,
           });
-          return result.response === 1;
         },
         (identity) => pluginCredentials.get(identity),
         {

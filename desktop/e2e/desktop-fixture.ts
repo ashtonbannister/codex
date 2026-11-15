@@ -32,6 +32,7 @@ export interface FixtureCalls {
   opens: string[];
   contextRequests: RunRequest[];
   threadUpdates: ThreadUpdate[];
+  clearedPermissions: string[];
   checks: VerificationRequest[];
   checkCancellations: string[];
   libraryQueries: CodexThreadQuery[];
@@ -230,6 +231,7 @@ export async function installFakeDesktopBridge(
         opens: [],
         contextRequests: [],
         threadUpdates: [],
+        clearedPermissions: [],
         checks: [],
         checkCancellations: [],
         libraryQueries: [],
@@ -662,6 +664,7 @@ export async function installFakeDesktopBridge(
           }
           return state.projects[0];
         },
+        async clearThreadPermissions(id: string) { calls.clearedPermissions.push(id); },
         async deleteThread(id: string) {
           state.threads = state.threads.filter((item) => item.id !== id);
           state.runs = state.runs.filter((item) => item.threadId !== id);

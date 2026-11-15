@@ -61,6 +61,7 @@ const bridge: WorkbenchAPI = {
   refreshProviderStatus: () =>
     ipcRenderer.invoke("workspace:refresh-providers"),
   deleteThread: (threadId) => ipcRenderer.invoke("thread:delete", threadId),
+  clearThreadPermissions: (threadId) => ipcRenderer.invoke("thread:clear-permissions", threadId),
   updateThread: (input: ThreadUpdate) =>
     ipcRenderer.invoke("thread:update", input),
   previewContext: (request: RunRequest) =>

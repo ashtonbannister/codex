@@ -3,7 +3,7 @@ import type { SkillDescriptor } from "../../shared/skills";
 import { renderPluginCommand } from "./plugin-commands";
 
 export interface SkillReference { namespace?: string; name: string; args: string; token: string }
-export interface SelectedSkill { source: "imported skill" | "plugin"; package: string; name: string; description: string; path: string; root: string; data: string; descriptor: SkillDescriptor; reference?: SkillReference; verifiedContent?: string; agentPrompt?: string; config?: Record<string, string> }
+export interface SelectedSkill { source: "imported skill" | "plugin"; package: string; packageId?: string; packageFingerprint?: string; name: string; description: string; path: string; root: string; data: string; descriptor: SkillDescriptor; reference?: SkillReference; verifiedContent?: string; agentPrompt?: string; config?: Record<string, string> }
 
 /** Only slash commands at the start or explicit $skill mentions select manual-only skills. */
 export function skillReferences(input: string): SkillReference[] {

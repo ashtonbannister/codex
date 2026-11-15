@@ -4,17 +4,19 @@ import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { disconnectChild, resolveExecutable, terminateTree, trackOwnedProcess } from "./providers";
 import { McpProcessError } from "./mcp-stdio";
+import { verifiedPermissionFileDigest } from "./verified-permission-file";
+import { stablePermissionText } from "./thread-permissions";
 import { renderPluginCommand } from "./plugin-commands";
 import type { PluginApproval } from "./plugin-mcp";
 import type { SelectedSkill } from "./skill-selection";
 
-interface Plan { skill: string; server: string; tool: string; command: string; timeoutMs: number; shell: "bash" | "powershell"; root: string; data: string; skillDir: string }
+interface Plan { packageId?: string; packageFingerprint?: string; source: string; skill: string; server: string; tool: string; command: string; timeoutMs: number; shell: "bash" | "powershell"; root: string; data: string; skillDir: string }
 export function prepareSkillMcpHooks(skills: SelectedSkill[], project: string): Plan[] {
   const plans: Plan[] = [];
   for (const skill of skills) for (const hook of skill.descriptor.mcpHooks ?? []) {
     if (!skill.reference || !skill.verifiedContent) throw new Error("The hook skill was not verified.");
     const command = renderPluginCommand({ name: skill.name, description: "", unsupported: [], warnings: [], namedArguments: skill.descriptor.namedArguments, body: hook.command }, skill.reference.args, { root: skill.root, data: skill.data, project, skillDir: path.dirname(skill.path), config: skill.config, appendUnused: false });
-    plans.push({ skill: skill.name, server: hook.server, tool: hook.tool, command, timeoutMs: hook.timeoutMs, shell: skill.descriptor.shell ?? (process.platform === "win32" ? "powershell" : "bash"), root: skill.root, data: skill.data, skillDir: path.dirname(skill.path) });
+    plans.push({ packageId: skill.packageId, packageFingerprint: skill.packageFingerprint, source: skill.source, skill: skill.name, server: hook.server, tool: hook.tool, command, timeoutMs: hook.timeoutMs, shell: skill.descriptor.shell ?? (process.platform === "win32" ? "powershell" : "bash"), root: skill.root, data: skill.data, skillDir: path.dirname(skill.path) });
     if (plans.length > 24) throw new Error("Too many active skill hooks.");
   }
   return plans;
@@ -29,13 +31,16 @@ export function skillMcpHookRunner(plans: Plan[], project: string, session: stri
         signal.throwIfAborted(); await verify();
         const executable = await resolveExecutable(plan.shell, process.platform, process.env.PATH ?? ""); const shellInfo = await lstat(executable.command), cwdInfo = await lstat(project);
         if (!shellInfo.isFile() || shellInfo.isSymbolicLink() || !cwdInfo.isDirectory() || cwdInfo.isSymbolicLink()) throw new Error("The hook shell or working directory is unavailable.");
+        const shellDigest = await verifiedPermissionFileDigest({ path: executable.command, dev: shellInfo.dev, ino: shellInfo.ino, size: shellInfo.size, mtimeMs: shellInfo.mtimeMs }).catch(() => undefined);
+        const environmentNames = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "LANG"];
+        const hostEnvironment: NodeJS.ProcessEnv = Object.fromEntries(environmentNames.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
         const input = { session_id: session, cwd: project, hook_event_name: "PreToolUse", tool_name: `mcp__${call.server}__${call.tool}`, tool_input: call.args ?? {}, tool_use_id: randomUUID() };
         const serialized = JSON.stringify(input); const detail = JSON.stringify({ skill: plan.skill, shell: executable.command, command: plan.command, workingDirectory: project, input, note: "This command runs under your user account and may change files or access the network. It receives the exact tool input shown here. The hook cannot bypass Nova's tool-call approval." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
         if (detail.length > 32000 || serialized.length > 24000) throw new Error("The hook input is too large to review.");
-        if (!await approve({ action: "skill-hook", title: "Run this skill hook?", detail })) throw new Error("Skill hook execution was declined.");
+        if (!await approve({ action: "skill-hook", title: "Run this skill hook?", detail, ...(plan.packageId && plan.packageFingerprint && shellDigest ? { scope: { kind: "skill-hook", source: plan.source, packageId: plan.packageId, fingerprint: plan.packageFingerprint, shell: executable.command, shellDigest, project, data: stablePermissionText(plan.data, { package: plan.root }), hostEnvironment, command: stablePermissionText(plan.command, { package: plan.root }), server: call.server, tool: call.tool, arguments: call.args ?? {} } } : {}) })) throw new Error("Skill hook execution was declined.");
         signal.throwIfAborted(); await verify(); const now = await lstat(executable.command), cwd = await lstat(project);
         if (!now.isFile() || now.isSymbolicLink() || now.dev !== shellInfo.dev || now.ino !== shellInfo.ino || now.size !== shellInfo.size || now.mtimeMs !== shellInfo.mtimeMs || !cwd.isDirectory() || cwd.isSymbolicLink() || cwd.dev !== cwdInfo.dev || cwd.ino !== cwdInfo.ino) throw new Error("The reviewed hook shell or working directory changed.");
-        const result = await runHook(executable.command, executable.prefix, plan, project, serialized, signal);
+        const result = await runHook(executable.command, executable.prefix, plan, project, serialized, hostEnvironment, signal);
         if (result.unconfirmed) { unsafe = true; abortRun(); throw new McpProcessError("Skill hook termination could not be confirmed.", true); }
         if (result.cancelled) throw new Error("Skill hook was cancelled.");
         if (result.code === 2) throw new Error("Skill hook blocked this tool call.");
@@ -76,10 +81,9 @@ export function skillMcpHookRunner(plans: Plan[], project: string, session: stri
     },
   };
 }
-async function runHook(executable: string, prefix: string[], plan: Plan, cwd: string, input: string, signal: AbortSignal): Promise<{ code: number | null; stdout: string; cancelled: boolean; unconfirmed: boolean }> {
+async function runHook(executable: string, prefix: string[], plan: Plan, cwd: string, input: string, hostEnvironment: NodeJS.ProcessEnv, signal: AbortSignal): Promise<{ code: number | null; stdout: string; cancelled: boolean; unconfirmed: boolean }> {
   signal.throwIfAborted();
-  const names = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "LANG"];
-  const env: NodeJS.ProcessEnv = Object.fromEntries(names.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+  const env: NodeJS.ProcessEnv = { ...hostEnvironment };
   Object.assign(env, { CLAUDE_PLUGIN_ROOT: plan.root, CLAUDE_PLUGIN_DATA: plan.data, CLAUDE_PROJECT_DIR: cwd, CLAUDE_SKILL_DIR: plan.skillDir });
   const powershellCommand = `${plan.command}\n$__novaSucceeded = $?; $__novaExit = $LASTEXITCODE; if (-not $__novaSucceeded) { if ($null -ne $__novaExit -and $__novaExit -ne 0) { exit $__novaExit }; exit 1 }`;
   const args = plan.shell === "powershell" ? ["-NoProfile", "-NonInteractive", "-Command", powershellCommand] : ["--noprofile", "--norc", "-c", plan.command];

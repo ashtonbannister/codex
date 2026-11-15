@@ -2,7 +2,7 @@
 export const NOVA_DESKTOP_SKILL = `
 
 Available skill: nova-desktop-control
-Use the nova_desktop MCP tool when the current user asks you to inspect or operate a Windows application. This is a separate, opt-in tool for this run. Each call asks the user for approval; a refusal means stop that action and explain the outcome.
+Use the nova_desktop MCP tool when the current user asks you to inspect or operate a Windows application. This is a separate, opt-in tool for this run. Each call requires user approval unless the identical request was previously allowed for this chat; a refusal means stop that action and explain the outcome.
 
 1. Call desktop with action list, then select one returned window by hwnd. Never guess a window handle.
 2. Call inspect to get the current accessibility tree and observation ID. Call screenshot when visual evidence is needed; the capture can include owned dialogs.

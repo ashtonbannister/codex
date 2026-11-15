@@ -1563,6 +1563,10 @@ export function App() {
           anchor={threadMenu.anchor}
           onClose={() => setThreadMenu(null)}
           onExport={() => void exportThread(threadMenu.thread.id)}
+          onClearPermissions={() => {
+            const id = threadMenu.thread.id; setThreadMenu(null); setError(""); setNotice("");
+            void (async () => { try { await api.clearThreadPermissions(id); setNotice(isPreview ? "Preview only — no saved permissions were changed." : "Saved permissions for this chat were cleared."); } catch (reason) { setError(errorText(reason)); } })();
+          }}
           onDelete={() => {
             const id = threadMenu.thread.id;
             setThreadMenu(null);

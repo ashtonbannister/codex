@@ -613,6 +613,16 @@ test("long command lists keep keyboard selection visible through scrolling and w
   );
 });
 
+test("saved chat permissions can be cleared from the thread menu", async ({ page }) => {
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  await installFakeDesktopBridge(page, { seed: true }); await page.goto("/");
+  await page.getByRole("button", { name: "Thread actions: Review the fixture change" }).click();
+  await page.getByRole("menuitem", { name: "Clear chat permissions" }).click();
+  await expect(page.getByRole("status")).toContainText("Saved permissions for this chat were cleared.");
+  const calls = await page.evaluate(() => (window as unknown as { __workbenchTest: FixtureCalls }).__workbenchTest.clearedPermissions);
+  expect(calls).toEqual(["test-thread-1"]); expect(errors).toEqual([]);
+});
+
 test("thread names, pinning, archiving, and restoration are state backed", async ({
   page,
 }) => {
