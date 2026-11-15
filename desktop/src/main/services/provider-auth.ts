@@ -20,6 +20,7 @@ import {
   type Executable,
 } from "./providers";
 import { assertNovaCodexHome, isolatedCodexEnv } from "./nova-runtime";
+import { REASONING_EFFORTS, type CodexModel, type ReasoningEffort } from "../../shared/types";
 
 const AUTH_TIMEOUT_MS = 10 * 60_000;
 const STATUS_TIMEOUT_MS = 15_000;
@@ -240,7 +241,7 @@ export class ProviderAuthService {
   private operating = false;
   private recovery = false;
   private readController?: AbortController;
-  private readTask?: Promise<ProviderAccountStatus>;
+  private readTask?: Promise<unknown>;
 
   constructor(private readonly options: AuthServiceOptions) {}
 
@@ -352,7 +353,65 @@ export class ProviderAuthService {
         this.readTask = undefined;
       }
     })();
-    return this.readTask;
+    return this.readTask as Promise<ProviderAccountStatus>;
+  }
+
+  async listModels(options: CodexServerOptions): Promise<CodexModel[]> {
+    this.reserve("codex");
+    const controller = new AbortController();
+    this.readController = controller;
+    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+    const task = (async () => {
+      let operationId: string | undefined;
+      try {
+        operationId = await this.beginOperation("codex", { ...options, signal });
+        if (signal.aborted) throw new ProviderAuthError("Model discovery was cancelled.");
+        const client = await connectCodexServer({ ...options, signal });
+        try {
+          const models: CodexModel[] = [];
+          const seen = new Set<string>();
+          let cursor: string | null = null;
+          for (let page = 0; page < 10; page++) {
+            const response = await client.request("model/list", { limit: 100, cursor, includeHidden: false });
+            if (!response || typeof response !== "object" || !Array.isArray((response as Record<string, unknown>).data))
+              throw new ProviderAuthError("Codex returned an invalid model list.");
+            const result = response as { data: unknown[]; nextCursor?: unknown };
+            for (const item of result.data) {
+              if (!item || typeof item !== "object") throw new ProviderAuthError("Codex returned an invalid model.");
+              const entry = item as Record<string, unknown>;
+              if (entry.hidden === true) continue;
+              if (typeof entry.model !== "string" || !entry.model || entry.model.length > 256 || /[\x00-\x1f\x7f]/.test(entry.model))
+                throw new ProviderAuthError("Codex returned an invalid model identifier.");
+              if (!seen.has(entry.model)) {
+                seen.add(entry.model);
+                const name = typeof entry.displayName === "string" && entry.displayName.length <= 256 && !/[\x00-\x1f\x7f]/.test(entry.displayName) ? entry.displayName : entry.model;
+                const levels = Array.isArray(entry.supportedReasoningEfforts) ? entry.supportedReasoningEfforts.flatMap((item): ReasoningEffort[] => {
+                  if (!item || typeof item !== "object") return [];
+                  const level = (item as Record<string, unknown>).reasoningEffort;
+                  return REASONING_EFFORTS.includes(level as ReasoningEffort) ? [level as ReasoningEffort] : [];
+                }) : [];
+                models.push({ id: entry.model, name, ...(levels.length ? { reasoningEfforts: [...new Set(levels)] } : {}), ...(entry.isDefault === true ? { isDefault: true } : {}) });
+              }
+            }
+            if (result.nextCursor == null) return models;
+            if (typeof result.nextCursor !== "string" || !result.nextCursor || result.nextCursor.length > 4096 || result.nextCursor === cursor)
+              throw new ProviderAuthError("Codex returned an invalid model list cursor.");
+            cursor = result.nextCursor;
+          }
+          throw new ProviderAuthError("Codex model list exceeded the discovery limit.");
+        } finally { await this.close(client); }
+      } catch (error) {
+        if ((error instanceof ProviderAuthError || error instanceof CodexAppServerError) && error.terminationUnconfirmed) {
+          try { await this.markRecovery("codex", options.home); } catch { /* locked */ }
+        }
+        throw error;
+      } finally {
+        try { await this.finishOperation("codex", options.home, operationId); }
+        finally { this.operating = false; this.readController = undefined; this.readTask = undefined; }
+      }
+    })();
+    this.readTask = task;
+    return task;
   }
 
   async start(provider: AccountProvider, options: CodexServerOptions): Promise<ProviderLoginStatus> {

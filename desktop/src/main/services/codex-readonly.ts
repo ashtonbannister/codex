@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { createBrotliDecompress, createGunzip, createZstdDecompress } from "node:zlib";
 import type {
   CodexHistoryPage, CodexHistoryQuery, CodexThreadPage, CodexThreadQuery,
   CodexThreadSummary, ImportedMessage,
@@ -10,10 +11,11 @@ import { resolveCodexHome } from "./codex-installation";
 
 // This module never starts Codex, opens a database, creates locks, or writes to
 // the source. Call it only for an explicit import-library action.
-const MAX_FILES = 5_000;
+const MAX_FILES = 15_000;
 const MAX_ENTRIES = 15_000;
 const HEADER_BYTES = 256 * 1024;
 const HISTORY_BYTES = 8 * 1024 * 1024;
+const MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
 const MAX_VISIBLE_BYTES = 2 * 1024 * 1024;
 const PAGE_BYTES = 256 * 1024;
@@ -79,6 +81,44 @@ async function readSlice(root: string, file: string, from: number, maximum: numb
   } finally { await handle.close(); }
 }
 
+/** Decompress only a bounded header for listing, or a bounded stream with an 8 MiB tail for history. */
+async function compressedSlice(file: File, headerOnly: boolean) {
+  const { canonical, before } = await safeFile(file.root, file.file);
+  if (stamp(before) !== file.stamp) throw new Error("The source conversation changed. Refresh the import library.");
+  const handle = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  const input = handle.createReadStream({ autoClose: false });
+  const decoder = /\.zst$/i.test(file.file) ? createZstdDecompress() :
+    /\.gz$/i.test(file.file) ? createGunzip() : createBrotliDecompress();
+  input.on("error", (error) => decoder.destroy(error));
+  const limit = headerOnly ? HEADER_BYTES : HISTORY_BYTES;
+  let buffers: Buffer[] = [], retained = 0, total = 0, partial = false;
+  try {
+    if (stamp(await handle.stat()) !== stamp(before)) throw new Error("The source changed while opening it. Retry the import.");
+    input.pipe(decoder);
+    for await (const raw of decoder) {
+      const chunk = Buffer.from(raw as Uint8Array);
+      total += chunk.length;
+      if (!headerOnly && total > MAX_DECOMPRESSED_BYTES)
+        throw new Error("This compressed conversation exceeds the 512 MiB expanded read limit.");
+      buffers.push(chunk); retained += chunk.length;
+      if (headerOnly && retained >= limit) { partial = true; break; }
+      while (!headerOnly && retained - buffers[0]!.length >= limit) retained -= buffers.shift()!.length;
+    }
+    let bytes = Buffer.concat(buffers, retained);
+    if (headerOnly) bytes = bytes.subarray(0, limit);
+    else if (bytes.length > limit) bytes = bytes.subarray(bytes.length - limit);
+    if (stamp(await handle.stat()) !== stamp(before) || (await realpath(file.file)) !== canonical)
+      throw new Error("The source changed during the read. Nothing was written; retry when its work is idle.");
+    return { bytes, start: headerOnly ? 0 : Math.max(0, total - bytes.length), size: headerOnly && partial ? bytes.length + 1 : total };
+  } finally {
+    input.destroy();
+    decoder.destroy();
+    await handle.close();
+  }
+}
+
+const compressed = (file: File) => /\.jsonl\.(?:zst|gz|br)$/i.test(file.file);
+
 function lines(bytes: Buffer, start: number, endIsEof: boolean, visit: (item: Json, offset: number) => void): boolean {
   let offset = start > 0 ? bytes.indexOf(10) + 1 : 0;
   if (start > 0 && !offset) return true;
@@ -122,12 +162,12 @@ async function scan(home: string, archived: boolean): Promise<Catalog> {
   const root = path.join(home, archived ? "archived_sessions" : "sessions");
   const warnings: string[] = [];
   const files: File[] = [];
-  let skipped = false, compressed = false, visited = 0;
+  let skipped = false, visited = 0;
   try {
     if ((await lstat(root)).isSymbolicLink() || path.relative(root, await realpath(root)) !== "")
       throw new Error("The session directory is linked. Select an unlinked copy for import.");
     const pending = [{ directory: root, depth: 0 }];
-    while (pending.length && visited < MAX_ENTRIES && files.length < MAX_FILES) {
+    while (pending.length && visited < MAX_ENTRIES) {
       const current = pending.shift()!;
       if ((await lstat(current.directory)).isSymbolicLink() ||
         (current.directory !== root && !inside(root, await realpath(current.directory)))) {
@@ -135,7 +175,7 @@ async function scan(home: string, archived: boolean): Promise<Catalog> {
       }
       const directory = await opendir(current.directory);
       for await (const entry of directory) {
-        if (++visited > MAX_ENTRIES || files.length >= MAX_FILES) break;
+        if (++visited > MAX_ENTRIES) break;
         if (entry.isSymbolicLink()) { skipped = true; continue; }
         if (entry.name.startsWith(".")) continue;
         const file = path.join(current.directory, entry.name);
@@ -143,9 +183,8 @@ async function scan(home: string, archived: boolean): Promise<Catalog> {
           if (current.depth < 6) pending.push({ directory: file, depth: current.depth + 1 });
           else skipped = true;
         } else if (entry.isFile()) {
-          if (/\.jsonl\.(?:zst|gz|br)$/i.test(entry.name)) { compressed = true; continue; }
-          const match = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(entry.name);
-          if (!match) { if (/\.jsonl$/i.test(entry.name)) skipped = true; continue; }
+          const match = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.(?:zst|gz|br))?$/i.exec(entry.name);
+          if (!match) { if (/\.jsonl(?:\.(?:zst|gz|br))?$/i.test(entry.name)) skipped = true; continue; }
           try {
             const { before } = await safeFile(root, file);
             files.push({ file, root, id: match[1]!.toLowerCase(), size: before.size, modified: before.mtimeMs, stamp: stamp(before) });
@@ -153,14 +192,17 @@ async function scan(home: string, archived: boolean): Promise<Catalog> {
         }
       }
     }
-    if (pending.length || visited >= MAX_ENTRIES || files.length >= MAX_FILES)
-      warnings.push("The bounded source listing is incomplete: at most 5000 rollout files and 15000 directory entries are inspected.");
+    if (pending.length || visited >= MAX_ENTRIES)
+      warnings.push("The bounded source listing is incomplete: at most 15000 directory entries are inspected.");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   files.sort((a, b) => b.modified - a.modified || a.file.localeCompare(b.file));
   if (skipped) warnings.push("Linked, unavailable, deeply nested, or unsupported source paths were skipped.");
-  if (compressed) warnings.push("Compressed rollouts are not imported by this read-only browser. Export or provide an uncompressed JSONL copy; Nova will not ask Codex to decompress or migrate it.");
+  if (files.length > MAX_FILES) {
+    files.length = MAX_FILES;
+    warnings.push("Showing the 15000 most recently modified conversations found in the bounded source scan.");
+  }
   warnings.push("Read-only import source. No Codex worker, database, configuration, credential, or source lock is opened. Only visible text recorded in supported JSONL rollouts is copied; engine-only history may be absent.");
   return { home, archived, files, names: await titles(home), summaries: new Map(), digest: digest(JSON.stringify(files)), at: Date.now(), warnings };
 }
@@ -183,7 +225,7 @@ async function catalog(input: string, archived: boolean): Promise<Catalog> {
 
 async function summary(source: Catalog, file: File): Promise<CodexThreadSummary | null> {
   if (source.summaries.has(file.file)) return source.summaries.get(file.file)!;
-  const part = await readSlice(file.root, file.file, 0, HEADER_BYTES, file.stamp);
+  const part = compressed(file) ? await compressedSlice(file, true) : await readSlice(file.root, file.file, 0, HEADER_BYTES, file.stamp);
   let meta: Json | undefined;
   lines(part.bytes, 0, part.bytes.length === part.size, (line) => {
     if (!meta && line.type === "session_meta") meta = object(line.payload);
@@ -251,7 +293,7 @@ async function transcript(file: File): Promise<Transcript> {
     if (stamp((await safeFile(file.root, file.file)).before) !== file.stamp) throw new Error("The source changed. Refresh before copying.");
     return cached;
   }
-  const part = await readSlice(file.root, file.file, Math.max(0, file.size - HISTORY_BYTES), HISTORY_BYTES, file.stamp);
+  const part = compressed(file) ? await compressedSlice(file, false) : await readSlice(file.root, file.file, Math.max(0, file.size - HISTORY_BYTES), HISTORY_BYTES, file.stamp);
   const events: ImportedMessage[] = [], responses: ImportedMessage[] = [];
   const totals = new Map<ImportedMessage[], number>();
   let truncated = part.start > 0;

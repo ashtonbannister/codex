@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import {
   mkdtemp,
   mkdir,
@@ -19,6 +21,7 @@ import {
   type VerificationResult,
 } from "../src/shared/types";
 import { buildRunContext } from "../src/main/services/context";
+import { SkillPackageStore } from "../src/main/services/skill-packages";
 import {
   captureMemoryFingerprint,
   normalizeMemoryFilePath,
@@ -37,7 +40,7 @@ if(process.argv.includes('--version')){console.log('fake-cli 1');process.exit(0)
 if(process.argv.includes('--help')){console.log('--json --sandbox --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools');process.exit(0)}
 if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture-1',configRequirements:{requirements:null}}));process.exit(0)}
 let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',value=>input+=value);
-process.stdin.on('end',()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
+process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
 `;
 
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -286,6 +289,73 @@ test("thread rename, pin, archive and restore persist while active work prevents
   assert.equal(saved.threads[0].pinned, true);
 });
 
+test("local reasoning appears during a run before the answer and is persisted", async (t) => {
+  const { service, project, dataDir } = await fixture(t);
+  let finishResponse: (() => void) | undefined;
+  const server = createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "tiny" }] }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write('data: {"choices":[{"index":0,"delta":{"reasoning_content":"Thinking live"},"finish_reason":null}]}\n\n');
+    finishResponse = () => res.end('data: {"choices":[{"index":0,"delta":{"content":"Final answer"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); return new Promise<void>((resolve) => server.close(() => resolve())); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const settings = (await service.snapshot()).state.settings;
+  await service.updateSettings({ ...settings, localProvider: "custom", localProtocol: "chat-completions", localBaseUrl: `http://127.0.0.1:${address.port}/v1`, localModel: "tiny" });
+  const run = await service.startRun({ projectId: project.id, provider: "ollama", mode: "plan", prompt: "STREAM_THINKING_TEST" });
+  let visible: Run | undefined;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    visible = (await service.snapshot()).state.runs.find((item) => item.id === run.id);
+    if (visible?.events.some((event) => event.kind === "thinking")) break;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  assert.equal(visible?.status, "running");
+  assert.equal(visible?.events.find((event) => event.kind === "thinking")?.text, "Thinking live");
+  assert.ok(finishResponse);
+  finishResponse!();
+  const finished = await finishRun(service, run.id);
+  assert.equal(finished.status, "completed");
+  assert.equal(finished.events.find((event) => event.kind === "message")?.text, "Final answer");
+  const saved = validateWorkspaceState(JSON.parse(await readFile(path.join(dataDir, "workspace.json"), "utf8")));
+  assert.equal(saved.runs.find((item) => item.id === run.id)?.events.find((event) => event.kind === "thinking")?.text, "Thinking live");
+});
+
+test("project-free chats run in an app-owned folder and persist", async (t) => {
+  const { service, dataDir } = await fixture(t);
+  const project = await service.ensureChatWorkspace();
+  assert.equal(project.kind, "folder");
+  assert.equal(project.path, path.join(await import("node:fs/promises").then((fs) => fs.realpath(dataDir)), "chat-workspace"));
+  assert.equal((await service.ensureChatWorkspace()).id, project.id);
+  const run = await service.startRun({ projectId: project.id, provider: "codex", mode: "plan", prompt: "Hello without a project" });
+  const result = await finishRun(service, run.id);
+  assert.equal(result.status, "completed");
+  assert.ok(result.events.some((entry) => entry.kind === "message"));
+  await assert.rejects(service.startRun({ projectId: project.id, provider: "codex", mode: "build", prompt: "Build" }), /Build requires/);
+});
+
+test("thread deletion rejects active work and preserves the worktree", async (t) => {
+  const { service, project, dataDir } = await fixture(t);
+  const run = await build(service, project.id);
+  const active = await service.startRun({
+    projectId: project.id, threadId: run.threadId, provider: "codex",
+    mode: "plan", prompt: "WAIT_FOR_CANCEL",
+  });
+  await assert.rejects(service.deleteThread(run.threadId), /active/);
+  await service.cancelRun(active.id);
+  await service.deleteThread(run.threadId);
+  const saved = validateWorkspaceState(JSON.parse(await readFile(path.join(dataDir, "workspace.json"), "utf8")));
+  assert.equal(saved.threads.some((item) => item.id === run.threadId), false);
+  assert.equal(saved.runs.some((item) => item.threadId === run.threadId), false);
+  assert.equal(await readFile(path.join(run.worktreePath!, "README.md"), "utf8"), "source version one\n");
+});
+
 test("source-linked memory detects current, changed and missing bytes in the selected worktree", async (t) => {
   const { service, project, repo } = await fixture(t);
   const memory = await service.saveMemory({
@@ -360,6 +430,27 @@ test("context preview is exactly the prompt launched, with honest persisted esti
       warning.includes("not been checked against their original sources"),
     ),
   );
+});
+
+test("enabled skills are included in a run through isolated copies", async (t) => {
+  const { service, project, root, dataDir } = await fixture(t);
+  const source = path.join(root, "sample-skill");
+  await mkdir(source);
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: sample-skill\ndescription: Fixture instructions\n---\nUse the guide.\n");
+  const store = new SkillPackageStore(dataDir);
+  const preview = await store.preview(source);
+  await store.install(source, preview.fingerprint);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "ECHO_PROMPT", reasoningEffort: "high" as const };
+  const context = await service.previewContext(request);
+  assert.match(context.prompt, /sample-skill/);
+  assert.ok(context.warnings.some((warning) => warning.includes("paths in this preview differ")));
+  const run = await finishRun(service, (await service.startRun(request)).id);
+  assert.equal(run.status, "completed");
+  assert.equal(run.reasoningEffort, "high");
+  const sent = run.events.find((event) => event.kind === "message")!.text;
+  assert.match(sent, /sample-skill/);
+  assert.match(sent, /skill-run-copies/);
+  assert.equal(run.contextSummary?.characters, sent.length);
 });
 
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {

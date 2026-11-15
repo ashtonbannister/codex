@@ -179,6 +179,9 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
   }
 
   return {
+    async listSkillPackages() { return []; },
+    async importSkillPackage() { return null; },
+    async setSkillPackageEnabled() {},
     ...createPreviewLibrary(state, publish),
     async getAccountStatus(provider) {
       return { provider, state: "unknown", checkedAt: new Date().toISOString(), message: "Synthetic preview only. No account or credential store was checked." };
@@ -226,6 +229,8 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
       return `C:\\Example runtimes (synthetic)\\${provider}.exe`;
     },
     async openProviderHelp() {},
+    async setLocalServerKey() {},
+    async listCodexModels() { return [{ id: "fixture-codex", name: "Fixture Codex" }]; },
     async listLocalModels(connection) {
       return { connection, models: [{ id: "example-coder:local", name: "Synthetic local coder" }, { id: "example-small:local", name: "Synthetic small model" }], warnings: ["Synthetic preview catalog. No local server was contacted and no model was downloaded."] };
     },
@@ -245,6 +250,14 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
     },
     async acknowledgeRecovery() { recoveryAcknowledged = true; },
     async exportConversation() { return { saved: false }; },
+    async deleteThread(id) {
+      if (!window.confirm("Delete this synthetic preview thread?")) return false;
+      state.threads = state.threads.filter((item) => item.id !== id);
+      state.runs = state.runs.filter((item) => item.threadId !== id);
+      state.verifications = state.verifications.filter((item) => item.threadId !== id);
+      publish();
+      return true;
+    },
     async updateThread(input) {
       const thread = state.threads.find((item) => item.id === input.id);
       if (!thread) throw new Error("The example conversation was not found.");
@@ -373,6 +386,14 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
         appVersion: `${APP_VERSION}-preview`,
         platform: "browser preview",
       };
+    },
+    async ensureChatWorkspace() {
+      const existing = state.projects.find((item) => item.id === "nova-chat-workspace");
+      if (existing) return existing;
+      const project = { id: "nova-chat-workspace", name: "Chats (preview)", path: "/preview/chats", branch: "", createdAt: new Date().toISOString(), kind: "folder" as const };
+      state.projects.push(project);
+      publish();
+      return project;
     },
     async chooseProject() {
       if (!state.projects.length) state.projects.push(exampleProject);

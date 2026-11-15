@@ -106,6 +106,7 @@ export const ImportedHistory = memo(function ImportedHistory({
 
 export function RunCard({ run, onMemory }: { run: Run; onMemory: () => void }) {
   const messages = run.events.filter((event) => event.kind === "message");
+  const thinking = run.events.filter((event) => event.kind === "thinking");
   const tools = run.events.filter((event) => event.kind === "tool");
   const errors = run.events.filter((event) => event.kind === "error");
   const active = isActive(run);
@@ -122,11 +123,19 @@ export function RunCard({ run, onMemory }: { run: Run; onMemory: () => void }) {
         <div className="agent-heading">
           <ProviderMark provider={run.provider} />
           <strong>{providerNames[run.provider]}</strong>
-          <span className="agent-model">{run.model || "Provider default"}</span>
+          <span className="agent-model">{run.model || "Provider default"}{run.reasoningEffort ? ` · ${run.reasoningEffort} thinking` : ""}</span>
           <span className="run-mode-label">
             {run.mode === "plan" ? "Plan" : "Build"}
           </span>
         </div>
+        {thinking.length > 0 && (
+          <details className="tool-group" open>
+            <summary><Brain size={14} /><span>Thinking</span><ChevronDown size={13} /></summary>
+            <div className="tool-event-list thinking-content">
+              {thinking.map((event) => <pre key={event.id}>{event.text}</pre>)}
+            </div>
+          </details>
+        )}
         {tools.length > 0 && (
           <details className="tool-group">
             <summary>

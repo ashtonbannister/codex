@@ -5,14 +5,15 @@ import type { LocalConnection, LocalModelCatalog, LocalProviderKind } from "../.
 import { LOCAL_DEFAULTS } from "../../shared/local-models";
 import type { ProviderStatus, Settings } from "../../shared/types";
 import type { RecoveryItem } from "../../shared/workspace-actions";
+import type { SkillPackage } from "../../shared/skills";
 import { api, isPreview } from "../bridge";
 import { AccountConnections } from "./AccountConnections";
 import { errorText, Modal, ProviderMark } from "./primitives";
 
-type Section = "general" | "agents" | "local" | "storage" | "recovery";
+type Section = "general" | "agents" | "local" | "skills" | "storage" | "recovery";
 const sections: { id: Section; label: string }[] = [
   { id: "general", label: "General" }, { id: "agents", label: "Agents" },
-  { id: "local", label: "Local models" }, { id: "storage", label: "Storage" },
+  { id: "local", label: "Local models" }, { id: "skills", label: "Skills" }, { id: "storage", label: "Storage" },
   { id: "recovery", label: "Recovery" },
 ];
 const backendNames = { ollama: "Ollama", lmstudio: "LM Studio", custom: "Custom endpoint" };
@@ -33,6 +34,8 @@ export function SettingsForm({ settings, providers, workActive = false, initialS
   const [notice, setNotice] = useState("");
   const [catalog, setCatalog] = useState<LocalModelCatalog | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [localKey, setLocalKey] = useState("");
+  const [keyNotice, setKeyNotice] = useState("");
   const [authenticating, setAuthenticating] = useState(false);
   const [discoveryError, setDiscoveryError] = useState("");
   const discoveryId = useRef(0);
@@ -122,7 +125,11 @@ export function SettingsForm({ settings, providers, workActive = false, initialS
         </section>}
         {section === "local" && <section><h3>Connect a local model server</h3>
           <div className="field-row"><label className="field"><span>Local backend</span><select value={connection.kind} onChange={(event) => changeBackend(event.target.value as LocalProviderKind)}><option value="ollama">Ollama</option><option value="lmstudio">LM Studio</option><option value="custom">Custom loopback server</option></select></label><label className="field"><span>API protocol</span><select value={connection.protocol} onChange={(event) => setValues({ ...values, localProtocol: event.target.value as LocalConnection["protocol"] })}><option value="responses">Responses</option><option value="chat-completions">Chat completions</option></select></label></div>
-          <label className="field"><span>Local base URL</span><input type="url" value={connection.baseUrl} onChange={(event) => { setValues({ ...values, localBaseUrl: event.target.value }); setDiscoveryError(""); }} placeholder={LOCAL_DEFAULTS[connection.kind].baseUrl} required /><small>Loopback addresses only. Include /v1; choose the protocol supported by your running server. No cloud endpoints or keys.</small></label>
+          <label className="field"><span>Local base URL</span><input type="url" value={connection.baseUrl} onChange={(event) => { setValues({ ...values, localBaseUrl: event.target.value }); setDiscoveryError(""); }} placeholder={LOCAL_DEFAULTS[connection.kind].baseUrl} required /><small>Loopback addresses only. Include /v1; choose the protocol supported by your running server.</small></label>
+          <label className="field"><span>Local server API key (optional)</span><input type="password" value={localKey} autoComplete="off" onChange={(event) => setLocalKey(event.target.value)} placeholder="Enter a key if your server requires one" /><small>Saved encrypted in Nova’s AppData for this exact local connection. Enter a new key to replace it.</small></label>
+          <button type="button" className="secondary-button" disabled={!localKey} onClick={() => void (async () => { try { await api.setLocalServerKey(connection, localKey); setLocalKey(""); setKeyNotice("Key saved for this connection."); await discover(); } catch (reason) { setDiscoveryError(errorText(reason)); } })()}>Save key and load models</button>
+          <button type="button" className="text-button" onClick={() => void (async () => { try { await api.setLocalServerKey(connection, ""); setLocalKey(""); setKeyNotice("Saved key removed for this connection."); } catch (reason) { setDiscoveryError(errorText(reason)); } })()}>Remove saved key</button>
+          {keyNotice && <p className="field-hint" role="status">{keyNotice}</p>}
           <div className="model-discovery"><button type="button" className="secondary-button" disabled={discovering || !connection.baseUrl.trim()} onClick={() => void discover()}>{discovering ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}Load models</button><span>{currentCatalog ? `${currentCatalog.models.length} available model${currentCatalog.models.length === 1 ? "" : "s"}` : "Uses the unsaved connection above"}</span></div>
           {discoveryError && <p className="form-error" role="alert">{discoveryError} You can still enter a model ID below.</p>}
           {currentCatalog && <><label className="field"><span>Available models</span><select value={currentCatalog.models.some((item) => item.id === values.localModel) ? values.localModel : ""} onChange={(event) => { if (event.target.value) setValues({ ...values, localModel: event.target.value }); }}><option value="">{currentCatalog.models.length ? "Select a model…" : "No models listed — enter an ID below"}</option>{currentCatalog.models.map((item) => <option key={item.id} value={item.id}>{item.name && item.name !== item.id ? `${item.name} · ${item.id}` : item.id}</option>)}</select></label>{currentCatalog.warnings.map((warning, index) => <p className="field-hint" key={index}>{warning}</p>)}</>}
@@ -130,6 +137,7 @@ export function SettingsForm({ settings, providers, workActive = false, initialS
           {connection.kind !== "custom" && <button className="text-button setup-help" type="button" onClick={() => void help(connection.kind as "ollama" | "lmstudio")}><ExternalLink size={12} />{backendNames[connection.kind]} server setup</button>}
           {isPreview && <p className="panel-note">Preview model lists are synthetic. No local server is contacted.</p>}
         </section>}
+        {section === "skills" && <SkillPackagesPanel workActive={workActive} />}
         {section === "storage" && <section><h3>Local storage</h3>
           <div className="field"><label htmlFor="settings-codex-home">Codex import source <small>optional · read-only</small></label><div className="directory-field"><input id="settings-codex-home" aria-label="Codex import source" value={values.codexHome ?? ""} onChange={(event) => setValues({ ...values, codexHome: event.target.value })} placeholder="Use the existing default .codex folder for imports" /><button type="button" className="secondary-button" aria-label="Choose Codex import source folder" disabled={busy} onClick={() => void pick("codex-home")}>{choosing === "codex-home" ? <LoaderCircle size={14} className="spin" /> : "Browse"}</button></div><small>This is only a source for explicit read/copy/import actions. Changing it does not change Nova’s Codex runtime home or account. Nova never starts workers here, writes back, or copies credentials/configuration.</small></div>
           <p className="panel-note">Nova’s Codex runtime home is app-owned and separate from the import source. Sign in once under Agents to use Codex in Nova; your OEM Codex sign-in and working folders stay separate.</p>
@@ -143,6 +151,35 @@ export function SettingsForm({ settings, providers, workActive = false, initialS
       <div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy || workActive} type="submit">{saving && <LoaderCircle className="spin" size={15} />}Save settings</button></div>
     </form>
   </Modal>;
+}
+
+function SkillPackagesPanel({ workActive }: { workActive: boolean }) {
+  const [packages, setPackages] = useState<SkillPackage[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const refresh = async () => setPackages(await api.listSkillPackages());
+  useEffect(() => { let alive = true; void api.listSkillPackages().then((items) => { if (alive) setPackages(items); }).catch((reason) => { if (alive) setError(errorText(reason)); }); return () => { alive = false; }; }, []);
+  const perform = async (operation: () => Promise<void>) => {
+    setBusy(true); setError(""); setNotice("");
+    try { await operation(); await refresh(); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  return <section><h3>Imported skills</h3>
+    <p className="field-hint">Choose a skill folder or a package containing skills. Nova copies the folder and makes enabled skill instructions available to Codex, Claude Code, and local agents. Choose a package root if skills use files outside their own folder.</p>
+    <p className="panel-note">Only import packages you trust. Skill instructions can direct agents to use their available tools. This imports skills and supporting files; plugin MCP servers and tools are not enabled yet.</p>
+    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importSkillPackage(); if (imported) setNotice(`Imported ${imported.name}.`); })}>Import skill package…</button>
+    {workActive && <p className="field-hint">Stop active runs and checks before changing imported skills.</p>}
+    {notice && <p role="status" className="field-hint">{notice}</p>}
+    {error && <p role="alert" className="form-error">{error}</p>}
+    {!packages.length && <p className="field-hint">No skill packages imported.</p>}
+    {packages.map((pkg) => <div className="runtime-detail" key={pkg.id}>
+      <label><input type="checkbox" checked={pkg.enabled} disabled={busy || workActive} onChange={(event) => void perform(() => api.setSkillPackageEnabled(pkg.id, event.target.checked))} /> <strong>{pkg.name}</strong></label>
+      <p className="field-hint">{pkg.skills.length} skill{pkg.skills.length === 1 ? "" : "s"} · {pkg.files} files · {pkg.bytes.toLocaleString()} bytes</p>
+      <ul>{pkg.skills.map((skill) => <li key={skill.path}>{skill.name}{skill.description ? ` — ${skill.description}` : ""}</li>)}</ul>
+    </div>)}
+  </section>;
 }
 
 function RecoveryPanel() {

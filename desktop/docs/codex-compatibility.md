@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.4
+# Codex import and runtime boundaries — v0.5.5
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 
@@ -8,7 +8,7 @@ Nova is an independent development-alpha workbench. Version 0.5.4 replaces the s
 | --- | --- |
 | Electron user data `workspace/codex-runtime` | Fixed private home for Codex/Local workers and Nova's Codex account. Credentials, state/database, logs, and sessions stay here. It is not the selected import source. |
 | Existing `.codex` or explicitly selected import source | Read-only source. No workers, native session resume/fork, startup probes, watchers, migrations, source locks, or writeback. No automatic creation or wholesale copy. |
-| Source `sessions` and `archived_sessions` | Explicit bounded reads of supported uncompressed rollout JSONL. Only visible user/assistant text is copied. Archive state is preserved. |
+| Source `sessions` and `archived_sessions` | Explicit bounded reads of supported plain and zstd/gzip/Brotli-compressed rollout JSONL. Only visible user/assistant text is copied. Archive state is preserved. |
 | Source `session_index.jsonl` | Optional bounded display-name read, not an authoritative database or runtime connection. |
 | Source memory/instruction/skill/plan Markdown | Allowlisted preview and explicit text copy with source fingerprint as provenance. No background freshness reread. |
 | Source `config.toml`, credentials, SQLite databases/sidecars, locks, private app/runtime data | Excluded from content imports and never used as Nova's runtime state. No repairs, migrations, or direct edits. |
@@ -44,11 +44,15 @@ Independent import folders support Plan. Build still requires an explicitly open
 
 The Context inspector shows bounded reference selection and omissions. Every provider has its own context limits and behavior; copying text does not preserve private reasoning, native tools/state, images/attachments, or unlimited history. Earlier imported/native-linked threads keep their visible text and provenance, but future execution is detached from their OEM native session and source working folder.
 
+## Skill packages
+
+Settings → Skills offers a separate explicit package import. The selected folder is copied as a bounded package, including supporting files; imported skill names, descriptions, and run-copy paths are made available to the selected provider. Run copies are separate from the installed snapshot. Claude receives a working-directory exception for only its disposable copy. Context preview uses installed paths for review; the launched copy has different paths. Imported packages are instructions chosen by the user and can tell an agent to use tools already available to it. They do not install plugin MCP servers, automatically resolve external dependencies, or guarantee compatibility with provider-specific tools and paths. Existing Codex Library reference-note imports retain their earlier, text-only behavior.
+
 ## Read-only importer limits
 
-- Conversation discovery supports recognized uncompressed `rollout-*.jsonl` files in the selected source's `sessions` or `archived_sessions`. It never falls back to a database or launches the engine to unpack unsupported formats.
-- Compressed rollouts and engine-only/private formats may be absent. A missing source conversation is not evidence that the OEM app deleted it. Supply an uncompressed copy/export when needed.
-- Listing is bounded to 5,000 rollout files and 15,000 directory entries with shallow traversal. Paginated results and warnings disclose skipped/incomplete content.
+- Conversation discovery supports recognized plain or zstd/gzip/Brotli-compressed `rollout-*.jsonl` files in the selected source's `sessions` or `archived_sessions`. It never falls back to a database or launches the engine to unpack unsupported formats.
+- Compressed rollouts are read in a stream; copying a conversation is limited to 512 MiB of expanded data and retains the latest bounded visible history. Unsupported or engine-only/private formats may be absent. A missing source conversation is not evidence that the OEM app deleted it.
+- Listing is bounded to 15,000 rollout files and 15,000 directory entries with shallow traversal. Paginated results and warnings disclose skipped/incomplete content.
 - History reads a bounded stable slice of at most the latest 8 MiB of a rollout, retains at most 2,000 visible messages / 2 MiB, and bounds individual text/messages and output pages. Oversized/malformed content is not treated as a complete transcript.
 - Conversation source links, redirection outside the chosen source, traversal, and non-regular files are refused. Reads use read-only file handles and check source identity/changes. A short-lived in-memory cache reduces repeated explicit browsing reads; it is not a watcher or background scan.
 - Resource sections are `memories`, `memories_v2`, `instructions`, `skills`, and `plans`. Only the existing allowlisted Markdown paths are previewed; imported skills are reference text, not installed tools.

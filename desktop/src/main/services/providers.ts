@@ -679,20 +679,12 @@ export async function probeProvider(
         `Update ${provider === "claude" ? "Claude Code" : "Codex"}: this build lacks the safe noninteractive flags required by Nova Workbench.`,
       );
     if (provider === "ollama") connectionFromSettings(settings);
-    if (provider === "ollama" && !settings.localModel)
-      return {
-        id: provider,
-        name,
-        available: false,
-        version,
-        detail:
-          "Choose the local server and an installed model in Settings. Refresh models to list its available model IDs. No model is downloaded automatically.",
-      };
     return {
       id: provider,
       name,
       available: true,
       version,
+      supportsPartialMessages: provider === "claude" && help.includes("--include-partial-messages"),
       detail:
         provider === "ollama"
           ? "Codex bridge ready; the selected local endpoint/model is checked when you run. No inference was requested by detection."
@@ -716,7 +708,7 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
-  options: { allowNonGit?: boolean; localConfigArgs?: string[] } = {},
+  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort } = {},
 ): string[] {
   if (provider === "claude") {
     return [
@@ -724,6 +716,7 @@ export function providerArguments(
       "--output-format",
       "stream-json",
       "--verbose",
+      ...(options.claudePartialMessages ? ["--include-partial-messages"] : []),
       "--safe-mode",
       "--restricted",
       "--permission-prompts",
@@ -734,12 +727,14 @@ export function providerArguments(
       mode === "plan" ? "Read,Grep,Glob" : "Read,Grep,Glob,Edit,Write",
       "--settings",
       JSON.stringify({ disableAllHooks: true }),
+      ...(options.skillDirectory ? ["--add-dir", options.skillDirectory] : []),
       "--strict-mcp-config",
       "--mcp-config",
       JSON.stringify({ mcpServers: {} }),
       "--disallowedTools",
       "mcp__*",
       ...(model ? ["--model", model] : []),
+      ...(options.reasoningEffort ? ["--effort", options.reasoningEffort] : []),
     ];
   }
   return [
@@ -796,6 +791,7 @@ export function providerArguments(
         ]
       : []),
     ...(model ? ["--model", model] : []),
+    ...(options.reasoningEffort ? ["--config", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : []),
     "-",
   ];
 }
@@ -850,6 +846,7 @@ export async function runProvider(options: {
     let buffer = "";
     let bytes = 0;
     let completed = false;
+    let claudeStreamedThinking = false;
     let failure: string | undefined;
     let settled = false;
     let finishing = false;
@@ -875,9 +872,14 @@ export async function runProvider(options: {
     const emitLine = (line: string) => {
       if (!line.trim()) return;
       const event = normalizeProviderLine(options.provider, line);
+      if (options.provider === "claude") {
+        if (event.thinkingDelta) claudeStreamedThinking = true;
+        if (claudeStreamedThinking) event.events = event.events.filter((item) => item.kind !== "thinking");
+      }
       if (event.failed) failure ??= event.failed.slice(0, 4_000);
       if (event.completed) completed = true;
-      options.onEvent(event);
+      if (event.events.length || event.thinkingDelta || event.sessionId || event.usage || event.completed || event.failed)
+        options.onEvent(event);
     };
     const consume = (chunk: Buffer) => {
       bytes += chunk.length;

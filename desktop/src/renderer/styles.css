@@ -1571,6 +1571,11 @@ kbd {
   padding: 6px 0;
   margin: 0;
 }
+.thinking-content pre {
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
 .run-footer {
   display: flex;
   flex-wrap: wrap;

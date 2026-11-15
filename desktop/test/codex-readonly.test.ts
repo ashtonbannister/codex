@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFi
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { zstdCompressSync, gzipSync, brotliCompressSync } from "node:zlib";
 import { listCodexThreads, readCodexHistory } from "../src/main/services/codex-readonly";
 import { inspectCodexInstallation } from "../src/main/services/codex-installation";
 
@@ -86,7 +87,33 @@ test("history pagination is chronological, snapshot-bound, and refuses changed s
   await assert.rejects(readCodexHistory(home, { threadId: firstId, cursor: recent.nextCursor }), /source.*changed|source changed/i);
 });
 
-test("import never follows rollout links, never inventories external app folders, and reports unsupported compression", async (t) => {
+test("compressed conversation formats list and import visible messages without changing source files", async (t) => {
+  const { home } = await fixture(t);
+  const directory = path.join(home, "sessions");
+  await mkdir(directory);
+  const cases = [
+    ["11111111-1111-4111-8111-111111111111", "zst", zstdCompressSync],
+    ["22222222-2222-4222-8222-222222222222", "gz", gzipSync],
+    ["33333333-3333-4333-8333-333333333333", "br", brotliCompressSync],
+  ] as const;
+  for (const [id, extension, compress] of cases) {
+    const contents = [meta(id), record("event_msg", { type: "user_message", message: "Visible question" }), record("event_msg", { type: "agent_message", message: "Visible answer" })].map((row) => JSON.stringify(row)).join("\n") + "\n";
+    const file = path.join(directory, `rollout-synthetic-${id}.jsonl.${extension}`);
+    const bytes = compress(Buffer.from(contents));
+    await writeFile(file, bytes);
+  }
+  const listing = await listCodexThreads(home, {});
+  for (const [id, extension] of cases) {
+    assert.ok(listing.threads.some((item) => item.id === id));
+    const file = path.join(directory, `rollout-synthetic-${id}.jsonl.${extension}`);
+    const before = await readFile(file);
+    const history = await readCodexHistory(home, { threadId: id });
+    assert.deepEqual(history.messages.map((entry) => entry.text), ["Visible question", "Visible answer"]);
+    assert.deepEqual(await readFile(file), before);
+  }
+});
+
+test("import never follows rollout links, never inventories external app folders, and skips invalid source paths", async (t) => {
   const { root, home } = await fixture(t);
   const outside = path.join(root, "outside");
   await mkdir(outside);
@@ -102,7 +129,7 @@ test("import never follows rollout links, never inventories external app folders
   }
   const listing = await listCodexThreads(home, {});
   assert.equal(listing.threads.length, 0);
-  assert.match(listing.warnings.join(" "), /Compressed rollouts/);
+  assert.match(listing.warnings.join(" "), /unsupported source paths/);
   const inventory = await inspectCodexInstallation(home, { documents: outside, appData: outside, localAppData: outside, userProfile: outside });
   assert.equal(inventory.locations.some((entry) => entry.id === "outputs" || entry.id.startsWith("package-")), false);
   assert.equal(inventory.locations.find((entry) => entry.id === "auth.json")?.access, "excluded");

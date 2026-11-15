@@ -6,6 +6,7 @@ import {
   net,
   nativeTheme,
   protocol,
+  safeStorage,
   session,
   shell,
 } from "electron";
@@ -22,6 +23,8 @@ import type {
   WorkspaceState,
 } from "../shared/types";
 import { WorkspaceService } from "./services/workspace-service";
+import { LocalKeyStore } from "./services/local-key-store";
+import { SkillPackageStore } from "./services/skill-packages";
 import {
   inspectCodexInstallation,
   resolveCodexHome,
@@ -157,6 +160,9 @@ const PASSIVE_DURING_AUTH = new Set([
 ]);
 const ACCOUNT_OPERATIONS = new Set([
   "provider:account-status",
+  "provider:codex-models",
+  "skills:import",
+  "skills:enabled",
   "provider:login-start",
 ]);
 
@@ -209,7 +215,34 @@ function handle(
   });
 }
 
+let localKeyStore: LocalKeyStore;
+const localKey = (connection: ReturnType<typeof validateLocalConnection>) => localKeyStore.get(connection);
+
 function registerHandlers(service: WorkspaceService) {
+  const skills = new SkillPackageStore(path.join(app.getPath("userData"), "workspace"));
+  handle("skills:list", () => skills.list());
+  handle("skills:import", async () => {
+    const selected = await dialog.showOpenDialog(window!, {
+      title: "Choose a skill or plugin package folder",
+      buttonLabel: "Review package",
+      properties: ["openDirectory"],
+    });
+    if (selected.canceled || !selected.filePaths[0]) return null;
+    const source = selected.filePaths[0];
+    const preview = await skills.preview(source);
+    const result = await dialog.showMessageBox(window!, {
+      type: "question", buttons: ["Cancel", "Import skills"], defaultId: 0, cancelId: 0,
+      title: "Import this skill package?",
+      message: `Import ${confirmationValue(preview.name)} with ${preview.skills.length} skill(s)?`,
+      detail: `Source: ${confirmationValue(source)}\n${preview.files} files · ${preview.bytes.toLocaleString()} bytes\n\nSkills:\n${preview.skills.slice(0, 30).map((item) => `• ${confirmationValue(item.name)} — ${confirmationValue(item.path)}`).join("\n")}${preview.skills.length > 30 ? "\n…additional skills" : ""}\n\nAll files in this folder are copied into Nova. Enabled skill names, descriptions, and paths are supplied to the selected agent; the agent can read the copied instructions and supporting files. Skill instructions may request commands or external tools and should be trusted. MCP servers and plugin tools are not installed or enabled by this action. The source is not changed.`,
+    });
+    if (result.response !== 1) return null;
+    return skills.install(source, preview.fingerprint);
+  });
+  handle("skills:enabled", async (payload) => {
+    const input = objectPayload(payload);
+    await skills.setEnabled(identifier(input.id), input.enabled as boolean);
+  });
   const accounts = new ProviderAuthService({
     openExternal: async (url) => {
       if (!officialLoginUrl("codex", url) && !officialLoginUrl("claude", url))
@@ -246,9 +279,17 @@ function registerHandlers(service: WorkspaceService) {
       throw new Error("Unknown provider documentation.");
     await shell.openExternal(pages[payload]!);
   });
-  handle("provider:local-models", async (payload) =>
-    listLocalModels(validateLocalConnection(payload)),
-  );
+  handle("provider:local-models", async (payload) => {
+    const connection = validateLocalConnection(payload);
+    return listLocalModels(connection, undefined, localKey(connection));
+  });
+  handle("provider:local-key", async (payload) => {
+    const input = objectPayload(payload);
+    const connection = validateLocalConnection(input.connection);
+    if (typeof input.key !== "string" || input.key.length > 4096 || /[\x00-\x1f\x7f]/.test(input.key))
+      throw new Error("Invalid local server key.");
+    await localKeyStore.set(connection, input.key);
+  });
   const approvedImportSources = new Set<string>();
   const approvedHandoffs = new Set<string>();
   let importPrompt: Promise<void> | undefined;
@@ -316,6 +357,7 @@ function registerHandlers(service: WorkspaceService) {
   };
   const accountIdentity = (options: Awaited<ReturnType<typeof accountOptions>>) =>
     JSON.stringify([options.settings.codexPath, options.settings.claudePath, options.home]);
+  handle("provider:codex-models", async () => accounts.listModels(await accountOptions("codex")));
   handle("provider:account-status", async (payload) => {
     const provider = accountProvider(payload);
     const options = await accountOptions(provider);
@@ -484,9 +526,26 @@ function registerHandlers(service: WorkspaceService) {
   handle("thread:update", (payload) =>
     service.updateThread(objectPayload(payload) as unknown as ThreadUpdate),
   );
+  handle("thread:delete", async (payload) => {
+    const id = identifier(payload);
+    const thread = (await service.snapshot()).state.threads.find((item) => item.id === id);
+    if (!thread) throw new Error("Thread not found.");
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "warning",
+      buttons: ["Cancel", "Delete thread"],
+      defaultId: 0,
+      cancelId: 0,
+      message: `Delete “${confirmationValue(thread.title)}”?`,
+      detail: `This permanently removes the conversation and its run and check history from Nova.${thread.worktreePath ? `\n\nThe worktree and its files remain at: ${confirmationValue(thread.worktreePath)}` : ""}\n\nProject files and the source Codex conversation are not deleted.`,
+    });
+    if (confirmation.response !== 1) return false;
+    await service.deleteThread(id);
+    return true;
+  });
   handle("context:preview", (payload) =>
     service.previewContext(objectPayload(payload) as unknown as RunRequest),
   );
+  handle("project:ensure-chat", () => service.ensureChatWorkspace());
   handle("project:choose", async () => {
     const result = await dialog.showOpenDialog(window!, {
       title: "Open a Git project",
@@ -767,9 +826,13 @@ if (!app.requestSingleInstanceLock()) {
           }
         });
       }
+      const dataDir = path.join(app.getPath("userData"), "workspace");
+      localKeyStore = new LocalKeyStore(dataDir, safeStorage);
+      await localKeyStore.load();
       workspace = new WorkspaceService(
-        path.join(app.getPath("userData"), "workspace"),
+        dataDir,
         broadcast,
+        localKey,
       );
       await workspace.initialize();
       registerHandlers(workspace);

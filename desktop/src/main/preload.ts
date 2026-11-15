@@ -11,6 +11,9 @@ import type {
 } from "../shared/types";
 
 const bridge: WorkbenchAPI = {
+  listSkillPackages: () => ipcRenderer.invoke("skills:list"),
+  importSkillPackage: () => ipcRenderer.invoke("skills:import"),
+  setSkillPackageEnabled: (id, enabled) => ipcRenderer.invoke("skills:enabled", { id, enabled }),
   getAccountStatus: (provider) => ipcRenderer.invoke("provider:account-status", provider),
   startProviderLogin: (provider) => ipcRenderer.invoke("provider:login-start", provider),
   getProviderLogin: () => ipcRenderer.invoke("provider:login-state"),
@@ -22,7 +25,9 @@ const bridge: WorkbenchAPI = {
   publishCodexHandoff: (threadId) => ipcRenderer.invoke("codex:publish-handoff", threadId),
   chooseExecutable: (provider) => ipcRenderer.invoke("provider:choose-executable", provider),
   openProviderHelp: (provider) => ipcRenderer.invoke("provider:help", provider),
+  listCodexModels: () => ipcRenderer.invoke("provider:codex-models"),
   listLocalModels: (connection) => ipcRenderer.invoke("provider:local-models", connection),
+  setLocalServerKey: (connection, key) => ipcRenderer.invoke("provider:local-key", { connection, key }),
   reviewWorktree: (runId) => ipcRenderer.invoke("worktree:review", runId),
   commitWorktree: (request) => ipcRenderer.invoke("worktree:commit", request),
   integrateWorktree: (request) => ipcRenderer.invoke("worktree:integrate", request),
@@ -43,11 +48,13 @@ const bridge: WorkbenchAPI = {
   getSnapshot: () => ipcRenderer.invoke("workspace:snapshot"),
   refreshProviderStatus: () =>
     ipcRenderer.invoke("workspace:refresh-providers"),
+  deleteThread: (threadId) => ipcRenderer.invoke("thread:delete", threadId),
   updateThread: (input: ThreadUpdate) =>
     ipcRenderer.invoke("thread:update", input),
   previewContext: (request: RunRequest) =>
     ipcRenderer.invoke("context:preview", request),
   chooseProject: () => ipcRenderer.invoke("project:choose"),
+  ensureChatWorkspace: () => ipcRenderer.invoke("project:ensure-chat"),
   startRun: (request: RunRequest) => ipcRenderer.invoke("run:start", request),
   cancelRun: (runId: string) => ipcRenderer.invoke("run:cancel", runId),
   getDiff: (runId: string) => ipcRenderer.invoke("run:diff", runId),

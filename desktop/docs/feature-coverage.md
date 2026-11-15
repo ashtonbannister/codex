@@ -1,4 +1,4 @@
-# Nova Workbench feature coverage — 0.5.4
+# Nova Workbench feature coverage — 0.5.5
 
 This records what this application implements, not everything present in a vendor's desktop app. **Implemented** means there is a working code path and an explicit failure path; it does not mean a live account, installed model, or proprietary UI has been tested on the user's machine. Consult the matching commit's GitHub Actions results for automated evidence.
 
@@ -23,11 +23,13 @@ This records what this application implements, not everything present in a vendo
 | --- | --- | --- |
 | Codex account login/status | Official app-server `account/read`, ChatGPT login start/completion/cancel in Nova's private runtime; trusted browser launch, bounded process ownership | Separate one-time Nova sign-in; no OEM account reuse, token copying, password form, or source-home worker |
 | Claude Code account login/status | Official CLI `auth status` JSON and `auth login` browser flow under safe mode | Claude Desktop sign-in is separate; organization-specific interactive flows may need the CLI terminal |
-| Existing official Codex conversations | Explicit read-only browsing of supported JSONL rollouts, bounded preview/import and Copy latest; independent Nova folders and visible context for every provider | No startup source reads, watchers, databases, source workers, native resume/fork, or writeback; unsupported/compressed/engine-only histories may be absent |
+| Existing official Codex conversations | Explicit read-only browsing of supported JSONL rollouts, bounded preview/import and Copy latest; independent Nova folders and visible context for every provider | No startup source reads, watchers, databases, source workers, native resume/fork, or writeback; unsupported or engine-only histories may be absent; compressed histories over the expanded read limit cannot be copied |
 | Nova context back to OEM Codex | Native publication removed; use explicit visible Markdown export for a copy | Compatibility IPC rejects immediately; no thread creation/injection or private-state synchronization |
 | Codex and Claude coding | Separately installed CLIs, private Nova Codex runtime and normal Claude Code account, explicit provider selection | Provider permissions, model availability, usage limits and billing remain separate |
 | Local Responses models | Configurable Ollama/LM Studio/custom loopback API, metadata-only model discovery, Codex harness against Responses-native server | Discovery does not prove a model is loaded/capable; no model download or hosted fallback |
 | Local Chat Completions models | Per-run loopback translation for streaming text and supported tool calls | Not complete Responses parity: no media/attachments, encrypted reasoning/native response IDs, background jobs, hosted tools or structured-output formats |
+| Skill package imports | Explicit folder review/import; complete bounded copies with per-run disposable copies, catalog sent to Codex, Claude and local workers | Links and oversized packages are refused; only imported skills are offered; plugin servers/tools and dependencies are not installed |
+| Thinking strength | Codex advertised levels, Claude CLI effort, and local reasoning request | Availability and actual model behavior depend on the provider/server; local servers can ignore the request |
 | Existing Codex reference files | Explicit preview/import of allowlisted Markdown memories, instructions, skill references and plans with import fingerprints | Independent copies, not background freshness reads; references do not install skills/plugins or migrate private memory/automation databases |
 
 Login and local connection setup are not substitutes for a real provider acceptance test. Nova preserves supported account boundaries: it does not turn a ChatGPT subscription into Anthropic access, or give a local model the context window/capabilities of a different model.

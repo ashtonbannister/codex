@@ -17,7 +17,7 @@ test("browser preview has an honest empty state and refuses model execution", as
     ),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Start with a project" }),
+    page.getByRole("heading", { name: "Start a conversation" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Send message", exact: true }),
@@ -37,6 +37,15 @@ test("browser preview has an honest empty state and refuses model execution", as
   await expect(page.getByRole("alert")).toContainText("desktop application");
   await expect(page.locator(".run-card")).toHaveCount(0);
   expect(pageErrors).toEqual([]);
+});
+
+test("Codex model picker selects a discovered model", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open example project", exact: true }).click();
+  const picker = page.getByRole("combobox", { name: "Available Codex models" });
+  await expect(picker.locator("option", { hasText: "Fixture Codex" })).toHaveCount(1);
+  await picker.selectOption("fixture-codex");
+  await expect(page.getByRole("textbox", { name: "Model override" })).toHaveValue("fixture-codex");
 });
 
 test("sample conversation is explicitly illustrative and unverified", async ({
@@ -112,6 +121,20 @@ test("project memory can be created, edited, and explicitly archived", async ({
   await expect(
     page.getByRole("heading", { name: "Keep the important parts" }),
   ).toBeVisible();
+});
+
+test("skill packages can be imported and disabled in settings", async ({ page }) => {
+  await installFakeDesktopBridge(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Skills" }).click();
+  await dialog.getByRole("button", { name: "Import skill package…" }).click();
+  await expect(dialog.getByText("sample — Fixture skill", { exact: true })).toBeVisible();
+  const enabled = dialog.getByRole("checkbox", { name: "Fixture skills" });
+  await expect(enabled).toBeChecked();
+  await enabled.uncheck();
+  await expect(enabled).not.toBeChecked();
 });
 
 test("settings enforce timeout bounds and apply appearance", async ({
@@ -300,6 +323,54 @@ test("unavailable agents cannot run until an explicit availability refresh", asy
           .__workbenchTest.refreshes,
     ),
   ).toBe(1);
+});
+
+test("completed thinking remains visible and can be collapsed", async ({ page }) => {
+  await installFakeDesktopBridge(page, { seed: true, thinking: true });
+  await page.goto("/");
+  const panel = page.locator("details.tool-group").filter({ hasText: "Thinking" });
+  await expect(panel.getByText("Synthetic streamed thinking.")).toBeVisible();
+  await panel.locator("summary").click();
+  await expect(panel.getByText("Synthetic streamed thinking.")).toBeHidden();
+  await panel.locator("summary").click();
+  await expect(panel.getByText("Synthetic streamed thinking.")).toBeVisible();
+});
+
+test("a chat starts without selecting a project folder", async ({ page }) => {
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true });
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Message your coding agent" }).fill("Hello without a project");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.getByRole("article").getByText("Hello without a project", { exact: true })).toBeVisible();
+  const requests = await page.evaluate(() => (window as unknown as { __workbenchTest: { requests: RunRequest[] } }).__workbenchTest.requests);
+  expect(requests[0]).toMatchObject({ projectId: "nova-chat-workspace", mode: "plan", prompt: "Hello without a project" });
+});
+
+test("thinking strength reaches the selected provider", async ({ page }) => {
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true });
+  await page.goto("/");
+  const agent = page.getByRole("combobox", { name: "Choose agent" });
+  const effort = page.getByRole("combobox", { name: "Thinking strength" });
+  for (const provider of ["codex", "claude", "ollama"]) {
+    await agent.selectOption(provider);
+    if (provider === "ollama") await page.getByRole("combobox", { name: "Available local models" }).selectOption("fixture-coder");
+    await effort.selectOption("high");
+    await page.getByRole("textbox", { name: "Message your coding agent" }).fill(`Test ${provider}`);
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect(page.getByRole("article").getByText(`Test ${provider}`, { exact: true })).toBeVisible();
+  }
+  const requests = await page.evaluate(() => (window as unknown as { __workbenchTest: { requests: RunRequest[] } }).__workbenchTest.requests);
+  expect(requests.map(({ provider, reasoningEffort }) => [provider, reasoningEffort])).toEqual([["codex", "high"], ["claude", "high"], ["ollama", "high"]]);
+});
+
+test("discovered local models can be selected from the composer", async ({ page }) => {
+  await installFakeDesktopBridge(page);
+  await page.goto("/");
+  await page.getByRole("combobox", { name: "Choose agent" }).selectOption("ollama");
+  const models = page.getByRole("combobox", { name: "Available local models" });
+  await expect(models).toBeVisible();
+  await models.selectOption("fixture-coder");
+  await expect(page.getByRole("textbox", { name: "Model override" })).toHaveValue("fixture-coder");
 });
 
 test("local model runs require an explicit model and Build is sent to the native bridge", async ({

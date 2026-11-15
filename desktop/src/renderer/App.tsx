@@ -29,8 +29,9 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { APP_VERSION, emptyWorkspace } from "../shared/types";
+import { APP_VERSION, REASONING_EFFORTS, emptyWorkspace, type CodexModel, type ReasoningEffort } from "../shared/types";
 import type { CodexMemorySource } from "../shared/compatibility";
+import { LOCAL_DEFAULTS, type LocalModel } from "../shared/local-models";
 import type {
   ContextPreview,
   DiffSnapshot,
@@ -98,6 +99,11 @@ export function App() {
     platform: "",
   });
   const [loading, setLoading] = useState(true);
+  const [localModels, setLocalModels] = useState<LocalModel[]>([]);
+  const [localModelsError, setLocalModelsError] = useState("");
+  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
+  const [codexModelsError, setCodexModelsError] = useState("");
+  const [modelsRefresh, setModelsRefresh] = useState(0);
   const [surface, setSurface] = useState<"workspace" | "library">("workspace");
   const [libraryResource, setLibraryResource] = useState<
     CodexMemorySource | undefined
@@ -105,8 +111,8 @@ export function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const composerDraft = useComposerDraft(projectId, threadId);
-  const { provider, model, mode, text: draft } = composerDraft.draft;
-  const setModel = (value: string) => composerDraft.update({ model: value });
+  const { provider, model, reasoningEffort, mode, text: draft } = composerDraft.draft;
+  const setModel = (value: string) => composerDraft.update({ model: value, reasoningEffort: undefined });
   const setMode = (value: RunMode) => composerDraft.update({ mode: value });
   const setDraft = (value: string) => composerDraft.update({ text: value });
   const [tab, setTab] = useState<InspectorTab>("changes");
@@ -152,10 +158,12 @@ export function App() {
     (item) => item.projectId === projectId && item.status === "active",
   );
   const activeProvider = providers.find((item) => item.id === provider);
-  const folderProject = project?.kind === "folder";
+  const folderProject = !project || project.kind === "folder";
   const hasTranscript = runs.length > 0 || !!thread?.codex;
   const configuredModel =
     model.trim() || (provider === "ollama" ? state.settings.localModel : "");
+  const selectedCodexModel = codexModels.find((item) => item.id === model) ?? (!model ? codexModels.find((item) => item.isDefault) : undefined);
+  const availableEfforts: readonly ReasoningEffort[] = provider === "claude" ? ["low", "medium", "high", "xhigh", "max"] : provider === "codex" && selectedCodexModel?.reasoningEfforts?.length ? selectedCodexModel.reasoningEfforts : REASONING_EFFORTS;
   const contextRequest = useMemo<RunRequest | null>(
     () =>
       projectId
@@ -164,11 +172,12 @@ export function App() {
             threadId: threadId ?? undefined,
             provider,
             model: configuredModel || undefined,
+            reasoningEffort,
             mode,
             prompt: draft.trim(),
           }
         : null,
-    [projectId, threadId, provider, configuredModel, mode, draft],
+    [projectId, threadId, provider, configuredModel, reasoningEffort, mode, draft],
   );
   const memoryVersion = activeMemories
     .map((entry) => `${entry.id}:${entry.updatedAt}:${entry.filePath ?? ""}`)
@@ -212,6 +221,32 @@ export function App() {
       unsubscribe();
     };
   }, []);
+  useEffect(() => {
+    if (provider !== "codex" || loading) return;
+    let alive = true;
+    setCodexModelsError("");
+    void api.listCodexModels().then((models) => { if (alive) setCodexModels(models); })
+      .catch((reason) => { if (alive) { setCodexModels([]); setCodexModelsError(errorText(reason)); } });
+    return () => { alive = false; };
+  }, [provider, loading, state.settings.codexPath, modelsRefresh]);
+  useEffect(() => {
+    if (provider !== "ollama") return;
+    let alive = true;
+    const kind = state.settings.localProvider ?? "ollama";
+    const connection = {
+      kind,
+      baseUrl: state.settings.localBaseUrl ?? LOCAL_DEFAULTS[kind].baseUrl,
+      protocol: state.settings.localProtocol ?? LOCAL_DEFAULTS[kind].protocol,
+    };
+    setLocalModels([]);
+    setLocalModelsError("");
+    void api.listLocalModels(connection).then((catalog) => {
+      if (alive) setLocalModels(catalog.models);
+    }).catch((reason) => {
+      if (alive) setLocalModelsError(errorText(reason));
+    });
+    return () => { alive = false; };
+  }, [provider, state.settings.localProvider, state.settings.localBaseUrl, state.settings.localProtocol, modelsRefresh]);
   useEffect(() => {
     document.documentElement.dataset.theme = state.settings.theme;
   }, [state.settings.theme]);
@@ -345,10 +380,6 @@ export function App() {
     setArchived(!!next.archivedAt);
   };
   const newThread = () => {
-    if (!project) {
-      void addProject();
-      return;
-    }
     setSurface("workspace");
     setThreadId(null);
     setArchived(false);
@@ -356,7 +387,6 @@ export function App() {
     composer.current?.focus();
   };
   const canSend =
-    !!project &&
     !!draft.trim() &&
     !busy &&
     !sharing &&
@@ -366,13 +396,18 @@ export function App() {
     (!!activeProvider?.available || isPreview) &&
     (provider !== "ollama" || !!configuredModel);
   const submit = async () => {
-    if (!canSend || !contextRequest) return;
+    if (!canSend) return;
     const submittedKey = composerDraft.key;
     const submittedDraft = composerDraft.draft;
     setBusy(true);
     setError("");
     try {
-      const run = await api.startRun(contextRequest);
+      const chatProject = projectId ? null : await api.ensureChatWorkspace();
+      const request = contextRequest ?? {
+        projectId: chatProject!.id, provider, model: configuredModel || undefined, reasoningEffort, mode: "plan" as const, prompt: draft.trim(),
+      };
+      const run = await api.startRun(request);
+      if (chatProject) setProjectId(chatProject.id);
       composerDraft.clearSubmitted(submittedKey, submittedDraft, run.threadId);
       if (composerDraft.currentKey.current === submittedKey) {
         setThreadId(run.threadId);
@@ -394,7 +429,7 @@ export function App() {
     setDialog("memory");
   };
   const changeProvider = (value: ProviderId) => {
-    composerDraft.update({ provider: value, model: "" });
+    composerDraft.update({ provider: value, model: "", reasoningEffort: undefined });
   };
   const openSettings = (section: "general" | "storage" | "recovery" = "general") => {
     setSettingsSection(section);
@@ -475,10 +510,13 @@ export function App() {
                 <button
                   className="new-thread-button"
                   onClick={newThread}
-                  title={project ? "Start a new conversation" : "Open a project to start a conversation"}
+                  title="Start a new conversation"
                 >
                   <SquarePen size={16} />
                   <span>New thread</span>
+                </button>
+                <button className="sidebar-search" onClick={() => { setProjectId(null); setThreadId(null); setMode("plan"); setSurface("workspace"); setArchived(false); composer.current?.focus(); }}>
+                  <MessageSquare size={14} /><span>New chat without project</span>
                 </button>
                 <button
                   className="sidebar-search"
@@ -724,6 +762,7 @@ export function App() {
                   <span>Model</span>
                   <input aria-label="Model override" title="Optional model ID; empty uses the agent default" placeholder="Provider default" value={model} maxLength={256} onChange={(event) => setModel(event.target.value)} />
                 </label>
+                <label><span>Thinking</span><select aria-label="Thinking strength" value={reasoningEffort ?? ""} onChange={(event) => composerDraft.update({ reasoningEffort: (event.target.value || undefined) as ReasoningEffort | undefined })}><option value="">Provider default</option>{availableEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>
               </div>
             )}
             {surface === "workspace" && (
@@ -814,7 +853,7 @@ export function App() {
             />
           ) : (
             <>
-              {folderProject && (
+              {project && folderProject && project.id !== "nova-chat-workspace" && (
                 <div className="folder-project-note">
                   Folder project · Plan only. Isolated Build requires a Git
                   repository; Nova will not initialize or modify this folder
@@ -876,12 +915,12 @@ export function App() {
                     <h1>
                       {project
                         ? "What are we working on?"
-                        : "Start with a project"}
+                        : "Start a conversation"}
                     </h1>
                     <p className="welcome-description">
                       {project
                         ? "Describe a change, ask a question, or plan the next step."
-                        : "Open a local project to work with Codex, Claude, or a local model."}
+                        : "Ask a question, or open a project to work with its files."}
                     </p>
                     {project ? (
                       <div className="welcome-project">
@@ -969,7 +1008,7 @@ export function App() {
                         ? "Restore this conversation to continue…"
                         : project
                           ? "Ask about this project or describe a change…"
-                          : "Open a project to begin…"
+                          : "Ask a question…"
                     }
                     disabled={!!thread?.archivedAt}
                     rows={2}
@@ -1001,6 +1040,18 @@ export function App() {
                         <option value="ollama">{localLabel}</option>
                       </select>
                     </div>
+                    {provider === "codex" && <select className="model-input" aria-label="Available Codex models" value={codexModels.some((item) => item.id === model) ? model : ""} onChange={(event) => setModel(event.target.value)}>
+                      <option value="">{model && !codexModels.some((item) => item.id === model) ? `Current: ${model}` : codexModelsError ? "Model list unavailable" : "Provider default"}</option>
+                      {codexModels.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+                    </select>}
+                    {provider === "codex" && <button type="button" className="text-button" title={codexModelsError || "Refresh Codex models"} aria-label="Refresh Codex models" onClick={() => setModelsRefresh((value) => value + 1)}><RefreshCw size={13} /></button>}
+                    {provider === "ollama" && (
+                      <select className="model-input" aria-label="Available local models" value={localModels.some((item) => item.id === configuredModel) ? configuredModel : ""} onChange={(event) => setModel(event.target.value)}>
+                        <option value="">{configuredModel ? `Current: ${configuredModel}` : localModelsError ? "Model list unavailable" : localModels.length ? "Select a model…" : "No models discovered"}</option>
+                        {localModels.map((item) => <option key={item.id} value={item.id}>{item.name && item.name !== item.id ? `${item.name} · ${item.id}` : item.id}</option>)}
+                      </select>
+                    )}
+                    {provider === "ollama" && <button type="button" className="text-button" title={localModelsError || "Refresh local models"} aria-label="Refresh local models" onClick={() => setModelsRefresh((value) => value + 1)}><RefreshCw size={13} /></button>}
                     <input
                       className="model-input"
                       aria-label="Model override"
@@ -1014,6 +1065,12 @@ export function App() {
                       maxLength={256}
                       onChange={(event) => setModel(event.target.value)}
                     />
+                    <select className="model-input" aria-label="Thinking strength" title={provider === "ollama" ? "Requested strength; local server and model support varies" : "Thinking strength"} value={reasoningEffort ?? ""} onChange={(event) => composerDraft.update({ reasoningEffort: (event.target.value || undefined) as ReasoningEffort | undefined })}>
+                      <option value="">Thinking: default</option>
+                      {reasoningEffort && !availableEfforts.includes(reasoningEffort) && <option value={reasoningEffort}>{reasoningEffort} (not listed for this model)</option>}
+                      {availableEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+                    </select>
+                    {provider === "codex" && codexModelsError && <span role="alert" title={codexModelsError}>Model list unavailable: {codexModelsError} Refresh to retry.</span>}
                     <div className="composer-right">
                       <div
                         className="mode-switch"
@@ -1074,8 +1131,12 @@ export function App() {
                 </div>
                 <div className="composer-caption">
                   <span>
-                    {!project ? (
-                      "Choose a local project folder."
+                    {provider === "ollama" && localModelsError ? (
+                      <span role="status">{localModelsError}</span>
+                    ) : !project ? (
+                      "Chat without a project · Plan mode."
+                    ) : project.id === "nova-chat-workspace" ? (
+                      "Chat without a project · Plan mode."
                     ) : folderProject ? (
                       "Folder project · Plan only; Build requires Git."
                     ) : provider === "ollama" && !configuredModel ? (
@@ -1455,7 +1516,7 @@ export function App() {
           workActive={workActive}
           initialSection={settingsSection}
           onClose={() => { setDialog(null); void refreshSnapshot(); }}
-          onSaved={refreshSnapshot}
+          onSaved={async () => { await refreshSnapshot(); setModelsRefresh((value) => value + 1); }}
         />
       )}
       {dialog === "memory" && project && (
@@ -1494,6 +1555,19 @@ export function App() {
           anchor={threadMenu.anchor}
           onClose={() => setThreadMenu(null)}
           onExport={() => void exportThread(threadMenu.thread.id)}
+          onDelete={() => {
+            const id = threadMenu.thread.id;
+            setThreadMenu(null);
+            void (async () => {
+              try {
+                if (await api.deleteThread(id)) {
+                  composerDraft.removeThread(id);
+                  setThreadId((current) => current === id ? null : current);
+                  await refreshSnapshot();
+                }
+              } catch (reason) { setError(errorText(reason)); }
+            })();
+          }}
           exporting={exporting}
           sharing={sharing || workActive}
           onRefreshCodex={() => void copyLatestHistory(threadMenu.thread.id)}

@@ -82,6 +82,7 @@ export async function installFakeDesktopBridge(
     libraryFailure?: string;
     finishing?: boolean;
     noProjects?: boolean;
+    thinking?: boolean;
   } = {},
 ) {
   const initial = emptyWorkspace();
@@ -123,6 +124,9 @@ export async function installFakeDesktopBridge(
           text: "## Renderer test fixture\n\n**Synthetic output.** No model was invoked.\n\n- Inspect the source revision.\n- Run the named check before integrating.",
         },
       ],
+    });
+    if (options.thinking) initial.runs[0]!.events.unshift({
+      id: "fixture-thinking", at: now, kind: "thinking", text: "Synthetic streamed thinking.",
     });
     initial.memories.push(
       {
@@ -344,6 +348,7 @@ export async function installFakeDesktopBridge(
         appVersion: `${version}-test`,
         platform: "mock-desktop",
       });
+      const skillPackages: import("../src/shared/skills").SkillPackage[] = [];
       const bridge: WorkbenchAPI = {
         async getAccountStatus(provider) {
           calls.accountChecks.push(provider);
@@ -398,6 +403,11 @@ export async function installFakeDesktopBridge(
           return `C:\\Fixture runtimes\\${provider}.exe`;
         },
         async openProviderHelp(provider) { calls.providerHelp.push(provider); },
+        async setLocalServerKey() {},
+        async listSkillPackages() { return structuredClone(skillPackages); },
+        async importSkillPackage() { const pkg = { id: "fixture-package", name: "Fixture skills", enabled: true, skills: [{ path: "sample/SKILL.md", name: "sample", description: "Fixture skill" }], files: 2, bytes: 24, fingerprint: "a".repeat(64) }; skillPackages.push(pkg); return structuredClone(pkg); },
+        async setSkillPackageEnabled(id, enabled) { const pkg = skillPackages.find((item) => item.id === id); if (!pkg) throw new Error("Fixture package missing"); pkg.enabled = enabled; },
+        async listCodexModels() { return [{ id: "fixture-codex", name: "Fixture Codex", reasoningEfforts: ["low", "high"], isDefault: true }]; },
         async listLocalModels(connection) {
           calls.modelQueries.push(connection);
           return { connection, models: [{ id: "fixture-coder", name: "Fixture coder" }], warnings: ["Synthetic fixture catalog. No server was contacted."] };
@@ -634,6 +644,22 @@ export async function installFakeDesktopBridge(
           }
           return state.projects[0];
         },
+        async deleteThread(id: string) {
+          state.threads = state.threads.filter((item) => item.id !== id);
+          state.runs = state.runs.filter((item) => item.threadId !== id);
+          state.verifications = state.verifications.filter((item) => item.threadId !== id);
+          publish();
+          return true;
+        },
+        async ensureChatWorkspace() {
+          let project = state.projects.find((item) => item.id === "nova-chat-workspace");
+          if (!project) {
+            project = { id: "nova-chat-workspace", name: "Chats", path: "D:\\Fixtures\\Chats", branch: "", createdAt: new Date().toISOString(), kind: "folder" };
+            state.projects.push(project);
+            publish();
+          }
+          return structuredClone(project);
+        },
         async updateThread(input: ThreadUpdate) {
           calls.threadUpdates.push(structuredClone(input));
           const thread = state.threads.find((item) => item.id === input.id);
@@ -731,6 +757,7 @@ export async function installFakeDesktopBridge(
             projectId: request.projectId,
             provider: request.provider,
             model: request.model ?? "Provider default",
+            reasoningEffort: request.reasoningEffort,
             mode: request.mode,
             prompt: request.prompt,
             status: config.complete ? "completed" : "running",

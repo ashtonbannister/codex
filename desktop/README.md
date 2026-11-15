@@ -4,7 +4,9 @@ A Windows-first, multi-provider development workbench built alongside the open-s
 
 Nova uses the familiar **projects → conversation → changes** workflow of Codex and Claude Code, with its own interface and branding. It is an independent project, not an official OpenAI or Anthropic desktop application, and does not contain either company's proprietary desktop UI.
 
-**Status: development alpha, version 0.5.4.** Nova's Codex runtime and account now live in its own application-data folder. OEM Codex folders are read-only import sources, never active runtime homes. Existing conversations and selected references can be copied into independent Nova state; native source resume/fork/publishing has been removed. Codex/Claude sign-in, local-server connections, isolated builds, Git review/integration, checks, recovery, and conversation export remain available. This is **not full proprietary Codex/Claude desktop parity**. Live account/inference compatibility and the reported OEM Windows slowdown need real-machine acceptance checks; synthetic tests do not establish a measured FPS fix. A finished agent process is explicitly **not** a verified engineering result.
+**Status: development alpha, version 0.5.5.** Nova's Codex runtime and account now live in its own application-data folder. OEM Codex folders are read-only import sources, never active runtime homes. Existing conversations and selected references can be copied into independent Nova state; native source resume/fork/publishing has been removed. Codex/Claude sign-in, local-server connections, isolated builds, Git review/integration, checks, recovery, and conversation export remain available. This is **not full proprietary Codex/Claude desktop parity**. Live account/inference compatibility and the reported OEM Windows slowdown need real-machine acceptance checks; synthetic tests do not establish a measured FPS fix. A finished agent process is explicitly **not** a verified engineering result.
+
+Version 0.5.5 adds a Codex model picker, per-run thinking strength, and explicit skill-package imports under Settings → Skills. An imported folder retains its supporting files, and enabled skills are offered to Codex, Claude Code, and local agents using disposable per-run copies. Choose a package root when a skill uses files outside its own directory. Imported skill instructions and metadata are shared with the selected provider as needed; only import packages you trust. The Codex list uses advertised effort levels when available; Claude and local server/model support may vary. A requested local thinking strength can be rejected or ignored by a server. This does not enable plugin MCP servers or interactive tool approvals.
 
 Version 0.5.4 preserves the v0.5.3 no-project draft, agent/model selection, New thread project-opening, and Recovery navigation fixes. Opening Nova, Settings, or Codex Library does not read the OEM source. Choose **Read import source** to start a bounded read-only import session. There are no OEM source workers, watchers, automatic freshness reads, source locks, or writebacks. Existing cleanup records remain visible; Nova neither kills OEM processes nor silently clears old recovery uncertainty.
 
@@ -81,7 +83,7 @@ Status checks and login start no model turn. Workspace/provider mutations are bl
 
 ### First task
 
-1. Choose **Open project** and select a local Git repository.
+1. Start a chat without a project, or choose **Open project** and select a local Git repository. Project-free chats run in Nova’s own folder in Plan mode; Build requires a Git project.
 2. Choose a provider. For Local, start the server separately, configure its backend/URL/protocol in Settings, then discover and select an available model.
 3. Start in **Plan** mode to inspect or discuss the project.
 4. Add relevant constraints or decisions in **Memory**. Include a source that another agent or human can check.
@@ -94,12 +96,16 @@ Changing the provider within a thread passes a bounded transcript and selected p
 
 In **Settings → Local models**, choose the backend, API base URL, and protocol. Defaults are Ollama at `http://127.0.0.1:11434/v1`, LM Studio at `http://127.0.0.1:1234/v1`, or a custom server at `http://127.0.0.1:8080/v1`. Use the protocol actually supported by the installed server; choosing its brand is not proof of compatibility.
 
+For a local server that requires a bearer API key, open **Settings → Local models**, enter the key, and select **Save key and load models**. Nova stores it encrypted using the operating system in its AppData folder, scoped to that exact connection. The same settings page can replace or remove it. The key is used for model discovery and inference and is not stored in workspace settings.
+
 **Discover models** requests metadata only: Ollama's `/api/tags`, or the other backends' `/models` endpoint. Nova checks the selected model against that catalog before execution. It does not download, load, or run a model during discovery, and excludes model entries identified as remote/cloud. A catalog entry alone does not establish that a model is loaded, supports tools, or has enough context for the task.
 
 | Selected protocol | Execution path and limits |
 | ----------------- | ------------------------- |
 | Responses | The Codex harness connects directly to the selected local server's Responses API. Actual server/model compatibility remains its responsibility. |
 | Chat completions | A bounded, per-run loopback bridge translates full-context Responses requests into streaming Chat Completions, including text and function/custom-text tool calls. It requires streaming tool-capable output; it is not a complete Responses implementation. |
+
+When a local Chat Completions server emits `reasoning_content` or `reasoning`, Nova displays the supplied text as it streams. Claude thinking blocks and Codex reasoning summaries appear when their installed providers expose them. Availability depends on the model and provider; Nova cannot show reasoning a provider does not send. Displayed thinking is retained in Nova’s local workspace, but is excluded from context handoffs and Markdown exports.
 
 The Chat Completions bridge rejects images/audio/attachments, encrypted or nonportable reasoning state, provider-native response IDs, background jobs, hosted tools/tool search, and structured response formats. Custom text tools are represented as function calls; grammar guidance does not give a local model native grammar-constrained decoding. The bridge is limited to 16 MiB request bodies, 256 tools, a bounded response stream, and a maximum ten-minute upstream request; normal worker limits still apply. Its generated authorization token exists only for that worker and is not saved in Settings.
 
@@ -109,14 +115,14 @@ Endpoints must use loopback (`127.0.0.1`, `localhost`, or `[::1]`) without embed
 
 1. In Settings → Storage, leave **Codex import source** blank for the existing default `.codex` source, or choose an existing source folder. Do not select `auth.json` or a database file. This setting is never an engine working home.
 2. Open **Codex library**. Nothing is scanned yet; agent/model selection and normal navigation remain usable.
-3. Choose **Read import source** and review the native read-only confirmation. Nova reads supported uncompressed JSONL conversation files and allowlisted reference text; it does not start Codex, open databases, watch the source, or modify any source files. Reading imports does not require a running or authenticated Codex engine.
+3. Choose **Read import source** and review the native read-only confirmation. Nova reads supported plain and compressed JSONL conversation files and allowlisted reference text; it does not start Codex, open databases, watch the source, or modify any source files. Reading imports does not require a running or authenticated Codex engine.
 4. Browse active or archived conversations, inspect the visible messages, then choose **Open in Nova**. A new copy lives under Nova's `workspace/imported-conversations` folder. The recorded original working folder is not opened or adopted; these independent folders support Plan. Open a Git project separately for Build.
 5. Select Codex, Claude, or local: every provider receives a bounded visible copy and selected Nova references, not the OEM native session, account, private reasoning, or binary attachments.
 6. Preview selected references before importing them into a project. Imported skills are reference text, not installed or automatically executed tools.
 
 For an imported conversation, use **Copy latest from Codex** after the source changes. This explicitly reads another bounded snapshot and preserves Nova's recorded runs and memory. Active source writes can make a read fail or incomplete; wait for that conversation to settle before retrying. Nothing is written back, resumed, forked, migrated, or unarchived.
 
-**Publish handoff to Codex has been removed and its IPC endpoint rejects calls.** Use Markdown export when you want to copy Nova text elsewhere. Old native IDs are retained only as provenance. Unsupported, compressed, or engine-only histories may not be available to the read-only importer; Nova reports limits instead of starting an OEM engine or falling back to database access.
+**Publish handoff to Codex has been removed and its IPC endpoint rejects calls.** Use Markdown export when you want to copy Nova text elsewhere. Old native IDs are retained only as provenance. Unsupported or engine-only histories may not be available to the read-only importer; Nova reports limits instead of starting an OEM engine or falling back to database access.
 
 See [Codex compatibility and storage boundaries](docs/codex-compatibility.md) for exact folder handling, conversation lifecycle, limits, and recovery behavior. This is an integration with the open-source engine, not a clone of every proprietary desktop feature.
 
@@ -257,7 +263,7 @@ npm run test:electron
 npx --no-install electron-builder --win --x64 --publish never
 ```
 
-`npm run check` builds once; the final command packages those exact built assets without rebuilding. If the build has already been checked, use just the packaging command. The package configuration targets **Windows x64 NSIS installer and portable executable**, written to `release/`, including `Nova-Workbench-0.5.4-x64-portable.exe`. The build copies the repository's license and notices into the package. These commands do not publish a release.
+`npm run check` builds once; the final command packages those exact built assets without rebuilding. If the build has already been checked, use just the packaging command. The package configuration targets **Windows x64 NSIS installer and portable executable**, written to `release/`, including `Nova-Workbench-0.5.5-x64-portable.exe`. The build copies the repository's license and notices into the package. These commands do not publish a release.
 
 The initial package is unsigned. A public release still needs a Windows-native smoke test, code signing, installer/uninstaller verification, dependency review, and a tested update channel. Do not interpret packaging configuration as evidence that a signed installer has been built or tested.
 

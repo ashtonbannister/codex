@@ -57,6 +57,9 @@ if(args.includes('--print-startup-config')){
   if(req.method==='initialize'){reply(req,{userAgent:'fixture-only'});return}
   if(req.method==='initialized')return;
   if(req.method==='config/read'){reply(req,{config:configuration,origins:{},layers:null});return}
+  if(req.method==='model/list'){
+   reply(req,req.params.cursor ? {data:[{model:'second',displayName:'Second'}],nextCursor:null} : {data:[{model:'first',displayName:'First',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}],isDefault:true},{model:'hidden',displayName:'Hidden',hidden:true}],nextCursor:'next'});return;
+  }
   if(req.method==='account/read'){
    reply(req,{account:signed()?{type:'chatgpt',email:'fixture@example.invalid',planType:'pro',workspaceName:'Synthetic workspace',accessToken:'SECRET_CREDENTIAL'}:null,requiresOpenaiAuth:true,userId:'DO_NOT_EXPOSE'});return;
   }
@@ -121,6 +124,15 @@ test("account URLs reject lookalikes, credentials, alternate handlers and ports"
   assert.equal(officialLoginUrl("claude", "https://claude.ai/oauth/authorize"), "https://claude.ai/oauth/authorize");
   for (const url of ["http://auth.openai.com/", "javascript:alert(1)", "https://auth.openai.com.attacker.invalid/", "https://me:secret@auth.openai.com/", "https://auth.openai.com:8443/", "https://auth.openai.com/#secret", "https://claude.ai/"])
     assert.equal(officialLoginUrl("codex", url), undefined);
+});
+
+test("Codex model discovery returns paginated visible model IDs and closes its process", async (t) => {
+  const f = await fixture(t);
+  assert.deepEqual(await f.service.listModels(f.options), [{ id: "first", name: "First", reasoningEfforts: ["low", "high"], isDefault: true }, { id: "second", name: "Second" }]);
+  const calls = await f.calls();
+  assert.deepEqual(calls.filter((x) => x.method === "model/list").map((x) => x.params.cursor), [null, "next"]);
+  assert.ok(!calls.some((x) => /^(thread|turn)\//.test(x.method ?? "")));
+  assert.equal(f.service.busy, false);
 });
 
 test("Codex account status is metadata-only and exposes only whitelisted fields", async (t) => {

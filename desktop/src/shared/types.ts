@@ -33,7 +33,10 @@ import type { SharedMemoryPreview, SharedMemoryRequest, SharedMemoryResult } fro
 import type { CodexHandoffReceipt, CodexHandoffResult } from "./native-handoff";
 
 export type ProviderId = "codex" | "claude" | "ollama";
-export const APP_VERSION = "0.5.4";
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ReasoningEffort = typeof REASONING_EFFORTS[number];
+export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
+export const APP_VERSION = "0.5.5";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -74,7 +77,7 @@ export interface Thread {
 export interface RunEvent {
   id: string;
   at: string;
-  kind: "message" | "tool" | "status" | "error" | "usage";
+  kind: "message" | "thinking" | "tool" | "status" | "error" | "usage";
   text: string;
 }
 
@@ -90,6 +93,7 @@ export interface Run {
   threadId: string;
   provider: ProviderId;
   model: string;
+  reasoningEffort?: ReasoningEffort;
   mode: RunMode;
   prompt: string;
   status: RunStatus;
@@ -175,6 +179,7 @@ export interface ProviderStatus {
   name: string;
   available: boolean;
   version?: string;
+  supportsPartialMessages?: boolean;
   detail: string;
 }
 
@@ -190,6 +195,7 @@ export interface RunRequest {
   threadId?: string;
   provider: ProviderId;
   model?: string;
+  reasoningEffort?: ReasoningEffort;
   mode: RunMode;
   prompt: string;
 }
@@ -323,6 +329,9 @@ export interface DiffSnapshot {
 
 /** Narrow, validated bridge. The renderer never receives Node, IPC, or credentials. */
 export interface WorkbenchAPI {
+  listSkillPackages(): Promise<import("./skills").SkillPackage[]>;
+  importSkillPackage(): Promise<import("./skills").SkillPackage | null>;
+  setSkillPackageEnabled(id: string, enabled: boolean): Promise<void>;
   getAccountStatus(provider: "codex" | "claude"): Promise<ProviderAccountStatus>;
   startProviderLogin(provider: "codex" | "claude"): Promise<ProviderLoginStatus>;
   getProviderLogin(): Promise<ProviderLoginStatus | null>;
@@ -334,7 +343,9 @@ export interface WorkbenchAPI {
   publishCodexHandoff(threadId: string): Promise<CodexHandoffResult>;
   chooseExecutable(provider: "codex" | "claude"): Promise<string | null>;
   openProviderHelp(provider: ProviderId | "lmstudio"): Promise<void>;
+  listCodexModels(): Promise<CodexModel[]>;
   listLocalModels(connection: LocalConnection): Promise<LocalModelCatalog>;
+  setLocalServerKey(connection: LocalConnection, key: string): Promise<void>;
   reviewWorktree(runId: string): Promise<WorktreeReview>;
   commitWorktree(request: CommitWorktreeRequest): Promise<WorktreeActionResult>;
   integrateWorktree(request: IntegrateWorktreeRequest): Promise<WorktreeActionResult>;
@@ -356,8 +367,10 @@ export interface WorkbenchAPI {
   getSnapshot(): Promise<WorkspaceSnapshot>;
   refreshProviderStatus(): Promise<WorkspaceSnapshot>;
   updateThread(input: ThreadUpdate): Promise<Thread>;
+  deleteThread(threadId: string): Promise<boolean>;
   previewContext(request: RunRequest): Promise<ContextPreview>;
   chooseProject(): Promise<Project | null>;
+  ensureChatWorkspace(): Promise<Project>;
   startRun(request: RunRequest): Promise<Run>;
   cancelRun(runId: string): Promise<void>;
   getDiff(runId: string): Promise<DiffSnapshot>;

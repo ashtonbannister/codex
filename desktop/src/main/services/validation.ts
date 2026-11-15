@@ -19,6 +19,7 @@ import path from "node:path";
 import { normalizeMemoryFilePath } from "./memory-source";
 import { validateLocalConnection } from "./local-models";
 import { LOCAL_DEFAULTS } from "../../shared/local-models";
+import { REASONING_EFFORTS } from "../../shared/types";
 
 export function record(
   value: unknown,
@@ -178,6 +179,10 @@ export function validateRunRequest(
   const input = record(value, "Run request");
   if (!["codex", "claude", "ollama"].includes(String(input.provider)))
     throw new Error("Unknown provider.");
+  if (input.reasoningEffort !== undefined && !REASONING_EFFORTS.includes(input.reasoningEffort as RunRequest["reasoningEffort"] & string))
+    throw new Error("Choose a supported thinking strength.");
+  if (input.provider === "claude" && input.reasoningEffort !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(String(input.reasoningEffort)))
+    throw new Error("Claude Code does not support that thinking strength.");
   if (input.mode !== "plan" && input.mode !== "build")
     throw new Error("Choose Plan or Build mode.");
   return {
@@ -189,6 +194,7 @@ export function validateRunRequest(
     provider: input.provider as RunRequest["provider"],
     mode: input.mode,
     model: modelName(input.model),
+    reasoningEffort: input.reasoningEffort as RunRequest["reasoningEffort"],
     prompt: text(input.prompt, "Prompt", 32_000, allowEmptyPrompt),
   };
 }

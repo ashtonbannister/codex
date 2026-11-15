@@ -58,7 +58,7 @@ export function connectionFromSettings(settings: Settings): LocalConnection {
 
 async function boundedJson(response: Response): Promise<unknown> {
   if (!response.ok || !response.body)
-    throw new Error(`Local server could not list models (HTTP ${response.status}). Check its API settings; authenticated endpoints are not supported here.`);
+    throw new Error(`Local server could not list models (HTTP ${response.status}). Check the server settings and, if required, apply its API key in Settings → Local models.`);
   const reader = response.body.getReader();
   let bytes = 0;
   const chunks: Uint8Array[] = [];
@@ -80,6 +80,7 @@ async function boundedJson(response: Response): Promise<unknown> {
 export async function listLocalModels(
   value: LocalConnection,
   signal?: AbortSignal,
+  key?: string,
 ): Promise<LocalModelCatalog> {
   const connection = validateLocalConnection(value);
   const endpoint = connection.kind === "ollama"
@@ -90,7 +91,7 @@ export async function listLocalModels(
     response = await fetch(endpoint, {
       signal: AbortSignal.any([AbortSignal.timeout(5000), ...(signal ? [signal] : [])]),
       redirect: "error",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
     });
   } catch {
     if (signal?.aborted) throw new Error("Local model discovery was cancelled.");
@@ -132,11 +133,12 @@ export async function assertLocalModelAvailable(
   model: string,
   settings?: Settings,
   signal?: AbortSignal,
+  key?: string,
 ): Promise<void> {
   if (!model || model.length > 256 || /[\0\r\n]/.test(model) || cloudModel(model))
     throw new Error("Choose an already-installed local model, not a remote/cloud model.");
   const connection = settings ? connectionFromSettings(settings) : LOCAL_DEFAULTS.ollama;
-  const catalog = await listLocalModels(connection, signal);
+  const catalog = await listLocalModels(connection, signal, key);
   if (!catalog.models.some((entry) => entry.id === model || (connection.kind === "ollama" && entry.id === `${model}:latest`)))
     throw new Error(`Model ${model} is not listed by the selected local server. Refresh the model list and choose an installed model. Nova does not download models.`);
 }
@@ -146,14 +148,20 @@ export async function prepareLocalProvider(
   settings: Settings,
   model: string,
   signal: AbortSignal,
+  key?: string,
+  onThinking?: (delta: string) => void,
+  reasoningEffort?: import("../../shared/types").ReasoningEffort,
 ): Promise<{ configArgs: string[]; env?: Record<string, string>; dispose(): Promise<void> }> {
   const connection = connectionFromSettings(settings);
-  await assertLocalModelAvailable(model, settings, signal);
+  await assertLocalModelAvailable(model, settings, signal, key);
   signal.throwIfAborted();
   const bridge = connection.protocol === "chat-completions"
     ? await startLocalChatBridge(connection, model, signal, {
         timeoutMs: Math.min(settings.timeoutMinutes * 60_000, 600_000),
         maxBytes: Math.max(1024 * 1024, Math.min(settings.maxOutputKb * 1024, 8 * 1024 * 1024)),
+        key,
+        onThinking,
+        reasoningEffort,
       })
     : undefined;
   const configArgs = [
@@ -164,11 +172,11 @@ export async function prepareLocalProvider(
     "--config", "model_providers.nova_local.requires_openai_auth=false",
     "--config", "model_providers.nova_local.supports_websockets=false",
     // The header is generated in memory for this worker, never saved in Settings.
-    ...(bridge ? ["--config", 'model_providers.nova_local.env_http_headers.Authorization="NOVA_LOCAL_BRIDGE_AUTH"'] : []),
+    ...(bridge || key ? ["--config", 'model_providers.nova_local.env_http_headers.Authorization="NOVA_LOCAL_BRIDGE_AUTH"'] : []),
   ];
   return {
     configArgs,
-    ...(bridge ? { env: { NOVA_LOCAL_BRIDGE_AUTH: `Bearer ${bridge.token}` } } : {}),
+    ...(bridge || key ? { env: { NOVA_LOCAL_BRIDGE_AUTH: `Bearer ${bridge?.token ?? key}` } } : {}),
     dispose: async () => { await bridge?.dispose(); },
   };
 }

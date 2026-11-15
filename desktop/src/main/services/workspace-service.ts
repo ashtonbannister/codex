@@ -74,6 +74,7 @@ import {
   readCodexHistory as readCopiedHistory,
 } from "./codex-readonly";
 import { ensureNovaCodexHome } from "./nova-runtime";
+import { SkillPackageStore } from "./skill-packages";
 import {
   createIsolatedWorktree,
   getWorkspaceDiff,
@@ -379,7 +380,7 @@ export function validateWorkspaceState(value: unknown): WorkspaceState {
     const events = item.events.map((entry): RunEvent => {
       const event = record(entry);
       if (
-        !["message", "tool", "status", "error", "usage"].includes(
+        !["message", "thinking", "tool", "status", "error", "usage"].includes(
           String(event.kind),
         )
       )
@@ -669,9 +670,19 @@ export class WorkspaceService {
   private closing = false;
   private readonly statePath: string;
 
+  private async addSkills(context: ContextPreview): Promise<void> {
+    const skills = await new SkillPackageStore(this.dataDir).prompt();
+    if (!skills) return;
+    context.prompt += skills;
+    context.characters = context.prompt.length;
+    context.estimatedTokens = Math.ceil(context.characters / 4);
+    context.warnings.push("Enabled imported skill names and descriptions are sent to the selected provider. Launch uses a disposable copy, so the paths in this preview differ from the run. Skill files can be read when needed.");
+  }
+
   constructor(
     private readonly dataDir: string,
     private readonly onChange: (state: WorkspaceState) => void,
+    private readonly localKey: (connection: ReturnType<typeof connectionFromSettings>) => string | undefined = () => undefined,
   ) {
     this.statePath = path.join(dataDir, "workspace.json");
   }
@@ -815,10 +826,8 @@ export class WorkspaceService {
       name: `Local · ${connectionFromSettings(this.state.settings).kind === "lmstudio" ? "LM Studio" : connectionFromSettings(this.state.settings).kind === "custom" ? "Custom" : "Ollama"}`,
     };
     if (codex.available) {
-      ollama.available = Boolean(this.state.settings.localModel);
-      ollama.detail = this.state.settings.localModel
-        ? "Codex bridge ready; the selected local server and exact model are checked before running."
-        : "Select an installed model from your local server in Settings. No model is downloaded automatically.";
+      ollama.available = true;
+      ollama.detail = "Codex bridge ready; choose an available model. The server and model are checked before running.";
     }
     this.providers = [codex, claude, ollama];
   }
@@ -1270,6 +1279,33 @@ export class WorkspaceService {
     });
   }
 
+  async ensureChatWorkspace(): Promise<Project> {
+    this.ready();
+    return this.exclusive(async () => {
+      this.ready();
+      const base = await realpath(this.dataDir);
+      const location = path.join(base, "chat-workspace");
+      await mkdir(location, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+      const info = await lstat(location);
+      if (!info.isDirectory() || info.isSymbolicLink() || !samePath(await realpath(location), location))
+        throw new Error("Nova's chat workspace is unavailable or redirected.");
+      await this.independentPath(location);
+      const existing = this.state.projects.find((entry) => entry.id === "nova-chat-workspace");
+      if (existing) {
+        if (existing.kind !== "folder" || !samePath(existing.path, location))
+          throw new Error("Nova's chat workspace does not match its saved location.");
+        return clone(existing);
+      }
+      const project: Project = { id: "nova-chat-workspace", name: "Chats", path: location, branch: "", createdAt: now(), kind: "folder" };
+      this.state.projects.push(project);
+      try { await this.persist(); }
+      catch (error) { this.state.projects = this.state.projects.filter((entry) => entry !== project); throw error; }
+      return clone(project);
+    });
+  }
+
   async addProject(inputPath: string): Promise<Project> {
     this.ready();
     return this.exclusive(async () => {
@@ -1380,6 +1416,27 @@ export class WorkspaceService {
     });
   }
 
+  async deleteThread(id: string): Promise<void> {
+    this.ready();
+    return this.exclusive(async () => {
+      this.ready();
+      const thread = this.getThread(id);
+      const runs = this.state.runs.filter((run) => run.threadId === thread.id);
+      const checks = this.state.verifications.filter((check) => check.threadId === thread.id);
+      if (runs.some((run) => ACTIVE.has(run.status)) || checks.some((check) => check.status === "running"))
+        throw new Error("Stop this thread's active agent or verification before deleting it.");
+      if (runs.some((run) => run.terminationUnconfirmed && !run.recoveryAcknowledgedAt) ||
+          checks.some((check) => check.terminationUnconfirmed && !check.recoveryAcknowledgedAt))
+        throw new Error("Resolve this thread's worker cleanup in Recovery before deleting it.");
+      const before = { threads: this.state.threads, runs: this.state.runs, verifications: this.state.verifications };
+      this.state.threads = before.threads.filter((entry) => entry.id !== thread.id);
+      this.state.runs = before.runs.filter((entry) => entry.threadId !== thread.id);
+      this.state.verifications = before.verifications.filter((entry) => entry.threadId !== thread.id);
+      try { await this.persist(); }
+      catch (error) { Object.assign(this.state, before); throw error; }
+    });
+  }
+
   async previewContext(value: RunRequest): Promise<ContextPreview> {
     this.ready();
     const request = validateRunRequest(value, true);
@@ -1404,6 +1461,7 @@ export class WorkspaceService {
       // possibly nested execution directory. Keep those two roots separate.
       usesOriginalCheckout ? project.path : cwd,
     );
+    await this.addSkills(preview);
     if (project.kind === "folder" && request.mode === "build")
       preview.warnings.unshift(
         "This is a folder conversation. Build is disabled until a committed Git project is opened; Plan remains available.",
@@ -1940,7 +1998,7 @@ export class WorkspaceService {
       const model =
         request.model ||
         (request.provider === "ollama" ? this.state.settings.localModel : "");
-      if (request.provider === "ollama") await assertLocalModelAvailable(model, this.state.settings);
+      if (request.provider === "ollama") await assertLocalModelAvailable(model, this.state.settings, undefined, this.localKey(connectionFromSettings(this.state.settings)));
       const executable = await resolveExecutable(
         request.provider === "claude"
           ? this.state.settings.claudePath
@@ -1988,6 +2046,7 @@ export class WorkspaceService {
         threadId: thread.id,
         provider: request.provider,
         model,
+        reasoningEffort: request.reasoningEffort,
         mode: request.mode,
         prompt: request.prompt,
         status: "queued",
@@ -2049,6 +2108,19 @@ export class WorkspaceService {
           controller.abort();
         });
       };
+      let pendingThinking = "";
+      let thinkingTimer: ReturnType<typeof setTimeout> | undefined;
+      const flushThinking = () => {
+        if (thinkingTimer) clearTimeout(thinkingTimer);
+        thinkingTimer = undefined;
+        if (pendingThinking) receiveEvent({ events: [], thinkingDelta: pendingThinking });
+        pendingThinking = "";
+      };
+      const receiveThinking = (delta: string) => {
+        pendingThinking += delta;
+        if (pendingThinking.length >= 8192) flushThinking();
+        else if (!thinkingTimer) thinkingTimer = setTimeout(flushThinking, 250);
+      };
       // Launch outside the mutation queue so streaming, cancellation and other projects remain responsive.
       active.done = Promise.resolve()
         .then(async () => {
@@ -2067,8 +2139,18 @@ export class WorkspaceService {
             await this.persist();
           });
           if (this.closing) controller.abort();
+          const preparedSkills = await new SkillPackageStore(this.dataDir).prepareRun();
+          context.prompt += preparedSkills.prompt;
+          if (preparedSkills.prompt) {
+            context.characters = context.prompt.length;
+            context.estimatedTokens = Math.ceil(context.characters / 4);
+            await this.exclusive(async () => {
+              if (run.contextSummary) { run.contextSummary.characters = context.characters; run.contextSummary.estimatedTokens = context.estimatedTokens; run.contextSummary.warnings.push("Enabled imported skill names, descriptions, and paths were supplied to the provider."); }
+              await this.persist();
+            });
+          }
           const local = request.provider === "ollama"
-            ? await prepareLocalProvider(settings, model, controller.signal)
+            ? await prepareLocalProvider(settings, model, controller.signal, this.localKey(connectionFromSettings(settings)), receiveThinking, request.reasoningEffort)
             : undefined;
           let result: Awaited<ReturnType<typeof runProvider>>;
           try {
@@ -2089,6 +2171,9 @@ export class WorkspaceService {
                         allowNonGit:
                           project.kind === "folder" && request.mode === "plan",
                         localConfigArgs: local?.configArgs,
+                        claudePartialMessages: providerStatus?.supportsPartialMessages,
+                        skillDirectory: preparedSkills.directory,
+                        reasoningEffort: request.reasoningEffort,
                       },
                     ),
                   },
@@ -2098,11 +2183,22 @@ export class WorkspaceService {
                   signal: controller.signal,
                   timeoutMs: settings.timeoutMinutes * 60_000,
                   maxBytes: settings.maxOutputKb * 1024,
-                  onEvent: receiveEvent,
+                  onEvent: (event) => {
+                    if (event.thinkingDelta) {
+                      receiveThinking(event.thinkingDelta);
+                      if (event.events.length || event.sessionId || event.usage || event.completed || event.failed)
+                        receiveEvent({ ...event, thinkingDelta: undefined });
+                    } else {
+                      flushThinking();
+                      receiveEvent(event);
+                    }
+                  },
                 });
           } finally {
             await local?.dispose();
+            flushThinking();
           }
+          if (!result.terminationUnconfirmed) await preparedSkills.dispose();
           await this.exclusive(async () => {
             run.status = persistenceFailure
               ? "failed"
@@ -2180,6 +2276,11 @@ export class WorkspaceService {
   private applyProviderEvent(run: Run, event: NormalizedEvent): void {
     if (event.sessionId) run.providerSessionId = event.sessionId.slice(0, 200);
     if (event.usage) run.usage = event.usage;
+    if (event.thinkingDelta) {
+      const last = run.events.at(-1);
+      if (last?.kind === "thinking") last.text = (last.text + event.thinkingDelta).slice(0, 262_144);
+      else this.addEvent(run, { kind: "thinking", text: event.thinkingDelta });
+    }
     for (const item of event.events) this.addEvent(run, item);
   }
 

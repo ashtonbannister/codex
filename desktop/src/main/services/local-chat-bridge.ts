@@ -259,7 +259,7 @@ export async function startLocalChatBridge(
   value: LocalConnection,
   selectedModel: string,
   signal: AbortSignal,
-  limits: { timeoutMs: number; maxBytes: number },
+  limits: { timeoutMs: number; maxBytes: number; key?: string; onThinking?: (delta: string) => void; reasoningEffort?: import("../../shared/types").ReasoningEffort },
 ): Promise<{ baseUrl: string; token: string; dispose(): Promise<void> }> {
   const connection = validateLocalConnection(value);
   identifier(selectedModel, "selected model");
@@ -298,13 +298,14 @@ export async function startLocalChatBridge(
     const requestSignal = AbortSignal.any([signal, shutdown.signal, controller.signal, AbortSignal.timeout(Math.max(1000, Math.min(limits.timeoutMs, 600000)))]);
     void (async () => {
       const translated = responsesToChat(await readBody(request), selectedModel);
+      if (limits.reasoningEffort) translated.body.reasoning_effort = limits.reasoningEffort;
       requestSignal.throwIfAborted();
       let upstream: Response;
       try {
         upstream = await fetch(`${connection.baseUrl}/chat/completions`, {
           method: "POST",
           redirect: "error",
-          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+          headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...(limits.key ? { Authorization: `Bearer ${limits.key}` } : {}) },
           body: JSON.stringify(translated.body),
           signal: requestSignal,
         });
@@ -342,6 +343,10 @@ export async function startLocalChatBridge(
         if (choice.index !== undefined && choice.index !== 0) throw new Error("Unexpected completion choice index.");
         if (choice.finish_reason !== null && choice.finish_reason !== undefined) finishReason = string(choice.finish_reason, "finish reason", 100);
         const delta = choice.delta === undefined ? {} : object(choice.delta);
+        // Local Chat Completions servers commonly expose model reasoning under
+        // either spelling. Keep it out of the model-facing Responses transcript.
+        const thinking = delta.reasoning_content ?? delta.reasoning;
+        if (typeof thinking === "string" && thinking) limits.onThinking?.(thinking);
         if (delta.content !== undefined && delta.content !== null) {
           const part = string(delta.content, "text delta");
           if (!messageId && part) {

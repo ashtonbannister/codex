@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { ProviderId, RunMode } from "../shared/types";
+import { REASONING_EFFORTS, type ProviderId, type ReasoningEffort, type RunMode } from "../shared/types";
 
 const STORAGE_KEY = "nova-workbench:composer-drafts:v1";
 const MAX_DRAFTS = 40;
 const MAX_TOTAL_TEXT = 256_000;
-const EMPTY = { text: "", provider: "codex" as ProviderId, model: "", mode: "plan" as RunMode, updatedAt: 0 };
-interface ComposerDraft { text: string; provider: ProviderId; model: string; mode: RunMode; updatedAt: number }
+const EMPTY = { text: "", provider: "codex" as ProviderId, model: "", reasoningEffort: undefined as ReasoningEffort | undefined, mode: "plan" as RunMode, updatedAt: 0 };
+interface ComposerDraft { text: string; provider: ProviderId; model: string; reasoningEffort?: ReasoningEffort; mode: RunMode; updatedAt: number }
 type Drafts = Record<string, ComposerDraft>;
 
 function bounded(entries: Drafts): Drafts {
@@ -32,7 +32,7 @@ function readDrafts(): Drafts {
       if (!(key === "global:new" || /^(thread|project):.{1,200}$/.test(key)) || !item || typeof item !== "object") continue;
       const entry = item as Partial<ComposerDraft>;
       if (typeof entry.text !== "string" || typeof entry.model !== "string" || !["codex", "claude", "ollama"].includes(entry.provider ?? "") || !["plan", "build"].includes(entry.mode ?? "") || typeof entry.updatedAt !== "number" || !Number.isFinite(entry.updatedAt)) continue;
-      valid[key] = { text: entry.text.slice(0, 32_000), model: entry.model.slice(0, 256), provider: entry.provider!, mode: entry.mode!, updatedAt: entry.updatedAt };
+      valid[key] = { text: entry.text.slice(0, 32_000), model: entry.model.slice(0, 256), reasoningEffort: REASONING_EFFORTS.includes(entry.reasoningEffort as ReasoningEffort) ? entry.reasoningEffort : undefined, provider: entry.provider!, mode: entry.mode!, updatedAt: entry.updatedAt };
     }
     return bounded(valid);
   } catch { return {}; }
@@ -57,7 +57,7 @@ export function useComposerDraft(projectId: string | null, threadId: string | nu
   const initial = (current: Drafts): ComposerDraft => {
     const global = current["global:new"];
     return projectId && !threadId && global
-      ? { ...EMPTY, provider: global.provider, model: global.model, mode: global.mode }
+      ? { ...EMPTY, provider: global.provider, model: global.model, reasoningEffort: global.reasoningEffort, mode: global.mode }
       : EMPTY;
   };
   const update = (patch: Partial<Omit<ComposerDraft, "updatedAt">>) => {
@@ -73,12 +73,17 @@ export function useComposerDraft(projectId: string | null, threadId: string | nu
     setDrafts((current) => {
       const previous = current[submittedKey];
       // Do not discard text the user changed while the native start request was pending.
-      if (previous && (previous.text !== submitted.text || previous.provider !== submitted.provider || previous.model !== submitted.model || previous.mode !== submitted.mode || previous.updatedAt !== submitted.updatedAt)) return current;
+      if (previous && (previous.text !== submitted.text || previous.provider !== submitted.provider || previous.model !== submitted.model || previous.reasoningEffort !== submitted.reasoningEffort || previous.mode !== submitted.mode || previous.updatedAt !== submitted.updatedAt)) return current;
       const next = { ...current, [submittedKey]: { ...submitted, text: "", updatedAt: Date.now() } };
       const destination = `thread:${newThreadId}`;
       if (destination === submittedKey || !next[destination]) next[destination] = { ...submitted, text: "", updatedAt: Date.now() };
       return bounded(next);
     });
   };
-  return { key, currentKey, draft: drafts[key] ?? initial(drafts), update, clearSubmitted, storageWarning };
+  const removeThread = (id: string) => setDrafts((current) => {
+    const next = { ...current };
+    delete next[`thread:${id}`];
+    return next;
+  });
+  return { key, currentKey, draft: drafts[key] ?? initial(drafts), update, clearSubmitted, removeThread, storageWarning };
 }

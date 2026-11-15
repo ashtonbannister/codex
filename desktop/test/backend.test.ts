@@ -275,6 +275,13 @@ test("provider argument lists never use bypasses or shell interpolation", () => 
       'model_providers.nova_ollama.base_url="http://127.0.0.1:11434/v1"',
     ),
   );
+  const effort = providerArguments("codex", cwd, "plan", "gpt-test", { reasoningEffort: "xhigh" });
+  assert.ok(effort.includes('model_reasoning_effort="xhigh"'));
+  const localEffort = providerArguments("ollama", cwd, "plan", "local-model", { reasoningEffort: "high" });
+  assert.ok(localEffort.includes('model_reasoning_effort="high"'));
+  const claudeEffort = providerArguments("claude", cwd, "build", "", { reasoningEffort: "high", skillDirectory: "C:/nova/run-skills" });
+  assert.equal(claudeEffort[claudeEffort.indexOf("--effort") + 1], "high");
+  assert.equal(claudeEffort[claudeEffort.indexOf("--add-dir") + 1], "C:/nova/run-skills");
   const claude = providerArguments("claude", cwd, "build", "");
   assert.ok(claude.includes("--safe-mode"));
   assert.ok(claude.includes("--restricted"));
@@ -303,6 +310,40 @@ test("provider argument lists never use bypasses or shell interpolation", () => 
       allowNonGit: true,
     }).includes("--skip-git-repo-check"),
   );
+});
+
+test("event normalization preserves Codex reasoning summaries and replies", () => {
+  assert.deepEqual(normalizeProviderLine("codex", JSON.stringify({ type: "item.completed", item: { type: "reasoning", text: "Reviewing the issue" } })).events, [{ kind: "thinking", text: "Reviewing the issue" }]);
+  assert.deepEqual(normalizeProviderLine("codex", JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Here is the answer" } })).events, [{ kind: "message", text: "Here is the answer" }]);
+});
+
+test("Claude thinking blocks and partial thinking deltas are recognized", () => {
+  const partial = normalizeProviderLine("claude", JSON.stringify({ type: "stream_event", event: {
+    type: "content_block_delta", delta: { type: "thinking_delta", thinking: "A thought" },
+  }}));
+  assert.equal(partial.thinkingDelta, "A thought");
+  const full = normalizeProviderLine("claude", JSON.stringify({ type: "assistant", message: {
+    content: [{ type: "thinking", thinking: "A thought" }, { type: "redacted_thinking", data: "hidden" }],
+  }}));
+  assert.deepEqual(full.events, [{ kind: "thinking", text: "A thought" }]);
+  assert.ok(providerArguments("claude", "C:/test", "plan", "", { claudePartialMessages: true }).includes("--include-partial-messages"));
+  assert.ok(!providerArguments("claude", "C:/test", "plan", "").includes("--include-partial-messages"));
+});
+
+test("fallback model metadata is reported as a status", () => {
+  const result = normalizeProviderLine("ollama", JSON.stringify({
+    type: "item.completed",
+    item: { type: "error", message: "Model metadata for `example` not found. Defaulting to fallback metadata; this can degrade performance and cause issues." },
+  }));
+  assert.equal(result.events[0]?.kind, "status");
+});
+
+test("Codex authentication failure explains Nova's separate account", () => {
+  const result = normalizeProviderLine("codex", JSON.stringify({
+    type: "turn.failed", error: { message: "unexpected status 401 Unauthorized" },
+  }));
+  assert.match(result.failed ?? "", /Settings → Agents/);
+  assert.match(result.failed ?? "", /separate sign-in/);
 });
 
 test("event normalization distinguishes terminal errors from successful process exits", () => {

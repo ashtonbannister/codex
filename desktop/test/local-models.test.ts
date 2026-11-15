@@ -15,11 +15,11 @@ import { responsesToChat, startLocalChatBridge } from "../src/main/services/loca
 import { providerArguments } from "../src/main/services/providers";
 
 type Json = Record<string, any>;
-async function localServer(t: TestContext, handle: (path: string, body: Json, response: ServerResponse) => void) {
+async function localServer(t: TestContext, handle: (path: string, body: Json, response: ServerResponse, authorization?: string) => void) {
   const server = createServer(async (request, response) => {
     let text = "";
     for await (const chunk of request) text += chunk;
-    handle(request.url ?? "", text ? JSON.parse(text) : {}, response);
+    handle(request.url ?? "", text ? JSON.parse(text) : {}, response, request.headers.authorization);
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -122,7 +122,7 @@ test("chat bridge streams text and function calls, then accepts a tool-result fo
     } else stream(response, [{ choices: [{ index: 0, delta: { content: "The résumé is ready." }, finish_reason: "stop" }] }]);
   });
   const controller = new AbortController();
-  const bridge = await startLocalChatBridge(connection(base), "tiny", controller.signal, { timeoutMs: 5000, maxBytes: 100000 });
+  const bridge = await startLocalChatBridge(connection(base), "tiny", controller.signal, { timeoutMs: 5000, maxBytes: 100000, reasoningEffort: "high" });
   t.after(bridge.dispose);
   const request = { model: "tiny", input: [{ role: "user", content: "Read README" }], tools: [{ type: "function", name: "read_file", parameters: { type: "object", properties: { path: { type: "string" } } } }] };
   const send = (body: Json) => fetch(`${bridge.baseUrl}/responses`, { method: "POST", headers: { Authorization: `Bearer ${bridge.token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -137,6 +137,8 @@ test("chat bridge streams text and function calls, then accepts a tool-result fo
   const second = events(await (await send({ ...request, input: [...request.input, tool, { type: "function_call_output", call_id: "call_1", output: "A README" }] })).text());
   assert.ok(second.some((entry) => entry.type === "response.output_text.delta" && entry.delta.includes("résumé")));
   assert.ok(second.some((entry) => entry.type === "response.completed"));
+  assert.equal(received[0].reasoning_effort, "high");
+  assert.equal(received[1].reasoning_effort, "high");
   assert.equal(received[1].messages.at(-1).role, "tool");
   assert.equal(received[1].messages.at(-1).content, "A README");
 });
@@ -199,6 +201,42 @@ test("bridge cancellation closes listener and aborts its in-flight upstream", as
   await bridge.dispose();
   await pending;
   await assert.rejects(fetch(`${bridge.baseUrl}/responses`));
+});
+
+test("local reasoning streams to the UI callback without entering the model response", async (t) => {
+  const received: string[] = [];
+  const base = await localServer(t, (_path, _body, response) => {
+    stream(response, [
+      { choices: [{ index: 0, delta: { reasoning_content: "First " }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { reasoning: "thought" }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { content: "Answer" }, finish_reason: "stop" }] },
+    ]);
+  });
+  const bridge = await startLocalChatBridge(connection(base), "tiny", new AbortController().signal, {
+    timeoutMs: 5000, maxBytes: 100000, onThinking: (part) => received.push(part),
+  });
+  t.after(bridge.dispose);
+  const response = await fetch(`${bridge.baseUrl}/responses`, { method: "POST", headers: { Authorization: `Bearer ${bridge.token}` }, body: JSON.stringify({ model: "tiny", input: "hello" }) });
+  const output = await response.text();
+  assert.deepEqual(received, ["First ", "thought"]);
+  assert.doesNotMatch(output, /First |thought/);
+  assert.ok(events(output).some((item) => item.type === "response.completed"));
+});
+
+test("authenticated local model discovery and chat use the configured key", async (t) => {
+  const seen: string[] = [];
+  const base = await localServer(t, (path, _body, response, authorization) => {
+    seen.push(authorization ?? "");
+    if (authorization !== "Bearer synthetic-key") { response.writeHead(401); response.end(); return; }
+    if (path === "/v1/models") json(response, { data: [{ id: "tiny" }] });
+    else stream(response, [{ choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] }]);
+  });
+  assert.equal((await listLocalModels(connection(base), undefined, "synthetic-key")).models[0].id, "tiny");
+  const bridge = await startLocalChatBridge(connection(base), "tiny", new AbortController().signal, { timeoutMs: 5000, maxBytes: 100000, key: "synthetic-key" });
+  t.after(bridge.dispose);
+  const response = await fetch(`${bridge.baseUrl}/responses`, { method: "POST", headers: { Authorization: `Bearer ${bridge.token}` }, body: JSON.stringify({ model: "tiny", input: "hello" }) });
+  assert.ok(events(await response.text()).some((item) => item.type === "response.completed"));
+  assert.deepEqual(seen, ["Bearer synthetic-key", "Bearer synthetic-key"]);
 });
 
 test("provider preparation does not run inference and keeps ephemeral auth out of argv", async (t) => {
