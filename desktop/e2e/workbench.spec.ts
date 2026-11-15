@@ -188,6 +188,19 @@ test("remote plugin credentials can be saved and removed without displaying them
   await page.screenshot({ path: "test-results/plugin-credentials.png" });
 });
 
+test("bundle import exposes protected settings and path selection", async ({ page }) => {
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true }); await page.goto("/");
+  await page.getByRole("button", { name: /^Settings/ }).click(); const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Plugins" }).click(); await dialog.getByRole("button", { name: "Import MCP bundle…" }).click();
+  await expect(dialog.getByText("Fixture bundle", { exact: true })).toBeVisible();
+  const token = dialog.getByLabel("API Token"); await expect(token).toHaveAttribute("type", "password"); await token.fill("synthetic-bundle-secret");
+  await dialog.getByRole("button", { name: "Save API Token" }).click(); await expect(token).toHaveValue(""); await expect(dialog.getByText(/Saved securely/)).toBeVisible();
+  await dialog.getByRole("button", { name: "Browse Folders…" }).click(); await expect(dialog.getByLabel("Folders")).toHaveValue(/Synthetic/);
+  await expect(dialog).not.toContainText("synthetic-bundle-secret"); await expect(page.locator("vite-error-overlay")).toHaveCount(0); expect(errors).toEqual([]);
+  await page.screenshot({ path: "test-results/bundle-settings.png" });
+});
+
 test("settings enforce timeout bounds and apply appearance", async ({
   page,
 }) => {

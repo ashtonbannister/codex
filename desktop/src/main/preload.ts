@@ -13,6 +13,9 @@ import type {
 const bridge: WorkbenchAPI = {
   listPluginPackages: () => ipcRenderer.invoke("plugins:list"),
   importPluginPackage: () => ipcRenderer.invoke("plugins:import"),
+  importPluginBundle: () => ipcRenderer.invoke("plugins:import-bundle"),
+  setBundleSetting: (id, field, value) => ipcRenderer.invoke("plugins:bundle-setting", { id, field, value }),
+  chooseBundlePath: (id, field) => ipcRenderer.invoke("plugins:bundle-path", { id, field }),
   setPluginPackageEnabled: (id, enabled) => ipcRenderer.invoke("plugins:enabled", { id, enabled }),
   setPluginServerEnabled: (id, name, enabled) => ipcRenderer.invoke("plugins:server", { id, name, enabled }),
   setPluginCredential: (id, name, token) => ipcRenderer.invoke("plugins:credential", { id, name, token }),

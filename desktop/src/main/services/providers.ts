@@ -550,12 +550,15 @@ export async function captureCommand(
   cwd: string,
   maximum = 128_000,
   runtimeHome?: string,
+  options?: { environment?: NodeJS.ProcessEnv; signal?: AbortSignal },
 ): Promise<string> {
+  options?.signal?.throwIfAborted();
   const home = runtimeHome ?? executable.env?.CODEX_HOME;
+  if (home && options?.environment) throw new Error("An isolated runtime cannot use a custom environment.");
   if (home) await assertNovaCodexHome(home);
   const environment = home
     ? isolatedCodexEnv(home, executable.env)
-    : { ...process.env, ...executable.env, NO_COLOR: "1" };
+    : { ...(options?.environment ?? process.env), ...executable.env, NO_COLOR: "1" };
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const child = spawn(executable.command, [...executable.prefix, ...args], {
@@ -583,6 +586,7 @@ export async function captureCommand(
       finishing = true;
       clearTimeout(timeout);
       clearTimeout(drain);
+      options?.signal?.removeEventListener("abort", abort);
       unconfirmed ||= !(await (termination ??= terminateTree(child)));
       settled = true;
       if (unconfirmed)
@@ -614,6 +618,9 @@ export async function captureCommand(
         }, 1_500);
       });
     };
+    const abort = () => { failure = "CLI metadata probe cancelled."; stop(); };
+    options?.signal?.addEventListener("abort", abort, { once: true });
+    if (options?.signal?.aborted) abort();
     const timeout = setTimeout(() => {
       failure = "CLI metadata probe timed out.";
       stop();

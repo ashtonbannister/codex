@@ -1,6 +1,6 @@
 {
   "name": "nova-workbench",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "private": true,
   "description": "An independent, Windows-first desktop workbench for Codex, Claude Code, and local coding agents.",
   "author": "Inkform Labs",
@@ -27,7 +27,9 @@
     "@modelcontextprotocol/client": "2.4.0",
     "lucide-react": "1.72.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "semver": "7.8.6",
+    "yauzl": "3.4.0"
   },
   "optionalDependencies": {
     "@microsoft/winappcli": "0.8.0"
@@ -37,6 +39,8 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/semver": "7.8.0",
+    "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "6.3.0",
     "electron": "45.3.1",
     "electron-builder": "26.18.0",

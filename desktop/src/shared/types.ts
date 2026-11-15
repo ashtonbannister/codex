@@ -36,7 +36,7 @@ export type ProviderId = "codex" | "claude" | "ollama";
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
-export const APP_VERSION = "0.5.12";
+export const APP_VERSION = "0.5.13";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -336,6 +336,9 @@ export interface DiffSnapshot {
 export interface WorkbenchAPI {
   listPluginPackages(): Promise<import("./plugins").PluginPackage[]>;
   importPluginPackage(): Promise<import("./plugins").PluginPackage | null>;
+  importPluginBundle(): Promise<import("./plugins").PluginPackage | null>;
+  setBundleSetting(id: string, field: string, value: string | number | boolean | string[] | null): Promise<void>;
+  chooseBundlePath(id: string, field: string): Promise<string | string[] | null>;
   setPluginPackageEnabled(id: string, enabled: boolean): Promise<void>;
   setPluginServerEnabled(id: string, name: string, enabled: boolean): Promise<void>;
   setPluginCredential(id: string, name: string, token: string): Promise<void>;

@@ -25,6 +25,8 @@ import type {
 import { WorkspaceService } from "./services/workspace-service";
 import { LocalKeyStore } from "./services/local-key-store";
 import { PluginCredentialStore } from "./services/plugin-credentials";
+import { BundleConfigStore } from "./services/bundle-config-store";
+import { expandBundleDefault } from "./services/bundle-config";
 import { PluginOAuthStore } from "./services/plugin-oauth-store";
 import { signInPluginOAuth, pluginOAuthToken, type OAuthReview } from "./services/plugin-oauth";
 import { SkillPackageStore } from "./services/skill-packages";
@@ -171,6 +173,9 @@ const ACCOUNT_OPERATIONS = new Set([
   "skills:import",
   "skills:enabled",
   "plugins:import",
+  "plugins:import-bundle",
+  "plugins:bundle-setting",
+  "plugins:bundle-path",
   "plugins:enabled",
   "plugins:server",
   "plugins:credential",
@@ -230,13 +235,32 @@ function handle(
 
 let localKeyStore: LocalKeyStore;
 let pluginCredentials: PluginCredentialStore;
+let bundleConfigStore: BundleConfigStore;
 let pluginOAuthStore: PluginOAuthStore;
 let pluginOAuthController: AbortController | undefined;
 const localKey = (connection: ReturnType<typeof validateLocalConnection>) => localKeyStore.get(connection);
 
 function registerHandlers(service: WorkspaceService) {
   const plugins = new PluginPackageStore(path.join(app.getPath("userData"), "workspace"));
-  handle("plugins:list", async () => (await plugins.list()).map((pkg) => ({ ...pkg, servers: pkg.servers.map((server) => ({ ...server, credentialStored: pluginCredentials.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }), oauthConnected: pluginOAuthStore.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }) })) })));
+  handle("plugins:list", async () => (await plugins.list()).map((pkg) => {
+    const settings = bundleConfigStore.get({ id: pkg.id, fingerprint: pkg.fingerprint });
+    const folders: Record<string, string> = { HOME: app.getPath("home"), DESKTOP: app.getPath("desktop"), DOCUMENTS: app.getPath("documents"), DOWNLOADS: app.getPath("downloads") };
+
+    return { ...pkg, servers: pkg.servers.map((server) => ({ ...server, credentialStored: pluginCredentials.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }), oauthConnected: pluginOAuthStore.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }) })),
+      ...(pkg.bundleFields ? { bundleFields: pkg.bundleFields.map((field) => ({ ...field, ...(Object.hasOwn(settings, field.key) ? { configured: true, ...(!field.sensitive ? { value: settings[field.key] } : {}) } : !field.sensitive && field.value !== undefined ? { value: expandBundleDefault(field.value, folders) } : {}) })) } : {}) };
+  }));
+  handle("plugins:bundle-setting", async (payload) => {
+    const input = objectPayload(payload); const entry = await plugins.bundleField(identifier(input.id), identifier(input.field), input.value === null);
+    await bundleConfigStore.set({ id: entry.id, fingerprint: entry.fingerprint }, entry.definition, input.value);
+  });
+  handle("plugins:bundle-path", async (payload) => {
+    const input = objectPayload(payload); const entry = await plugins.bundleField(identifier(input.id), identifier(input.field));
+    if (!["file", "directory"].includes(entry.definition.type)) throw new Error("This bundle setting is not a path.");
+    const properties: Array<"openFile" | "openDirectory" | "multiSelections"> = [entry.definition.type === "file" ? "openFile" : "openDirectory"];
+    if (entry.definition.multiple) properties.push("multiSelections");
+    const selection = await dialog.showOpenDialog(window!, { title: entry.definition.title, properties });
+    return selection.canceled ? null : entry.definition.multiple ? selection.filePaths : selection.filePaths[0] ?? null;
+  });
   handle("plugins:credential", async (payload) => {
     const input = objectPayload(payload);
     if (typeof input.token !== "string") throw new Error("Invalid plugin credential.");
@@ -269,19 +293,24 @@ function registerHandlers(service: WorkspaceService) {
       } });
     } finally { if (pluginOAuthController === controller) pluginOAuthController = undefined; }
   });
-  handle("plugins:import", async () => {
-    const selected = await dialog.showOpenDialog(window!, { title: "Choose a plugin package folder", buttonLabel: "Review plugin", properties: ["openDirectory"] });
-    if (selected.canceled || !selected.filePaths[0]) return null;
-    const source = selected.filePaths[0];
+  const importPlugin = async (source: string) => {
     const preview = await plugins.preview(source);
     const lines = preview.servers.map((server) => `${confirmationValue(server.name)} — ${server.transport}${server.enabled ? "" : " (disabled in source)"}${server.unsupported.length ? ` — unavailable: ${server.unsupported.join(" ")}` : ""}; environment names: ${server.environmentNames.map(confirmationValue).join(", ") || "none"}`);
     const result = await dialog.showMessageBox(window!, {
       type: "question", buttons: ["Cancel", "Import disabled"], defaultId: 0, cancelId: 0,
       title: "Import this plugin package?", message: `Import ${confirmationValue(preview.name)}?`,
-      detail: `Source: ${confirmationValue(source)}\n${preview.files} files · ${preview.bytes.toLocaleString()} bytes · ${preview.skills.length} skill(s)\n\n${lines.join("\n")}${preview.warnings.length ? `\n\nNot loaded: ${preview.warnings.join(" ")}` : ""}\n\nThe selected folder is copied into Nova and may include private configuration. It starts disabled. Enabling and selecting Plugins for a run still requires a separate startup review before any plugin code runs, the discovered tool catalog requires approval before it is shared, and each tool call requires approval. Plugin programs run with your user account and may access files or networks at startup. Only import packages you trust.`,
+      detail: `Source: ${confirmationValue(source)}\n${preview.files} files · ${preview.bytes.toLocaleString()} bytes · ${preview.skills.length} skill(s)\n${preview.bundleFields?.length ? `Bundle settings: ${preview.bundleFields.map((field) => `${confirmationValue(field.title)}${field.required ? " (required)" : ""}${field.sensitive ? " (sensitive)" : ""}`).join(", ")}\n` : ""}\n${lines.join("\n")}${preview.warnings.length ? `\n\nNot loaded: ${preview.warnings.join(" ")}` : ""}\n\nThe selected package is copied into Nova and may include private configuration. It starts disabled. Enabling and selecting Plugins for a run still requires a separate startup review before any plugin code runs, the discovered tool catalog requires approval before it is shared, and each tool call requires approval. Plugin programs run with your user account and may access files or networks at startup. Only import packages you trust.`,
     });
     if (result.response !== 1) return null;
     return plugins.install(source, preview.fingerprint);
+  };
+  handle("plugins:import", async () => {
+    const selected = await dialog.showOpenDialog(window!, { title: "Choose a plugin package folder", buttonLabel: "Review plugin", properties: ["openDirectory"] });
+    return selected.canceled || !selected.filePaths[0] ? null : importPlugin(selected.filePaths[0]);
+  });
+  handle("plugins:import-bundle", async () => {
+    const selected = await dialog.showOpenDialog(window!, { title: "Choose an MCP bundle", buttonLabel: "Review bundle", properties: ["openFile"], filters: [{ name: "MCP bundles", extensions: ["mcpb", "dxt", "zip"] }] });
+    return selected.canceled || !selected.filePaths[0] ? null : importPlugin(selected.filePaths[0]);
   });
   handle("plugins:enabled", async (payload) => {
     const input = objectPayload(payload);
@@ -903,6 +932,8 @@ if (!app.requestSingleInstanceLock()) {
       await localKeyStore.load();
       pluginCredentials = new PluginCredentialStore(dataDir, safeStorage);
       await pluginCredentials.load();
+      bundleConfigStore = new BundleConfigStore(dataDir, safeStorage);
+      await bundleConfigStore.load();
       pluginOAuthStore = new PluginOAuthStore(dataDir, safeStorage);
       await pluginOAuthStore.load();
       workspace = new WorkspaceService(
@@ -942,6 +973,7 @@ if (!app.requestSingleInstanceLock()) {
           has: (identity) => pluginOAuthStore.has(identity),
           token: (identity, endpoint, settings, signal, approve) => pluginOAuthToken({ identity, endpoint, settings, signal, store: pluginOAuthStore, review: (request) => approve({ action: "start", ...request }) }),
         },
+        { values: (identity) => bundleConfigStore.get(identity), paths: { HOME: app.getPath("home"), DESKTOP: app.getPath("desktop"), DOCUMENTS: app.getPath("documents"), DOWNLOADS: app.getPath("downloads") } },
       );
       await workspace.initialize();
       registerHandlers(workspace);

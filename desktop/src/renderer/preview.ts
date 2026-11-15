@@ -181,6 +181,9 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
   return {
     async listPluginPackages() { return []; },
     async importPluginPackage() { return null; },
+    async importPluginBundle() { return null; },
+    async setBundleSetting() {},
+    async chooseBundlePath() { return null; },
     async setPluginPackageEnabled() {},
     async setPluginServerEnabled() {},
     async setPluginCredential() {},

@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { validRange } from "semver";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { removeOwnedTree } from "./owned-tree";
+import { withBundleArchive } from "./bundle-archive";
+import { parseBundleFields, publicBundleFields, type BundleDefinition } from "./bundle-config";
 import type { PluginPackage } from "../../shared/plugins";
 import { parsePluginMcp, pluginServerSummary, prepareRemotePluginHeaders, type PluginServerConfig } from "./plugin-config";
 import { snapshotSkillPackage, type PackageSnapshot } from "./skill-packages";
@@ -29,7 +32,49 @@ function manifestPath(value: string): string {
   return result;
 }
 
-export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; warnings: string[] } {
+function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
+  const manifest = object(readJson(snapshot, "manifest.json"));
+  const version = manifest.manifest_version ?? manifest.dxt_version;
+  if (typeof version !== "string" || !["0.1", "0.2", "0.3"].includes(version)) throw new Error("This MCP bundle manifest version is not supported.");
+  const server = object(manifest.server);
+  if (!["node", "python", "binary"].includes(String(server.type)) || typeof server.entry_point !== "string") throw new Error("This MCP bundle server type is not supported.");
+  let entry = manifestPath(server.entry_point);
+  if (process.platform === "win32" && server.type === "binary" && !path.extname(entry) && snapshot.files.some((file) => file.path.toLowerCase() === `${entry}.exe`.toLowerCase())) entry += ".exe";
+  if (!snapshot.files.some((file) => file.path.toLowerCase() === entry.toLowerCase())) throw new Error("The bundle server entry point is missing.");
+  const config = object(server.mcp_config);
+  const overrides = config.platform_overrides === undefined ? {} : object(config.platform_overrides);
+  const platform = overrides[process.platform] === undefined ? {} : object(overrides[process.platform]);
+  const combined: Record<string, unknown> = { ...config, ...platform, env: { ...(config.env === undefined ? {} : object(config.env)), ...(platform.env === undefined ? {} : object(platform.env)) } };
+  delete combined.platform_overrides;
+  if (process.platform === "win32" && server.type === "binary" && typeof combined.command === "string" && !path.extname(combined.command)) combined.command += ".exe";
+  const convert = (value: unknown): unknown => typeof value === "string" ? value.replace(/\$\{__dirname\}/g, "${PLUGIN_ROOT}").replace(/\$\{(?:pathSeparator|\/)\}/g, path.sep) : Array.isArray(value) ? value.map(convert) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, convert(item)])) : value;
+  const [parsed] = parsePluginMcp({ mcpServers: { bundle: convert(combined) } });
+  const warnings: string[] = [];
+  const bundleFields = parseBundleFields(manifest.user_config);
+  parsed!.isBundle = true; parsed!.bundleType = server.type as "node" | "python" | "binary"; parsed!.bundleFields = bundleFields;
+  if (manifest.compatibility !== undefined) {
+    const compatibility = object(manifest.compatibility);
+    if (compatibility.platforms !== undefined && (!Array.isArray(compatibility.platforms) || !compatibility.platforms.every((value) => typeof value === "string") || !compatibility.platforms.includes(process.platform))) parsed!.unsupported.push("This bundle does not support the current platform.");
+    if (compatibility.runtimes !== undefined) {
+      const runtimes = object(compatibility.runtimes); const keys = Object.keys(runtimes);
+      if (keys.length > 1 || keys.some((name) => !["node", "python"].includes(name) || name !== server.type)) parsed!.unsupported.push("This bundle declares runtime requirements Nova cannot verify for its server type.");
+      else if (keys.length) {
+        const name = keys[0] as "node" | "python"; const raw = runtimes[name];
+        if (typeof raw !== "string" || raw.length > 256 || !validRange(raw.replace(/,/g, " "))) parsed!.unsupported.push("This bundle declares an invalid runtime version range.");
+        else parsed!.bundleRuntime = { name, range: raw.replace(/,/g, " ") };
+      }
+    }
+    if (Object.keys(compatibility).some((field) => !["platforms", "runtimes", "claude_desktop"].includes(field))) parsed!.unsupported.push("This bundle declares an unsupported compatibility requirement.");
+  }
+  if (manifest.prompts !== undefined) warnings.push("Bundle prompts are not loaded by Nova.");
+  if (manifest._meta !== undefined) warnings.push("Bundle host-specific integrations are not loaded by Nova.");
+  const name = typeof manifest.display_name === "string" ? manifest.display_name : typeof manifest.name === "string" ? manifest.name : fallbackName;
+  if (!name.trim() || name.length > 128 || /[\0\r\n]/.test(name)) throw new Error("Invalid bundle name.");
+  return { name, servers: [parsed!], skills: snapshot.skills, warnings, ...(bundleFields.length ? { bundleFields: publicBundleFields(bundleFields) } : {}) };
+}
+
+export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
+  if (snapshot.files.some((file) => file.path.toLowerCase() === "manifest.json") && !snapshot.files.some((file) => ["plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json", ".mcp.json", "mcp.json"].includes(file.path.toLowerCase()))) return parseMcpBundle(snapshot, fallbackName);
   const allManifests = snapshot.files.filter((file) => [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"].includes(file.path.toLowerCase()));
   const portable = snapshot.files.some((file) => file.path.toLowerCase() === "plugin.json") && snapshot.files.some((file) => file.path.toLowerCase() === "mcp.json");
   const manifests = portable ? allManifests.filter((file) => file.path.toLowerCase() !== ".codex-plugin/plugin.json") : allManifests;
@@ -110,13 +155,24 @@ export class PluginPackageStore {
   }
   async preview(selected: string): Promise<Omit<PluginPackage, "id" | "enabled" | "disabledServers">> {
     await this.ensureRoot();
+    if ((await lstat(selected)).isFile()) {
+      const archive = await realpath(selected);
+      if (inside(this.root, archive) || inside(this.dataDir, archive)) throw new Error("Choose a bundle separate from Nova's plugin storage.");
+      return withBundleArchive(selected, this.dataDir, (folder) => this.preview(folder));
+    }
     const source = await realpath(selected);
     if (inside(source, this.root) || inside(this.root, source)) throw new Error("Choose a source separate from Nova's plugin storage.");
     const snapshot = await snapshotSkillPackage(selected, { allowNoSkills: true });
     const parsed = parsePluginPackage(snapshot, path.basename(source));
-    return { name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint: snapshot.fingerprint, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings };
+    return { name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint: snapshot.fingerprint, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
   }
   async install(selected: string, fingerprint: string): Promise<PluginPackage> {
+    await this.ensureRoot();
+    if ((await lstat(selected)).isFile()) {
+      const archive = await realpath(selected);
+      if (inside(this.root, archive) || inside(this.dataDir, archive)) throw new Error("Choose a bundle separate from Nova's plugin storage.");
+      return withBundleArchive(selected, this.dataDir, (folder) => this.install(folder, fingerprint));
+    }
     const preview = await this.preview(selected);
     if (preview.fingerprint !== fingerprint) throw new Error("The plugin package changed. Review it again before importing.");
     const snapshot = await snapshotSkillPackage(selected, { allowNoSkills: true });
@@ -149,13 +205,14 @@ export class PluginPackageStore {
         !Number.isSafeInteger(pkg.files) || !Number.isSafeInteger(pkg.bytes) || !Array.isArray(pkg.servers) || pkg.servers.length > 100 ||
         !pkg.servers.every((server) => server && typeof server.name === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(server.name) && typeof server.transport === "string" && typeof server.enabled === "boolean" && Array.isArray(server.environmentNames) && server.environmentNames.every((name) => typeof name === "string") && Array.isArray(server.unsupported) && server.unsupported.every((reason) => typeof reason === "string")) ||
         !Array.isArray(pkg.skills) || pkg.skills.length > 200 || !pkg.skills.every((skill) => skill && typeof skill.path === "string" && typeof skill.name === "string" && typeof skill.description === "string") ||
+        (pkg.bundleFields !== undefined && (!Array.isArray(pkg.bundleFields) || pkg.bundleFields.length > 50 || pkg.bundleFields.some((field) => !field || typeof field.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(field.key) || !["string", "number", "boolean", "file", "directory"].includes(field.type) || typeof field.title !== "string" || typeof field.description !== "string" || typeof field.required !== "boolean" || typeof field.sensitive !== "boolean" || typeof field.multiple !== "boolean" || (field.sensitive && field.value !== undefined)))) ||
         !Array.isArray(pkg.disabledServers) || pkg.disabledServers.some((name) => typeof name !== "string" || !pkg.servers.some((server) => server.name === name)) ||
         !Array.isArray(pkg.warnings) || pkg.warnings.length > 100 || pkg.warnings.some((warning) => typeof warning !== "string") || !/^[a-f0-9]{64}$/.test(pkg.fingerprint)) throw new Error("Invalid plugin metadata.");
     if (verify) {
       const snapshot = await snapshotSkillPackage(path.join(directory, "files"), { allowNoSkills: true });
       if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed. Disable it or import a fresh copy.`);
       const parsed = parsePluginPackage(snapshot, pkg.name);
-      return { ...pkg, name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings };
+      return { ...pkg, name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
     }
     return pkg;
   }
@@ -227,6 +284,19 @@ export class PluginPackageStore {
     } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   }
 
+  async bundleField(id: string, field: string, remove = false): Promise<{ id: string; fingerprint: string; definition: BundleDefinition }> {
+    await this.ensureRoot(); const pkg = await this.readPackage(id, !remove);
+    if (remove) {
+      const definition = pkg.bundleFields?.find((entry) => entry.key === field);
+      if (!definition) throw new Error("Bundle setting not found.");
+      return { id: pkg.id, fingerprint: pkg.fingerprint, definition };
+    }
+    const snapshot = await snapshotSkillPackage(path.join(this.root, id, "files"), { allowNoSkills: true });
+    if (snapshot.fingerprint !== pkg.fingerprint) throw new Error("The bundle changed before its settings were saved.");
+    const definition = parsePluginPackage(snapshot, pkg.name).servers.flatMap((server) => server.bundleFields ?? []).find((entry) => entry.key === field);
+    if (!definition) throw new Error("Bundle setting not found.");
+    return { id: pkg.id, fingerprint: pkg.fingerprint, definition };
+  }
   async oauthConnection(id: string, name: string): Promise<{ identity: { id: string; fingerprint: string; server: string }; endpoint: string; settings: import("./plugin-oauth").OAuthSettings; resourceHeaders: Record<string, string> }> {
     await this.ensureRoot();
     const pkg = await this.readPackage(id, true);

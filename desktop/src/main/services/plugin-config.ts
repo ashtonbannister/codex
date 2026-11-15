@@ -1,6 +1,7 @@
 import path from "node:path";
 import { lstat, realpath } from "node:fs/promises";
 import { resolveExecutable, type Executable } from "./providers";
+import { expandBundleDefault, validateBundleValue, type BundleValue } from "./bundle-config";
 
 /** Parsed plugin server configuration stays in the main process; env values are never sent to the renderer. */
 export interface PluginServerConfig {
@@ -14,6 +15,10 @@ export interface PluginServerConfig {
   headers?: Record<string, string>;
   literalHeaders?: Record<string, string>;
   bearerTokenEnvVar?: string;
+  isBundle?: boolean;
+  bundleType?: "node" | "python" | "binary";
+  bundleRuntime?: { name: "node" | "python"; range: string };
+  bundleFields?: import("./bundle-config").BundleDefinition[];
   authMode?: "none" | "bearer" | "oauth" | "mixed";
   oauthSettings?: import("./plugin-oauth").OAuthSettings;
   env: Record<string, string>;
@@ -183,7 +188,7 @@ export function requiredEnvironmentNames(server: PluginServerConfig): string[] {
   const names = new Set([...Object.keys(server.env), ...server.envVars, ...(server.bearerTokenEnvVar ? [server.bearerTokenEnvVar] : [])]);
   for (const value of [server.command, server.cwd, server.url, ...server.args, ...Object.values(server.env), ...Object.values(server.headers ?? {})]) {
     if (!value) continue;
-    for (const match of value.matchAll(VARIABLE)) if (!ROOT_VARIABLES.has(match[1]!)) names.add(match[1]!);
+    for (const match of value.matchAll(VARIABLE)) if (!ROOT_VARIABLES.has(match[1]!) && !(server.isBundle && ["HOME", "DESKTOP", "DOCUMENTS", "DOWNLOADS"].includes(match[1]!))) names.add(match[1]!);
   }
   return [...names].sort();
 }
@@ -235,8 +240,8 @@ async function pluginExecutable(command: string, searchPath: string): Promise<Ex
 }
 
 /** Resolve one reviewed stdio server without a shell or exposing environment values. */
-export async function preparePluginLaunch(server: PluginServerConfig, pluginRoot: string, inherited: NodeJS.ProcessEnv, locations: { dataDir?: string; projectDir?: string } = {}): Promise<{
-  executable: Executable; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
+export async function preparePluginLaunch(server: PluginServerConfig, pluginRoot: string, inherited: NodeJS.ProcessEnv, locations: { dataDir?: string; projectDir?: string; bundleValues?: Record<string, BundleValue>; bundlePaths?: Record<string, string> } = {}): Promise<{
+  executable: Executable; args: string[]; cwd: string; env: NodeJS.ProcessEnv; bundleReview?: Array<{ name: string; value: BundleValue | "[redacted]" }>;
 }> {
   if (!server.enabled || server.transport !== "stdio" || !server.command || server.unsupported.length) throw new Error("This plugin server cannot be started with its current settings.");
   if (!path.isAbsolute(pluginRoot)) throw new Error("The plugin copy path is invalid.");
@@ -254,6 +259,20 @@ export async function preparePluginLaunch(server: PluginServerConfig, pluginRoot
     return key ? inherited[key] : undefined;
   };
   const variables: Record<string, string> = Object.create(null);
+  if (server.isBundle) for (const name of ["HOME", "DESKTOP", "DOCUMENTS", "DOWNLOADS"]) {
+    const value = locations.bundlePaths?.[name]; if (value) variables[name] = value;
+  }
+  const bundleValues: Record<string, BundleValue> = Object.create(null);
+  for (const field of server.bundleFields ?? []) {
+    let value = locations.bundleValues?.[field.key] ?? field.defaultValue;
+    if (value === undefined) {
+      if (field.required) throw new Error(`Configure ${field.title} in Settings → Plugins before starting this bundle.`);
+      bundleValues[field.key] = field.multiple ? [] : "";
+      continue;
+    }
+    if (locations.bundleValues?.[field.key] === undefined) value = expandBundleDefault(value, locations.bundlePaths ?? {});
+    bundleValues[field.key] = validateBundleValue(field, value);
+  }
   for (const key of ["CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "PLUGIN_ROOT"]) variables[key] = root;
   if (locations.dataDir) for (const key of ["CLAUDE_PLUGIN_DATA", "CODEX_PLUGIN_DATA", "PLUGIN_DATA"]) variables[key] = locations.dataDir;
   if (locations.projectDir) variables.CLAUDE_PROJECT_DIR = locations.projectDir;
@@ -275,7 +294,14 @@ export async function preparePluginLaunch(server: PluginServerConfig, pluginRoot
     return variables[name] = value;
   };
   const expand = (value: string): string => {
-    const result = value.replace(VARIABLE, (_whole, name: string) => resolveVariable(name));
+    const result = value.replace(/\$\{(user_config\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+      if (!name.startsWith("user_config.")) return resolveVariable(name);
+      const fieldName = name.slice("user_config.".length);
+      if (!Object.hasOwn(bundleValues, fieldName)) throw new Error(`The bundle refers to an unknown setting: ${fieldName}.`);
+      const resolved = bundleValues[fieldName];
+      if (Array.isArray(resolved)) throw new Error("Multiple bundle paths may only appear as a complete command argument.");
+      return String(resolved);
+    });
     if (/\$\{/.test(result) || /[\0\r\n]/.test(result) || result.length > 16_384) throw new Error("The plugin contains an unsupported or invalid variable reference.");
     return result;
   };
@@ -290,18 +316,32 @@ export async function preparePluginLaunch(server: PluginServerConfig, pluginRoot
     const relative = path.relative(root, candidate);
     return !relative || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   };
+  if (server.bundleFields?.some((field) => field.sensitive && (server.command!.includes(`\${user_config.${field.key}}`) || server.cwd?.includes(`\${user_config.${field.key}}`)))) throw new Error("A sensitive bundle setting cannot select the executable or working directory.");
   let command = expand(server.command);
   if (!path.isAbsolute(command) && (command.includes("/") || command.includes("\\"))) {
     command = path.resolve(root, command);
     if (!contained(command)) throw new Error("A relative plugin command escapes its copied package.");
   }
   let cwd = server.cwd ? expand(server.cwd) : root;
+  const sensitiveValues = (server.bundleFields ?? []).filter((field) => field.sensitive).map((field) => bundleValues[field.key]).filter((value): value is string => typeof value === "string" && !!value);
+  if (sensitiveValues.some((value) => command.includes(value) || cwd.includes(value))) throw new Error("A sensitive bundle setting cannot select the executable or working directory.");
   if (!path.isAbsolute(cwd)) {
     cwd = path.resolve(root, cwd);
     if (!contained(cwd)) throw new Error("A relative plugin working directory escapes its copied package.");
   }
   const realCwd = await realpath(cwd);
   if (!(await lstat(realCwd)).isDirectory()) throw new Error("The plugin working directory is unavailable.");
-  const executable = await pluginExecutable(command, environment.PATH ?? "");
-  return { executable, args: [...executable.prefix, ...server.args.map(expand)], cwd: realCwd, env: { ...environment, ...executable.env } };
+  let executable: Executable;
+  try { executable = await pluginExecutable(command, environment.PATH ?? ""); }
+  catch (error) {
+    if (server.isBundle && server.bundleType === "node" && /^(?:node|node\.exe)$/i.test(command)) executable = { command: process.execPath, prefix: [], ...(process.versions.electron ? { env: { ELECTRON_RUN_AS_NODE: "1" } } : {}) };
+    else throw error;
+  }
+  const args = server.args.flatMap((argument) => {
+    const match = /^\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(argument);
+    const value = match ? bundleValues[match[1]!] : undefined;
+    return Array.isArray(value) ? value.map((item) => { if (/\$\{|[\0\r\n]/.test(item)) throw new Error("Invalid bundle path."); return item; }) : [expand(argument)];
+  });
+  const bundleReview = server.isBundle ? (server.bundleFields ?? []).map((field) => ({ name: field.key, value: field.sensitive ? "[redacted]" as const : bundleValues[field.key]! })) : undefined;
+  return { executable, args: [...executable.prefix, ...args], cwd: realCwd, env: { ...environment, ...executable.env }, ...(bundleReview ? { bundleReview } : {}) };
 }

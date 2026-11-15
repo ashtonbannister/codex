@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { coerce, satisfies } from "semver";
+import { captureCommand } from "./providers";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { PluginPackage } from "../../shared/plugins";
@@ -49,11 +51,11 @@ const equalFile = (left: Omit<Launch["fileIdentities"][number], "path">, right: 
 const summary = (launch: Launch) => ({
   plugin: launch.pkg.name, server: launch.server.name, executable: launch.prepared.executable.command,
   arguments: redactedArguments([...launch.prepared.executable.prefix, ...launch.server.args]), workingDirectory: launch.prepared.cwd,
-  pluginDataDirectory: launch.dataDir, projectDirectory: launch.projectDir, environmentNames: requiredEnvironmentNames(launch.server), environmentOverrides: redact(launch.server.env),
+  pluginDataDirectory: launch.dataDir, projectDirectory: launch.projectDir, environmentNames: requiredEnvironmentNames(launch.server), environmentOverrides: redact(launch.server.env), ...(launch.server.isBundle ? { runtimeRequirement: launch.server.bundleRuntime ?? null, bundleSettings: launch.prepared.bundleReview, note: "Sensitive values passed as arguments may be visible to other processes." } : {}),
 });
 
 /** Start only reviewed servers and gate every tool call independently. */
-export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }): Promise<{
+export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }, bundle?: { values(identity: { id: string; fingerprint: string }): Record<string, import("./bundle-config").BundleValue>; paths: Record<string, string> }): Promise<{
   url: string; token: string; dispose(): Promise<void>;
 }> {
   signal.throwIfAborted();
@@ -76,11 +78,11 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers, oauthAvailable });
       continue;
     }
-    const prepared = await preparePluginLaunch(server, entry.root, process.env, { dataDir: entry.dataDir, projectDir });
+    const prepared = await preparePluginLaunch(server, entry.root, process.env, { dataDir: entry.dataDir, projectDir, ...(server.isBundle && bundle ? { bundleValues: bundle.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint }), bundlePaths: bundle.paths } : {}) });
     const fileIdentities: Launch["fileIdentities"] = [];
     const scripts = prepared.args.filter((arg) => path.isAbsolute(arg) && /\.(?:[cm]?js|py|exe|ps1|sh|bat|cmd|jar)$/i.test(arg));
     for (const file of new Set([prepared.executable.command, ...prepared.executable.prefix, ...scripts])) {
-      const info = await lstat(file);
+      const info = await lstat(file).catch(() => { throw new Error("A plugin executable or script is unavailable or redirected."); });
       if (!info.isFile() || info.isSymbolicLink()) throw new Error("A plugin executable or script is unavailable or redirected.");
       fileIdentities.push({ path: file, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs });
     }
@@ -103,7 +105,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
   }
   for (const launch of launches) {
     for (const file of launch.fileIdentities) {
-      const info = await lstat(file.path);
+      const info = await lstat(file.path).catch(() => { throw new Error("A reviewed plugin executable or script changed before startup."); });
       if (!info.isFile() || info.isSymbolicLink() || !equalFile(file, info)) throw new Error("A reviewed plugin executable or script changed before startup.");
     }
     for (const directory of launch.directoryIdentities) {
@@ -140,12 +142,24 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       const snapshot = await snapshotSkillPackage(launch.root, { allowNoSkills: true });
       if (snapshot.fingerprint !== launch.pkg.fingerprint) throw new Error("A plugin package changed before its server started.");
       for (const file of launch.fileIdentities) {
-        const info = await lstat(file.path);
+        const info = await lstat(file.path).catch(() => { throw new Error("A plugin executable or script changed before its server started."); });
         if (!info.isFile() || info.isSymbolicLink() || !equalFile(file, info)) throw new Error("A plugin executable or script changed before its server started.");
       }
       for (const directory of launch.directoryIdentities) {
         const info = await lstat(directory.path);
         if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== directory.dev || info.ino !== directory.ino) throw new Error("A plugin directory changed before its server started.");
+      }
+      if (launch.server.bundleRuntime) {
+        const allowed = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "LANG"];
+        const environment = Object.fromEntries(allowed.filter((name) => launch.prepared.env[name] !== undefined).map((name) => [name, launch.prepared.env[name]]));
+        let output: string;
+        try { output = await captureCommand({ command: launch.prepared.executable.command, prefix: [], env: launch.prepared.executable.env }, ["--version"], launch.prepared.cwd, 8192, undefined, { environment, signal }); }
+        catch (error) {
+          if (error instanceof Error && /termination could not be confirmed/i.test(error.message)) throw new McpProcessError("Bundle runtime probe termination could not be confirmed.", true);
+          throw new Error(`Could not verify the bundle's ${launch.server.bundleRuntime.name} runtime version.`);
+        }
+        const version = coerce(output);
+        if (!version || !satisfies(version, launch.server.bundleRuntime.range)) throw new Error(`The bundle requires ${launch.server.bundleRuntime.name} ${launch.server.bundleRuntime.range}; the installed runtime does not match.`);
       }
       const client = new McpStdioClient({ command: launch.prepared.executable.command, args: launch.prepared.args, cwd: launch.prepared.cwd, env: launch.prepared.env, signal });
       clients.push(client);
