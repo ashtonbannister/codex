@@ -2,6 +2,7 @@ import path from "node:path";
 import { JSON_SCHEMA, load } from "js-yaml";
 import type { PluginCommand, PluginPackage } from "../../shared/plugins";
 import type { PackageSnapshot } from "./skill-packages";
+import { expandBundleDefault, validateBundleValue, type BundleDefinition, type BundleValue } from "./bundle-config";
 
 export interface CommandDefinition extends PluginCommand { body: string }
 const namePattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -42,7 +43,7 @@ function decode(name: string, text: string, file: string | undefined, overrides:
   if (metadata["allowed-tools"] !== undefined || overrides.allowedTools !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
   if (Object.keys(overrides).some((key) => !["description", "argumentHint", "allowedTools"].includes(key))) unsupported.push("This command declares unsupported options.");
   if (/!`/.test(body)) unsupported.push("Automatic shell interpolation in commands is not supported.");
-  if (/\$\{(?:user_config\.|CLAUDE_SESSION_ID|CLAUDE_SKILL_DIR)/.test(body)) unsupported.push("This command uses unsupported context variables.");
+  if (/\$\{(?:CLAUDE_SESSION_ID|CLAUDE_SKILL_DIR)/.test(body)) unsupported.push("This command uses unsupported context variables.");
   const description = overrides.description ?? metadata.description ?? ""; const argumentHint = overrides.argumentHint ?? metadata["argument-hint"];
   if (typeof description !== "string" || description.length > 800 || /\0/.test(description) || (argumentHint !== undefined && (typeof argumentHint !== "string" || argumentHint.length > 300 || /\0/.test(argumentHint)))) throw new Error("Invalid plugin command metadata.");
   if (!body.trim() || body.length > 48_000) unsupported.push("Command instructions are empty or too large to review.");
@@ -89,29 +90,49 @@ function splitArguments(input: string): string[] {
   if (quote) throw new Error("The plugin command has an unterminated quoted argument.");
   if (started) items.push(current); return items;
 }
-export function renderPluginCommand(command: CommandDefinition, input: string, locations: { root: string; data: string; project: string; skillDir?: string }): string {
+export function renderPluginCommand(command: CommandDefinition, input: string, locations: { root: string; data: string; project: string; skillDir?: string; config?: Record<string, string> }): string {
   if (command.unsupported.length) throw new Error(`This plugin command is unavailable: ${command.unsupported.join(" ")}`);
   const args = splitArguments(input); let replaced = false;
-  let output = command.body.replace(/(\\)?\$(ARGUMENTS(?:\[(\d+)\])?|\d+)/g, (whole, escaped: string | undefined, token: string, position: string | undefined) => {
+  const roots: Record<string, string> = { CLAUDE_PLUGIN_ROOT: locations.root, CODEX_PLUGIN_ROOT: locations.root, PLUGIN_ROOT: locations.root, CLAUDE_PLUGIN_DATA: locations.data, CODEX_PLUGIN_DATA: locations.data, PLUGIN_DATA: locations.data, CLAUDE_PROJECT_DIR: locations.project, ...(locations.skillDir ? { CLAUDE_SKILL_DIR: locations.skillDir } : {}) };
+  // One pass: values and arguments cannot introduce additional substitutions.
+  let output = command.body.replace(/(\\)?\$(ARGUMENTS(?:\[(\d+)\])?|\d+)|\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR|user_config\.[A-Za-z_][A-Za-z0-9_]*)\}/g, (whole, escaped: string | undefined, token: string | undefined, position: string | undefined, variable: string | undefined) => {
+    if (variable) {
+      if (!variable.startsWith("user_config.")) return roots[variable] ?? whole;
+      const key = variable.slice("user_config.".length);
+      if (!locations.config || !Object.hasOwn(locations.config, key)) throw new Error(`Plugin command setting ${key} is unavailable.`);
+      return locations.config[key]!;
+    }
     if (escaped) return whole.slice(1);
     if (token === "ARGUMENTS") { replaced = true; return input; }
     const index = Number(position ?? token); if (index >= args.length) return whole; replaced = true; return args[index]!;
   });
   if (input && !replaced) output += `\n\nARGUMENTS: ${input}`;
-  const roots: Record<string, string> = { CLAUDE_PLUGIN_ROOT: locations.root, CODEX_PLUGIN_ROOT: locations.root, PLUGIN_ROOT: locations.root, CLAUDE_PLUGIN_DATA: locations.data, CODEX_PLUGIN_DATA: locations.data, PLUGIN_DATA: locations.data, CLAUDE_PROJECT_DIR: locations.project, ...(locations.skillDir ? { CLAUDE_SKILL_DIR: locations.skillDir } : {}) };
-  output = output.replace(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR)\}/g, (_whole, key: string) => roots[key]!);
   if (output.length > 60_000 || output.includes("\0")) throw new Error("The expanded plugin command is too large to review.");
   return output;
 }
 export function looksLikePluginCommand(input: string): boolean { return /^\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}:[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:\s|$)/.test(input.trim()); }
 export function pluginCommandPrompt(command: { name: string; content: string }): string { return `\n\nUSER-INVOKED PLUGIN COMMAND ${JSON.stringify(command.name)} (user-selected instructions; obey higher-priority boundaries):\n${command.content}`; }
-export function findPluginCommand(input: string, packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; commands: CommandDefinition[] }>, project: string, allowMissing = false): { name: string; path?: string; warnings: string[]; content: string } | undefined {
+export function findPluginCommand(input: string, packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; commands: CommandDefinition[]; pluginFields?: BundleDefinition[] }>, project: string, allowMissing = false, settings?: { values(identity: { id: string; fingerprint: string }): Record<string, BundleValue>; paths: Record<string, string> }): { name: string; path?: string; warnings: string[]; content: string; settings?: Array<{ name: string; value: string }> } | undefined {
   const match = /^\/([A-Za-z0-9][A-Za-z0-9_-]{0,63}):([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:\s+([\s\S]*))?$/.exec(input.trim());
   if (!match) return undefined;
   const matches = packages.flatMap((entry) => entry.pkg.name.toLowerCase() === match[1]!.toLowerCase() ? entry.commands.filter((command) => command.name.toLowerCase() === match[2]!.toLowerCase()).map((command) => ({ entry, command })) : []);
   if (!matches.length && allowMissing) return undefined;
   if (matches.length !== 1) throw new Error(matches.length ? "More than one enabled plugin has that command name." : "No enabled plugin provides that command. Check Settings → Plugins.");
   const { entry, command } = matches[0]!; const root = entry.providerRoot ?? entry.root;
-  const content = renderPluginCommand(command, match[3] ?? "", { root, data: entry.dataDir, project });
-  return { name: `${entry.pkg.name}:${command.name}`, ...(command.path ? { path: path.join(root, ...command.path.split("/")) } : {}), warnings: command.warnings, content };
+  if (command.unsupported.length) throw new Error(`This plugin command is unavailable: ${command.unsupported.join(" ")}`);
+  const keys = [...new Set([...command.body.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((item) => item[1]!))];
+  const saved = keys.length ? settings?.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint }) ?? {} : {};
+  const config: Record<string, string> = Object.create(null); const review: Array<{ name: string; value: string }> = [];
+  for (const key of keys) {
+    const field = entry.pluginFields?.find((item) => item.key === key);
+    if (!field) throw new Error(`Plugin command refers to an unknown setting: ${key}.`);
+    if (field.sensitive) { config[key] = "[sensitive setting withheld]"; review.push({ name: key, value: config[key]! }); continue; }
+    let value = saved[key] ?? field.defaultValue;
+    if (value === undefined) { if (field.required) throw new Error(`Configure ${field.title} in Settings → Plugins before invoking this command.`); value = field.multiple ? [] : ""; }
+    else { if (saved[key] === undefined) value = expandBundleDefault(value, settings?.paths ?? {}); value = validateBundleValue(field, value); }
+    config[key] = Array.isArray(value) ? value.join(", ") : String(value);
+    review.push({ name: key, value: config[key]! });
+  }
+  const content = renderPluginCommand(command, match[3] ?? "", { root, data: entry.dataDir, project, config });
+  return { ...(review.length ? { settings: review } : {}), name: `${entry.pkg.name}:${command.name}`, ...(command.path ? { path: path.join(root, ...command.path.split("/")) } : {}), warnings: command.warnings, content };
 }

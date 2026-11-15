@@ -1,4 +1,4 @@
-# Nova Workbench feature coverage — 0.5.19
+# Nova Workbench feature coverage — 0.5.20
 
 This records what this application implements, not everything present in a vendor's desktop app. **Implemented** means there is a working code path and an explicit failure path; it does not mean a live account, installed model, or proprietary UI has been tested on the user's machine. Consult the matching commit's GitHub Actions results for automated evidence.
 

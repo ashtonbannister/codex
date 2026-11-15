@@ -33,3 +33,24 @@ test("unsupported command execution features stay unavailable and paths cannot e
   const pkg = await store.install(source, preview.fingerprint); await assert.rejects(store.setEnabled(pkg.id, true), /no supported skills, commands or selected server/i);
   await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture", commands: "../outside.md" })); await assert.rejects(store.preview(source), /inside the selected folder/);
 });
+
+
+test("plugin commands expand reviewed settings without exposing sensitive values or recursively expanding input", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-command-config-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(source);
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture", userConfig: {
+    audience: { type: "string", title: "Audience", description: "Who", required: true },
+    token: { type: "string", title: "Token", description: "Secret", sensitive: true },
+  }, commands: { explain: { content: "Audience ${user_config.audience}; token ${user_config.token}; input $ARGUMENTS" }, invalid: { content: "${user_config.unknown}" } } }));
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.match(preview.commands!.find((item) => item.name === "invalid")!.unsupported.join(" "), /undeclared/);
+  const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const copies = await store.prepareRun("/fixture:explain example");
+  assert.throws(() => findPluginCommand("/fixture:explain example", copies.packages, root), /Configure Audience/);
+  const settings = { values: () => ({ audience: "${CLAUDE_PLUGIN_ROOT}", token: "synthetic-secret" }), paths: {} };
+  const command = findPluginCommand("/fixture:explain ${user_config.token}", copies.packages, root, false, settings)!;
+  assert.match(command.content, /Audience \$\{CLAUDE_PLUGIN_ROOT\}/); assert.match(command.content, /token \[sensitive setting withheld\]/); assert.match(command.content, /input \$\{user_config.token\}/);
+  assert.doesNotMatch(JSON.stringify(command), /synthetic-secret/); assert.equal(command.settings?.find((item) => item.name === "token")?.value, "[sensitive setting withheld]");
+  const previewCommand = await store.previewCommand("/fixture:explain example", root, settings); assert.match(previewCommand!.content, /sensitive setting withheld/);
+  await copies.dispose();
+});

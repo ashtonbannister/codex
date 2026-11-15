@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.19
+# Codex import and runtime boundaries — v0.5.20
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 

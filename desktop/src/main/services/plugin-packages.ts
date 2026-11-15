@@ -159,8 +159,12 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   if (commandVariants.some((commands) => JSON.stringify(commands) !== JSON.stringify(commandVariants[0]))) throw new Error("Codex and Claude plugin manifests define different commands. Import a provider-specific package instead.");
   if (configVariants.some((fields) => JSON.stringify(fields) !== JSON.stringify(configVariants[0]))) throw new Error("Plugin manifests define different settings. Import a provider-specific package instead.");
   const pluginFields = configVariants[0] ?? [];
-  if (pluginFields.length) warnings.add("Plugin settings are available to local servers. Settings in skill or command content and remote server configuration are not supported.");
+  if (pluginFields.length) warnings.add("Plugin settings are available to local servers. Settings in skill content and remote server configuration are not supported. Sensitive values are withheld from commands.");
   const commands = commandVariants[0] ?? [];
+  for (const command of commands) {
+    const references = [...command.body.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)];
+    if (command.body.replace(/\$\{user_config\.[A-Za-z_][A-Za-z0-9_]*\}/g, "").includes("${user_config.") || references.some((reference) => !pluginFields.some((field) => field.key === reference[1]))) command.unsupported.push("This command refers to an undeclared or invalid plugin setting.");
+  }
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) for (const command of commands) command.unsupported.push("The plugin name cannot be used as a command namespace.");
   const servers = [...(variants[0]?.values() ?? [])];
   for (const server of servers) {
@@ -340,7 +344,7 @@ export class PluginPackageStore {
     return result;
   }
 
-  async previewCommand(input: string, project: string): Promise<ReturnType<typeof findPluginCommand>> {
+  async previewCommand(input: string, project: string, settings?: Parameters<typeof findPluginCommand>[4]): Promise<ReturnType<typeof findPluginCommand>> {
     if (!looksLikePluginCommand(input)) return undefined;
     const enabled = (await this.list()).filter((pkg) => pkg.enabled);
     const packages = [];
@@ -349,13 +353,13 @@ export class PluginPackageStore {
       const snapshot = await snapshotSkillPackage(root, { allowNoSkills: true });
       if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before preview.`);
       const parsed = await this.resolvePackage(snapshot, root, pkg.name);
-      packages.push({ pkg, root, dataDir: path.join(this.dataDir, "plugin-data", pkg.id), commands: parsed.commands });
+      packages.push({ pkg, root, dataDir: path.join(this.dataDir, "plugin-data", pkg.id), commands: parsed.commands, pluginFields: parsed.pluginFields });
     }
-    return findPluginCommand(input, packages, project, true);
+    return findPluginCommand(input, packages, project, true, settings);
   }
 
   /** Materialize verified per-run copies; this does not start plugin code. */
-  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama"): Promise<{ packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"] }>; directory: string; providerDirectory?: string; prompt: string; invoked: SelectedSkill[]; verifyProviders(): Promise<void>; dispose(): Promise<void> }> {
+  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama"): Promise<{ packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }>; directory: string; providerDirectory?: string; prompt: string; invoked: SelectedSkill[]; verifyProviders(): Promise<void>; dispose(): Promise<void> }> {
     const references = skillReferences(input);
     const enabled = (await this.list()).filter((pkg) => pkg.enabled);
     if (!enabled.length) throw new Error("No plugin packages are enabled. Import and enable one in Settings → Plugins.");
@@ -372,7 +376,7 @@ export class PluginPackageStore {
       await mkdir(dataRoot, { recursive: true, mode: 0o700 });
       const dataRootInfo = await lstat(dataRoot);
       if (!dataRootInfo.isDirectory() || dataRootInfo.isSymbolicLink() || normalize(await realpath(dataRoot)) !== normalize(dataRoot)) throw new Error("Plugin data storage is unavailable or redirected.");
-      const packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"] }> = [];
+      const packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }> = [];
       const providerDirectory = path.join(directory, "provider"); const providerFingerprints = new Map<string, string>(); const invoked: SelectedSkill[] = [];
       for (const pkg of verified) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"), { allowNoSkills: true });
@@ -430,7 +434,7 @@ export class PluginPackageStore {
           const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
           invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data) });
         }
-        packages.push({ pkg, root, ...(providerFingerprints.has(pkg.id) ? { providerRoot } : {}), dataDir, servers, commands: resolved.commands, skills: selected });
+        packages.push({ pkg, root, ...(providerFingerprints.has(pkg.id) ? { providerRoot } : {}), dataDir, servers, commands: resolved.commands, skills: selected, pluginFields: resolved.pluginFields });
       }
       if (!totalServers && !packages.some(({ pkg, commands }) => pkg.skills.length || commands.some((command) => !command.unsupported.length))) throw new Error("No enabled plugin skills, commands or servers are available.");
       return { packages, directory, ...(providerFingerprints.size ? { providerDirectory } : {}), invoked,
