@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.17
+# Codex import and runtime boundaries — v0.5.18
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 
@@ -97,3 +97,5 @@ Windows acceptance must still observe the exact packaged build alongside the OEM
 Protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [Claude Code CLI](https://code.claude.com/docs/en/cli-reference), and [Claude project memory](https://code.claude.com/docs/en/memory). Nova's read-only rollout support is a bounded compatibility reader, not a guarantee that every future private storage format is stable.
 
 Imported skill folders and supported local archives use disposable copies. Before each run, Nova presents the enabled imported and plugin skills together for approval with the selected provider and model; the provider may read the copied package files after approval. Declining or changing the reviewed copies stops the run before those skills are shared.
+
+Manual-only skill metadata and directories are excluded from automatic provider catalogs and copies; invoke a supported skill explicitly with `/skill`, `/plugin:skill`, or a `$skill` reference. Nova honors supported OpenAI implicit-invocation and product policies, treats Codex-based local runs as CODEX, and does not offer CHAT-only skills to Nova providers. Skills requesting unsupported forked contexts, model overrides, hooks, named arguments or automatic shell interpolation are marked unavailable. Filtered copies are not an operating-system access boundary, and shared references inside an omitted directory may be unavailable. Plugin server copies are separate from provider copies, so server-returned file paths may not be readable by the provider.

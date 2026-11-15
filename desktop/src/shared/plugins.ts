@@ -41,7 +41,7 @@ export interface PluginPackage {
   files: number;
   bytes: number;
   fingerprint: string;
-  skills: Array<{ path: string; name: string; description: string }>;
+  skills: import("./skills").SkillDescriptor[];
   commands?: PluginCommand[];
   servers: PluginServerSummary[];
   disabledServers: string[];

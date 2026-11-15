@@ -15,7 +15,7 @@ async function packageFixture(t: { after(fn: () => Promise<void>): void }) {
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-command-native-")); const source = path.join(root, "source"); await mkdir(source);
   await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture", commands: { review: { content: "Review $0. All arguments: $ARGUMENTS" } } }));
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
-  const copies = await store.prepareRun(); const command = findPluginCommand('/fixture:review "my file"', copies.packages, root)!;
+  const copies = await store.prepareRun('/fixture:review "my file"'); const command = findPluginCommand('/fixture:review "my file"', copies.packages, root)!;
   t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
   return { root, copies, prompt: pluginCommandPrompt(command) };
 }
@@ -35,7 +35,7 @@ test("installed Claude receives explicitly rendered command instructions through
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(async () => { const done = new Promise<void>((resolve) => server.close(() => resolve())); server.closeAllConnections(); await done; });
   const address = server.address(); assert.ok(address && typeof address !== "string"); const home = await ensureNovaCodexHome(path.join(fixture.root, "data")); const executable = await resolveExecutable("claude");
-  const result = await runProvider({ command: { ...executable, env: { ...executable.env, CODEX_HOME: home, CLAUDE_CONFIG_DIR: config, CLAUDECODE: "", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, ANTHROPIC_API_KEY: "synthetic-test-key", ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }, args: providerArguments("claude", fixture.root, "plan", "claude-sonnet-4-5", { pluginDirectory: fixture.copies.directory, claudePartialMessages: true }) }, provider: "claude", cwd: fixture.root, prompt: fixture.prompt, signal: new AbortController().signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
+  const result = await runProvider({ command: { ...executable, env: { ...executable.env, CODEX_HOME: home, CLAUDE_CONFIG_DIR: config, CLAUDECODE: "", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, ANTHROPIC_API_KEY: "synthetic-test-key", ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }, args: providerArguments("claude", fixture.root, "plan", "claude-sonnet-4-5", { pluginDirectory: fixture.copies.providerDirectory, claudePartialMessages: true }) }, provider: "claude", cwd: fixture.root, prompt: fixture.prompt, signal: new AbortController().signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
   assert.equal(result.error, undefined); assert.equal(result.completed, true); assert.equal(contentSeen, true); assert.equal(mcpSeen, false);
 });
 
@@ -50,6 +50,6 @@ test("installed Codex receives command instructions through a synthetic local mo
   const address = server.address(); assert.ok(address && typeof address !== "string"); const settings = { ...DEFAULT_SETTINGS, localProvider: "custom" as const, localProtocol: "chat-completions" as const, localBaseUrl: `http://127.0.0.1:${address.port}/v1`, localModel: "fixture-model" };
   const controller = new AbortController(); const local = await prepareLocalProvider(settings, "fixture-model", controller.signal); t.after(local.dispose);
   const home = await ensureNovaCodexHome(path.join(fixture.root, "data")); const executable = await resolveExecutable("codex");
-  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home }, args: providerArguments("ollama", fixture.root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, pluginDirectory: fixture.copies.directory }) }, provider: "ollama", cwd: fixture.root, prompt: fixture.prompt, signal: controller.signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
+  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home }, args: providerArguments("ollama", fixture.root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, pluginDirectory: fixture.copies.providerDirectory }) }, provider: "ollama", cwd: fixture.root, prompt: fixture.prompt, signal: controller.signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
   assert.equal(result.error, undefined); assert.equal(result.completed, true); assert.equal(contentSeen, true); assert.equal(mcpSeen, false);
 });

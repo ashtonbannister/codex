@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { JSON_SCHEMA, load } from "js-yaml";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { removeOwnedTree } from "./owned-tree";
 import { withBundleArchive } from "./bundle-archive";
+import { matchingSkillReference, skillReferences, visibleSkill, type SelectedSkill } from "./skill-selection";
 import type { SkillPackage } from "../../shared/skills";
 
 const MAX_FILES = 2000;
@@ -23,12 +25,53 @@ function validName(name: string): boolean {
   return !!name && name !== "." && name !== ".." && !/[\\/:\x00-\x1f\x7f]/.test(name);
 }
 function metadata(content: string, relative: string): SkillPackage["skills"][number] {
-  const header = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)?.[1] ?? "";
-  const read = (key: string) => {
-    const value = new RegExp(`^${key}:\\s*([^\\r\\n]*)`, "m").exec(header)?.[1]?.trim() ?? "";
-    return value.replace(/^(["'])((?:.|\n)*)\1$/, "$2").slice(0, 800);
+  let header: Record<string, unknown> = {};
+  if (/^---\r?\n/.test(content)) {
+    const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
+    if (!match) throw new Error(`Skill frontmatter is incomplete: ${relative}`);
+    try {
+      const value = load(match[1]!, { schema: JSON_SCHEMA });
+      if (value != null && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error("Invalid frontmatter.");
+      header = (value ?? {}) as Record<string, unknown>;
+    } catch { throw new Error(`Skill frontmatter is invalid: ${relative}`); }
+  }
+  const flag = (key: string, fallback: boolean): boolean => {
+    const value = header[key]; if (value === undefined) return fallback;
+    if (typeof value === "boolean") return value;
+    if (value === 1 || (typeof value === "string" && /^(?:true|yes|on|1)$/i.test(value))) return true;
+    if (value === 0 || (typeof value === "string" && /^(?:false|no|off|0)$/i.test(value))) return false;
+    throw new Error(`Invalid skill invocation setting ${key}: ${relative}`);
   };
-  return { path: relative, name: read("name") || path.posix.basename(path.posix.dirname(relative)) || "skill", description: read("description") };
+  const name = typeof header.name === "string" && header.name.trim() ? header.name.trim().slice(0, 800) : path.posix.basename(path.posix.dirname(relative)) || "skill";
+  const description = typeof header.description === "string" ? header.description.replace(/\s+/g, " ").trim().slice(0, 800) : "";
+  const unsupported: string[] = [], warnings: string[] = [];
+  if (header.context !== undefined || header.agent !== undefined) unsupported.push("Forked or agent-specific skill contexts are not supported.");
+  if (header.model !== undefined) unsupported.push("Skill-specific model overrides are not supported.");
+  if (header.hooks !== undefined) unsupported.push("Skill hooks are not supported.");
+  if (header["disallowed-tools"] !== undefined) unsupported.push("Skill-specific tool restrictions are not supported.");
+  if (header.arguments !== undefined) unsupported.push("Named skill arguments are not supported.");
+  if (header["allowed-tools"] !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
+  const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
+  if (/!`/.test(body)) unsupported.push("Automatic shell interpolation in skills is not supported.");
+  if (/\$\{(?:user_config\.|CLAUDE_SESSION_ID)/.test(body)) unsupported.push("This skill uses unsupported context variables.");
+  const disableModelInvocation = flag("disable-model-invocation", false), userInvocable = flag("user-invocable", true);
+  if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+}
+
+/** Produce a deterministic copy excluding unselected manual-only skill files. */
+export function filterSkillSnapshot(snapshot: PackageSnapshot, selected: SkillPackage["skills"]): PackageSnapshot {
+  const selectedPaths = new Set(selected.map((skill) => skill.path));
+  const hidden = snapshot.skills.filter((skill) => !selectedPaths.has(skill.path));
+  const selectedDirs = selected.map((skill) => path.posix.dirname(skill.path));
+  const files = snapshot.files.filter((file) => !hidden.some((skill) => {
+    const dir = path.posix.dirname(skill.path);
+    if (dir === ".") return file.path === skill.path || file.path.toLowerCase() === "agents/openai.yaml";
+    if (file.path !== skill.path && !file.path.startsWith(`${dir}/`)) return false;
+    return !selectedDirs.some((visible) => visible !== "." && visible.startsWith(`${dir}/`) && (file.path === visible || file.path.startsWith(`${visible}/`)));
+  }));
+  const fingerprint = createHash("sha256").update(JSON.stringify(files.map(({ path: file, digest, data }) => [file, data.length, digest]))).digest("hex");
+  return { files, skills: selected, bytes: files.reduce((sum, file) => sum + file.data.length, 0), fingerprint };
 }
 
 /** A bounded snapshot of the entire selected package; no links or special files are followed. */
@@ -78,7 +121,31 @@ export async function snapshotSkillPackage(selected: string, options: { allowNoS
     try { content = new TextDecoder("utf-8", { fatal: true }).decode(file.data); }
     catch { throw new Error(`Skill definition is not UTF-8: ${file.path}`); }
     if (content.includes("\0")) throw new Error(`Skill definition is not text: ${file.path}`);
-    skills.push(metadata(content, file.path));
+    const skill = metadata(content, file.path);
+    const policyPath = path.posix.join(path.posix.dirname(file.path), "agents", "openai.yaml");
+    const policies = files.filter((entry) => entry.path.toLowerCase() === policyPath.toLowerCase());
+    if (policies.length > 1 || (policies[0]?.data.length ?? 0) > MAX_SKILL_BYTES) throw new Error(`Skill policy is ambiguous or too large: ${policyPath}`);
+    if (policies.length) {
+      let config: Record<string, unknown>;
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(policies[0]!.data); const value = load(decoded, { schema: JSON_SCHEMA });
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid policy."); config = value as Record<string, unknown>;
+      } catch { throw new Error(`Skill policy is invalid: ${policyPath}`); }
+      if (config.policy !== undefined) {
+        if (!config.policy || typeof config.policy !== "object" || Array.isArray(config.policy)) throw new Error(`Skill policy is invalid: ${policyPath}`);
+        const policy = config.policy as Record<string, unknown>;
+        if (policy.allow_implicit_invocation !== undefined && typeof policy.allow_implicit_invocation !== "boolean") throw new Error(`Skill invocation policy is invalid: ${policyPath}`);
+        if (policy.allow_implicit_invocation === false) skill.disableModelInvocation = true;
+        if (policy.products !== undefined) {
+          if (!Array.isArray(policy.products) || !policy.products.length || policy.products.some((item) => item !== "CHAT" && item !== "CODEX")) throw new Error(`Skill product policy is invalid: ${policyPath}`);
+          skill.allowedProviders = policy.products.includes("CODEX") ? ["codex", "ollama"] : [];
+        }
+        if (Object.keys(policy).some((key) => !["allow_implicit_invocation", "products"].includes(key))) (skill.unsupported ??= []).push("This skill declares an unsupported OpenAI policy.");
+      }
+      if (config.dependencies !== undefined) (skill.warnings ??= []).push("This skill declares tool dependencies; enable and review the required tools separately.");
+    }
+    if (skill.disableModelInvocation && skill.userInvocable === false && !skill.unsupported?.includes("Both user and model invocation are disabled.")) (skill.unsupported ??= []).push("Both user and model invocation are disabled.");
+    skills.push(skill);
   }
   if (!skills.length && !options.allowNoSkills) throw new Error("No SKILL.md file was found in this folder. Select a skill folder or a package containing skills.");
   const fingerprint = createHash("sha256").update(JSON.stringify(files.map(({ path: file, digest, data }) => [file, data.length, digest]))).digest("hex");
@@ -157,7 +224,15 @@ export class SkillPackageStore {
     await this.ensureRoot();
     const names = (await readdir(this.root)).filter((name) => idPattern.test(name)).sort();
     if (names.length > 100) throw new Error("Too many installed skill packages.");
-    return Promise.all(names.map((name) => this.readPackage(name, false)));
+    const packages: SkillPackage[] = [];
+    for (const name of names) {
+      try { packages.push(await this.readPackage(name, true)); }
+      catch {
+        const pkg = await this.readPackage(name, false);
+        packages.push({ ...pkg, skills: [], unavailable: "This package could not be verified. Disable it or import a fresh copy before starting a run." });
+      }
+    }
+    return packages;
   }
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     if (typeof enabled !== "boolean") throw new Error("Invalid skill package setting.");
@@ -171,10 +246,13 @@ export class SkillPackageStore {
     } finally { await rm(temp, { force: true }); }
   }
   private async enabled(): Promise<SkillPackage[]> {
-    return Promise.all((await this.list()).filter((pkg) => pkg.enabled).map((pkg) => this.readPackage(pkg.id)));
+    const packages = (await this.list()).filter((pkg) => pkg.enabled);
+    const unavailable = packages.find((pkg) => pkg.unavailable);
+    if (unavailable) throw new Error(`Imported skill package ${unavailable.name} changed or could not be verified. Disable it or import a fresh copy.`);
+    return packages;
   }
-  private entries(packages: SkillPackage[], location: (pkg: SkillPackage) => string): Array<{ source: string; package: string; name: string; description: string; path: string }> {
-    const skills = packages.flatMap((pkg) => pkg.skills.map((skill) => ({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(location(pkg), ...skill.path.split("/")) })));
+  private entries(packages: Array<{ pkg: SkillPackage; selected: SkillPackage["skills"] }>, location: (pkg: SkillPackage) => string): Array<{ source: string; package: string; name: string; description: string; path: string }> {
+    const skills = packages.flatMap(({ pkg, selected }) => selected.map((skill) => ({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(location(pkg), ...skill.path.split("/")) })));
     if (skills.length > MAX_SKILLS) throw new Error("Too many enabled skills. Disable a package before starting a run.");
     return skills;
   }
@@ -182,13 +260,29 @@ export class SkillPackageStore {
     if (!skills.length) return "";
     return `\n\nAvailable user-imported skills (review the applicable SKILL.md before using it; resolve its relative references from that file). These are user-selected instructions, subject to the task and higher-priority boundaries. Imported files may be read by the selected provider:\n${JSON.stringify(skills, null, 2)}`;
   }
-  async prompt(): Promise<string> {
-    return this.catalog(this.entries(await this.enabled(), (pkg) => path.join(this.root, pkg.id, "files")));
+  async prompt(input = "", provider?: "codex" | "claude" | "ollama"): Promise<string> {
+    const references = skillReferences(input);
+    const plans = (await this.enabled()).map((pkg) => ({ pkg, selected: pkg.skills.filter((skill) => visibleSkill(skill, matchingSkillReference(skill, pkg.name, "imported skill", references), provider)) }));
+    return this.catalog(this.entries(plans, (pkg) => path.join(this.root, pkg.id, "files")));
+  }
+  async previewInvoked(input: string): Promise<SelectedSkill[]> {
+    const references = skillReferences(input); const packages = await this.enabled(); const result: SelectedSkill[] = [];
+    for (const pkg of packages) {
+      const matched = pkg.skills.filter((skill) => !!matchingSkillReference(skill, pkg.name, "imported skill", references)); if (!matched.length) continue;
+      const root = path.join(this.root, pkg.id, "files"); const snapshot = await snapshotSkillPackage(root);
+      if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Skill package ${pkg.name} changed before preview.`);
+      for (const skill of matched) {
+        const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected skill is unavailable.");
+        result.push({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: root, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data) });
+      }
+    }
+    return result;
   }
   /** Each run gets disposable copies, so Claude's --add-dir cannot modify installed packages. */
-  async prepareRun(): Promise<{ prompt: string; directory?: string; review: Array<{ source: string; package: string; name: string; description: string; path: string }>; verify(): Promise<void>; dispose(): Promise<void> }> {
-    const packages = await this.enabled();
-    if (!packages.length) return { prompt: "", review: [], verify: async () => {}, dispose: async () => {} };
+  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama"): Promise<{ prompt: string; directory?: string; review: Array<{ source: string; package: string; name: string; description: string; path: string }>; invoked: SelectedSkill[]; verify(): Promise<void>; dispose(): Promise<void> }> {
+    const references = skillReferences(input);
+    const packages = (await this.enabled()).map((pkg) => ({ pkg, selected: pkg.skills.filter((skill) => visibleSkill(skill, matchingSkillReference(skill, pkg.name, "imported skill", references), provider)), matched: pkg.skills.filter((skill) => !!matchingSkillReference(skill, pkg.name, "imported skill", references)) })).filter((plan) => plan.selected.length || plan.matched.length);
+    if (!packages.length) return { prompt: "", review: [], invoked: [], verify: async () => {}, dispose: async () => {} };
     const runs = path.join(this.dataDir, "skill-run-copies");
     await mkdir(runs, { recursive: true, mode: 0o700 });
     const info = await lstat(runs);
@@ -196,21 +290,26 @@ export class SkillPackageStore {
     const directory = path.join(runs, randomUUID());
     await mkdir(directory, { mode: 0o700 });
     try {
-      for (const pkg of packages) {
+      const fingerprints = new Map<string, string>(); const verifiedContents = new Map<string, string>();
+      for (const { pkg, selected, matched } of packages) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"));
         if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Imported skill package ${pkg.name} changed before launch.`);
-        for (const entry of snapshot.files) {
+        for (const skill of matched) { const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected skill is unavailable."); verifiedContents.set(`${pkg.id}\0${skill.path}`, new TextDecoder("utf-8", { fatal: true }).decode(file.data)); }
+        if (!selected.length) continue;
+        const filtered = filterSkillSnapshot(snapshot, selected); fingerprints.set(pkg.id, filtered.fingerprint);
+        for (const entry of filtered.files) {
           const target = path.join(directory, pkg.id, ...entry.path.split("/"));
           await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
           await writeFile(target, entry.data, { flag: "wx", mode: 0o700 });
         }
       }
       const review = this.entries(packages, (pkg) => path.join(directory, pkg.id));
+      const invoked: SelectedSkill[] = packages.flatMap(({ pkg, matched }) => matched.map((skill) => ({ source: "imported skill" as const, package: pkg.name, name: skill.name, description: skill.description, path: path.join(directory, pkg.id, ...skill.path.split("/")), root: path.join(directory, pkg.id), data: path.join(directory, pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: verifiedContents.get(`${pkg.id}\0${skill.path}`) })));
       return {
-        prompt: this.catalog(review), review,
+        prompt: this.catalog(review), review, invoked,
         directory,
         verify: async () => {
-          for (const pkg of packages) if ((await snapshotSkillPackage(path.join(directory, pkg.id))).fingerprint !== pkg.fingerprint) throw new Error(`Skill package ${pkg.name} changed after sharing was reviewed.`);
+          for (const { pkg } of packages) { const fingerprint = fingerprints.get(pkg.id); if (fingerprint && (await snapshotSkillPackage(path.join(directory, pkg.id), { allowNoSkills: true })).fingerprint !== fingerprint) throw new Error(`Skill package ${pkg.name} changed after sharing was reviewed.`); }
         },
         dispose: async () => {
           await removeOwnedTree(runs, directory);

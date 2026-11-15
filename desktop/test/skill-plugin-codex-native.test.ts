@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { DEFAULT_SETTINGS } from "../src/shared/types";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
+import { renderExplicitSkill } from "../src/main/services/skill-selection";
 import { ensureNovaCodexHome } from "../src/main/services/nova-runtime";
 import { prepareLocalProvider, providerArguments, resolveExecutable, runProvider } from "../src/main/services/providers";
 
@@ -14,15 +15,15 @@ test("installed Codex reads a skill-only plugin through an isolated synthetic lo
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-skill-codex-"));
   const source = path.join(root, "source"); await mkdir(path.join(source, "skills", "demo"), { recursive: true });
   await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture-skill-plugin" }));
-  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-only-skill\ndescription: Synthetic instructions\n---\nSYNTHETIC_SKILL_CONTENT\n");
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-only-skill\ndescription: Synthetic instructions\ndisable-model-invocation: true\n---\nSYNTHETIC_SKILL_CONTENT\n");
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
-  const copies = await store.prepareRun(); const skillFile = path.join(copies.packages[0]!.root, "skills", "demo", "SKILL.md");
+  const copies = await store.prepareRun('/fixture-skill-plugin:fixture-only-skill "test arg"', "ollama"); const rendered = await renderExplicitSkill(copies.invoked[0]!, root, "ollama"); const skillFile = path.join(copies.packages[0]!.providerRoot!, "skills", "demo", "SKILL.md");
   t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
   let calls = 0, catalogSeen = false, contentSeen = false, toolSeen = false, pluginMcpSeen = false;
   const server = createServer(async (req, res) => {
     if (req.url === "/v1/models") { res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ data: [{ id: "fixture-model" }] })); return; }
     let data = ""; for await (const chunk of req) data += chunk; const body = JSON.parse(data);
-    const messages = JSON.stringify(body.messages); catalogSeen ||= messages.includes("fixture-only-skill"); contentSeen ||= messages.includes("SYNTHETIC_SKILL_CONTENT");
+    const messages = JSON.stringify(body.messages); catalogSeen ||= messages.includes("fixture-only-skill"); contentSeen ||= (body.messages ?? []).some((item: any) => item.role === "tool" && JSON.stringify(item.content).includes("SYNTHETIC_SKILL_CONTENT"));
     const tools = body.tools ?? []; pluginMcpSeen ||= tools.some((tool: any) => /nova_plugins/i.test(tool.function?.name ?? ""));
     const tool = tools.find((entry: any) => /(?:shell_command|exec_command|shell)$/i.test(entry.function?.name ?? "")); toolSeen ||= !!tool;
     res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -40,6 +41,6 @@ test("installed Codex reads a skill-only plugin through an isolated synthetic lo
   const settings = { ...DEFAULT_SETTINGS, localProvider: "custom" as const, localProtocol: "chat-completions" as const, localBaseUrl: `http://127.0.0.1:${address.port}/v1`, localModel: "fixture-model" };
   const controller = new AbortController(); const local = await prepareLocalProvider(settings, "fixture-model", controller.signal); t.after(local.dispose);
   const home = await ensureNovaCodexHome(path.join(root, "data")); const executable = await resolveExecutable("codex");
-  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home }, args: providerArguments("ollama", root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, pluginDirectory: copies.directory }) }, provider: "ollama", cwd: root, prompt: `Read the fixture skill.${copies.prompt}`, signal: controller.signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
+  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home }, args: providerArguments("ollama", root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, pluginDirectory: copies.providerDirectory }) }, provider: "ollama", cwd: root, prompt: `Read the fixture skill.${copies.prompt}\n${rendered.content}`, signal: controller.signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
   assert.equal(result.error, undefined); assert.equal(result.completed, true); assert.equal(catalogSeen, true); assert.equal(toolSeen, true); assert.equal(contentSeen, true); assert.equal(pluginMcpSeen, false);
 });

@@ -89,7 +89,7 @@ function splitArguments(input: string): string[] {
   if (quote) throw new Error("The plugin command has an unterminated quoted argument.");
   if (started) items.push(current); return items;
 }
-export function renderPluginCommand(command: CommandDefinition, input: string, locations: { root: string; data: string; project: string }): string {
+export function renderPluginCommand(command: CommandDefinition, input: string, locations: { root: string; data: string; project: string; skillDir?: string }): string {
   if (command.unsupported.length) throw new Error(`This plugin command is unavailable: ${command.unsupported.join(" ")}`);
   const args = splitArguments(input); let replaced = false;
   let output = command.body.replace(/(\\)?\$(ARGUMENTS(?:\[(\d+)\])?|\d+)/g, (whole, escaped: string | undefined, token: string, position: string | undefined) => {
@@ -98,18 +98,20 @@ export function renderPluginCommand(command: CommandDefinition, input: string, l
     const index = Number(position ?? token); if (index >= args.length) return whole; replaced = true; return args[index]!;
   });
   if (input && !replaced) output += `\n\nARGUMENTS: ${input}`;
-  const roots: Record<string, string> = { CLAUDE_PLUGIN_ROOT: locations.root, CODEX_PLUGIN_ROOT: locations.root, PLUGIN_ROOT: locations.root, CLAUDE_PLUGIN_DATA: locations.data, CODEX_PLUGIN_DATA: locations.data, PLUGIN_DATA: locations.data, CLAUDE_PROJECT_DIR: locations.project };
-  output = output.replace(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR)\}/g, (_whole, key: string) => roots[key]!);
+  const roots: Record<string, string> = { CLAUDE_PLUGIN_ROOT: locations.root, CODEX_PLUGIN_ROOT: locations.root, PLUGIN_ROOT: locations.root, CLAUDE_PLUGIN_DATA: locations.data, CODEX_PLUGIN_DATA: locations.data, PLUGIN_DATA: locations.data, CLAUDE_PROJECT_DIR: locations.project, ...(locations.skillDir ? { CLAUDE_SKILL_DIR: locations.skillDir } : {}) };
+  output = output.replace(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR)\}/g, (_whole, key: string) => roots[key]!);
   if (output.length > 60_000 || output.includes("\0")) throw new Error("The expanded plugin command is too large to review.");
   return output;
 }
 export function looksLikePluginCommand(input: string): boolean { return /^\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}:[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:\s|$)/.test(input.trim()); }
 export function pluginCommandPrompt(command: { name: string; content: string }): string { return `\n\nUSER-INVOKED PLUGIN COMMAND ${JSON.stringify(command.name)} (user-selected instructions; obey higher-priority boundaries):\n${command.content}`; }
-export function findPluginCommand(input: string, packages: Array<{ pkg: PluginPackage; root: string; dataDir: string; commands: CommandDefinition[] }>, project: string): { name: string; path?: string; warnings: string[]; content: string } | undefined {
+export function findPluginCommand(input: string, packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; commands: CommandDefinition[] }>, project: string, allowMissing = false): { name: string; path?: string; warnings: string[]; content: string } | undefined {
   const match = /^\/([A-Za-z0-9][A-Za-z0-9_-]{0,63}):([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:\s+([\s\S]*))?$/.exec(input.trim());
   if (!match) return undefined;
   const matches = packages.flatMap((entry) => entry.pkg.name.toLowerCase() === match[1]!.toLowerCase() ? entry.commands.filter((command) => command.name.toLowerCase() === match[2]!.toLowerCase()).map((command) => ({ entry, command })) : []);
+  if (!matches.length && allowMissing) return undefined;
   if (matches.length !== 1) throw new Error(matches.length ? "More than one enabled plugin has that command name." : "No enabled plugin provides that command. Check Settings → Plugins.");
-  const { entry, command } = matches[0]!; const content = renderPluginCommand(command, match[3] ?? "", { root: entry.root, data: entry.dataDir, project });
-  return { name: `${entry.pkg.name}:${command.name}`, ...(command.path ? { path: path.join(entry.root, ...command.path.split("/")) } : {}), warnings: command.warnings, content };
+  const { entry, command } = matches[0]!; const root = entry.providerRoot ?? entry.root;
+  const content = renderPluginCommand(command, match[3] ?? "", { root, data: entry.dataDir, project });
+  return { name: `${entry.pkg.name}:${command.name}`, ...(command.path ? { path: path.join(root, ...command.path.split("/")) } : {}), warnings: command.warnings, content };
 }

@@ -14,9 +14,9 @@ test("command-only plugins expose explicitly invoked commands with arguments and
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source);
   assert.deepEqual(preview.servers, []); assert.equal(preview.commands!.length, 2); assert.match(preview.commands![0]!.warnings.join(" "), /not granted/);
   assert.doesNotMatch(JSON.stringify(preview.commands), /Review \$0 with/);
-  const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true); const copies = await store.prepareRun();
+  const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true); const copies = await store.prepareRun('/fixture:review "two words" file');
   const command = findPluginCommand('/fixture:review "two words" file', copies.packages, root)!;
-  assert.match(command.content, /Review two words with file/); assert.match(command.content, /All: "two words" file/); assert.match(command.content, /Escaped: \$2/); assert.match(command.content, /Missing: \$3/); assert.ok(command.content.includes(copies.packages[0]!.root));
+  assert.match(command.content, /Review two words with file/); assert.match(command.content, /All: "two words" file/); assert.match(command.content, /Escaped: \$2/); assert.match(command.content, /Missing: \$3/); assert.ok(command.content.includes(copies.packages[0]!.providerRoot!));
   assert.match(command.warnings.join(" "), /not granted/); assert.equal(findPluginCommand("ordinary question", copies.packages, root), undefined);
   assert.throws(() => findPluginCommand('/fixture:review "unterminated', copies.packages, root), /unterminated/);
   assert.throws(() => findPluginCommand('/fixture:missing', copies.packages, root), /No enabled plugin/);

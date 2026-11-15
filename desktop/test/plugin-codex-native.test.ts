@@ -40,7 +40,7 @@ test("installed Codex exposes an approved imported plugin to a synthetic local m
   const settings = { ...DEFAULT_SETTINGS, localProvider: "custom" as const, localProtocol: "chat-completions" as const, localBaseUrl: `http://127.0.0.1:${address.port}/v1`, localModel: "fixture-model" };
   const local = await prepareLocalProvider(settings, "fixture-model", controller.signal); t.after(local.dispose);
   const home = await ensureNovaCodexHome(path.join(root, "data")); const executable = await resolveExecutable("codex");
-  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home, NOVA_PLUGIN_TOKEN: plugin.token }, args: providerArguments("ollama", root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, pluginMcpUrl: plugin.url, pluginDirectory: copies.directory }) }, provider: "ollama", cwd: root, prompt: "Use the synthetic plugin.", signal: controller.signal, timeoutMs: 45000, maxBytes: 1024 * 1024, allowPluginImages: true, onEvent: () => {} });
+  const result = await runProvider({ command: { ...executable, env: { ...executable.env, ...local.env, CODEX_HOME: home, NOVA_PLUGIN_TOKEN: plugin.token }, args: providerArguments("ollama", root, "plan", "fixture-model", { allowNonGit: true, localConfigArgs: local.configArgs, pluginMcpUrl: plugin.url, pluginDirectory: copies.providerDirectory }) }, provider: "ollama", cwd: root, prompt: "Use the synthetic plugin.", signal: controller.signal, timeoutMs: 45000, maxBytes: 1024 * 1024, allowPluginImages: true, onEvent: () => {} });
   assert.equal(result.error, undefined);
   assert.equal(result.completed, true);
   assert.equal(exposed, true);

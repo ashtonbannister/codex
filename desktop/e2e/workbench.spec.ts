@@ -147,6 +147,13 @@ test("skill archives show their contents and sharing review in Settings", async 
   await page.screenshot({ path: "test-results/skill-archive.png" });
 });
 
+test("manual-only skills show their explicit invocation in Settings", async ({ page }) => {
+  await installFakeDesktopBridge(page, { manualSkill: true }); await page.goto("/"); await page.getByRole("button", { name: /^Settings/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Workbench settings" }); await dialog.getByRole("tab", { name: "Skills" }).click(); await dialog.getByRole("button", { name: "Import skill archive…" }).click();
+  await expect(dialog.getByText(/archive-skill — Synthetic archive skill · manual only/)).toBeVisible(); await expect(dialog.getByText("/archive-skill", { exact: true })).toBeVisible();
+  await page.screenshot({ path: "test-results/manual-skill.png" });
+});
+
 test("plugins are imported disabled and opted in per run", async ({ page }) => {
   await installFakeDesktopBridge(page, { noProjects: true, complete: true });
   await page.goto("/");

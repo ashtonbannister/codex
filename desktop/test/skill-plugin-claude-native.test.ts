@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
+import { renderExplicitSkill } from "../src/main/services/skill-selection";
 import { ensureNovaCodexHome } from "../src/main/services/nova-runtime";
 import { providerArguments, resolveExecutable, runProvider } from "../src/main/services/providers";
 
@@ -16,16 +17,16 @@ test("installed Claude reads a skill-only plugin through an isolated synthetic p
   t.after(() => { Object.assign(process.env, removed); });
   const source = path.join(root, "source"); await mkdir(path.join(source, "skills", "demo"), { recursive: true });
   await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture-skill-plugin" }));
-  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-only-skill\ndescription: Synthetic instructions\n---\nSYNTHETIC_SKILL_CONTENT\n");
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-only-skill\ndescription: Synthetic instructions\ndisable-model-invocation: true\n---\nSYNTHETIC_SKILL_CONTENT\n");
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
-  const copies = await store.prepareRun(); const skillFile = path.join(copies.packages[0]!.root, "skills", "demo", "SKILL.md");
+  const copies = await store.prepareRun('/fixture-skill-plugin:fixture-only-skill "test arg"', "claude"); const rendered = await renderExplicitSkill(copies.invoked[0]!, root, "claude"); const skillFile = path.join(copies.packages[0]!.providerRoot!, "skills", "demo", "SKILL.md");
   const config = path.join(root, "claude-config"); await mkdir(config);
   t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
   let calls = 0, catalogSeen = false, contentSeen = false, mcpSeen = false;
   const server = createServer(async (req, res) => {
     if (!req.url?.startsWith("/v1/messages")) { res.writeHead(404).end(); return; }
     let data = ""; for await (const chunk of req) data += chunk; const body = JSON.parse(data);
-    const text = JSON.stringify(body.messages); catalogSeen ||= text.includes("fixture-only-skill"); contentSeen ||= text.includes("SYNTHETIC_SKILL_CONTENT"); mcpSeen ||= (body.tools ?? []).some((tool: any) => /nova_plugins/i.test(tool.name ?? ""));
+    const text = JSON.stringify(body.messages); catalogSeen ||= text.includes("fixture-only-skill"); contentSeen ||= text.includes("tool_result") && text.includes("SYNTHETIC_SKILL_CONTENT"); mcpSeen ||= (body.tools ?? []).some((tool: any) => /nova_plugins/i.test(tool.name ?? ""));
     const read = ++calls === 1; res.writeHead(200, { "Content-Type": "text/event-stream" });
     const emit = (type: string, value: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
     emit("message_start", { type: "message_start", message: { id: "msg_fixture", type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } });
@@ -36,8 +37,8 @@ test("installed Claude reads a skill-only plugin through an isolated synthetic p
   server.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(async () => { const done = new Promise<void>((resolve) => server.close(() => resolve())); server.closeAllConnections(); await done; });
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const home = await ensureNovaCodexHome(path.join(root, "data")); const executable = await resolveExecutable("claude");
-  const args = providerArguments("claude", root, "plan", "claude-sonnet-4-5", { pluginDirectory: copies.directory, claudePartialMessages: true });
+  const args = providerArguments("claude", root, "plan", "claude-sonnet-4-5", { pluginDirectory: copies.providerDirectory, claudePartialMessages: true });
   assert.ok(args.includes("--safe-mode")); assert.ok(!args.join(" ").includes("nova_plugins"));
-  const result = await runProvider({ command: { ...executable, env: { ...executable.env, CODEX_HOME: home, CLAUDE_CONFIG_DIR: config, CLAUDECODE: "", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, ANTHROPIC_API_KEY: "synthetic-test-key", ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }, args }, provider: "claude", cwd: root, prompt: `Read the fixture skill.${copies.prompt}`, signal: new AbortController().signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
+  const result = await runProvider({ command: { ...executable, env: { ...executable.env, CODEX_HOME: home, CLAUDE_CONFIG_DIR: config, CLAUDECODE: "", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, ANTHROPIC_API_KEY: "synthetic-test-key", ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }, args }, provider: "claude", cwd: root, prompt: `Read the fixture skill.${copies.prompt}\n${rendered.content}`, signal: new AbortController().signal, timeoutMs: 45000, maxBytes: 1024 * 1024, onEvent: () => {} });
   assert.equal(result.error, undefined); assert.equal(result.completed, true); assert.equal(catalogSeen, true); assert.equal(contentSeen, true); assert.equal(mcpSeen, false);
 });

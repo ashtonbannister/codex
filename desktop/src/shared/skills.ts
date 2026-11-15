@@ -1,9 +1,21 @@
+export interface SkillDescriptor {
+  path: string;
+  name: string;
+  description: string;
+  disableModelInvocation?: boolean;
+  userInvocable?: boolean;
+  allowedProviders?: Array<"codex" | "claude" | "ollama">;
+  unsupported?: string[];
+  warnings?: string[];
+}
+
 export interface SkillPackage {
   id: string;
   name: string;
   enabled: boolean;
-  skills: Array<{ path: string; name: string; description: string }>;
+  skills: SkillDescriptor[];
   files: number;
   bytes: number;
   fingerprint: string;
+  unavailable?: string;
 }

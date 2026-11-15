@@ -629,6 +629,40 @@ test("plugin command and skill content share one explicit review", async (t) => 
   const sent = run.events.find((event) => event.kind === "message")!.text; assert.match(sent, /fixture-skill/); assert.match(sent, /Review ECHO_PROMPT/);
 });
 
+test("manual-only imported and plugin skills require explicit invocation and content approval", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; let allow = true;
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return allow; });
+  const direct = path.join(root, "direct-manual"); await mkdir(direct); await writeFile(path.join(direct, "SKILL.md"), "---\nname: manual-direct\ndescription: Manual direct fixture\ndisable-model-invocation: true\n---\nReview $0. Full: $ARGUMENTS\n");
+  const directStore = new SkillPackageStore(dataDir); const directPreview = await directStore.preview(direct); await directStore.install(direct, directPreview.fingerprint);
+  const source = path.join(root, "plugin-manual"); await mkdir(path.join(source, "skills", "manual"), { recursive: true }); await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" }));
+  await writeFile(path.join(source, "skills", "manual", "SKILL.md"), "---\nname: manual-plugin\ndescription: Manual plugin fixture\ndisable-model-invocation: yes\n---\nInspect $0.\n");
+  const plugins = new PluginPackageStore(dataDir); const preview = await plugins.preview(source); const pkg = await plugins.install(source, preview.fingerprint); await plugins.setEnabled(pkg.id, true);
+  const ordinary = await service.previewContext({ projectId: project.id, provider: "codex", mode: "plan", prompt: "ordinary", usePlugins: false }); assert.doesNotMatch(ordinary.prompt, /Manual direct fixture/);
+  const ordinaryRun = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "codex", mode: "plan", prompt: "ECHO_PROMPT" })).id);
+  assert.equal(ordinaryRun.status, "completed", ordinaryRun.error); assert.doesNotMatch(ordinaryRun.events.find((event) => event.kind === "message")!.text, /manual-direct|Manual direct fixture/); assert.equal(reviews.length, 0);
+  const directRequest = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: '/manual-direct "two words" ECHO_PROMPT' };
+  const directContext = await service.previewContext(directRequest); assert.match(directContext.prompt, /Review two words/);
+  allow = false; const denied = await finishRun(service, (await service.startRun(directRequest)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /sharing was declined/);
+  const directReview = JSON.parse(reviews.at(-1)!.detail) as { invokedSkills: Array<{ content: string }> }; assert.match(directReview.invokedSkills[0]!.content, /Review two words/);
+  allow = true; const directRun = await finishRun(service, (await service.startRun(directRequest)).id); assert.equal(directRun.status, "completed", directRun.error); assert.match(directRun.events.find((event) => event.kind === "message")!.text, /Review two words/);
+  const pluginRequest = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: '/fixture:manual-plugin "target file" ECHO_PROMPT', usePlugins: true };
+  const pluginContext = await service.previewContext(pluginRequest); assert.match(pluginContext.prompt, /Inspect target file/);
+  const pluginRun = await finishRun(service, (await service.startRun(pluginRequest)).id); assert.equal(pluginRun.status, "completed", pluginRun.error); assert.match(pluginRun.events.find((event) => event.kind === "message")!.text, /Inspect target file/);
+  assert.ok(reviews.every((entry) => entry.action === "skills"));
+});
+
+test("manual invocation rejects model-only skills and skill-command name collisions", async (t) => {
+  const { service, project, root, dataDir } = await fixture(t, undefined, async () => true);
+  const direct = path.join(root, "model-only"); await mkdir(direct); await writeFile(path.join(direct, "SKILL.md"), "---\nname: model-only\ndescription: Fixture\nuser-invocable: false\n---\nSynthetic\n");
+  const directStore = new SkillPackageStore(dataDir); const directPreview = await directStore.preview(direct); await directStore.install(direct, directPreview.fingerprint);
+  await assert.rejects(service.previewContext({ projectId: project.id, provider: "codex", mode: "plan", prompt: "/model-only" }), /cannot be invoked directly/);
+  const source = path.join(root, "collision"); await mkdir(path.join(source, "skills", "review"), { recursive: true }); await mkdir(path.join(source, "commands"));
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" })); await writeFile(path.join(source, "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Fixture\n---\nSynthetic\n"); await writeFile(path.join(source, "commands", "review.md"), "Synthetic command");
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "/fixture:review", usePlugins: true };
+  await assert.rejects(service.previewContext(request), /share that name/); const run = await finishRun(service, (await service.startRun(request)).id); assert.equal(run.status, "failed"); assert.match(run.error ?? "", /share that name/);
+});
+
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {
   const { service, project, repo } = await fixture(t);
   await writeFile(path.join(repo, ".gitignore"), "local-source.txt\n");
