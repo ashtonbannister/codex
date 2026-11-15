@@ -6,7 +6,7 @@ import { LOCAL_DEFAULTS } from "../../shared/local-models";
 import type { ProviderStatus, Settings } from "../../shared/types";
 import type { RecoveryItem } from "../../shared/workspace-actions";
 import type { SkillPackage } from "../../shared/skills";
-import type { PluginPackage } from "../../shared/plugins";
+import type { PluginPackage, PluginServerSummary } from "../../shared/plugins";
 import { api, isPreview } from "../bridge";
 import { AccountConnections } from "./AccountConnections";
 import { errorText, Modal, ProviderMark } from "./primitives";
@@ -170,7 +170,7 @@ function PluginPackagesPanel({ workActive }: { workActive: boolean }) {
   };
   return <section><h3>Imported plugins</h3>
     <p className="field-hint">Import a Codex or Claude plugin folder containing MCP server definitions. Nova copies the selected folder and keeps the package disabled until you enable it.</p>
-    <p className="panel-note">Plugin servers run as your user and can access files or networks on startup. Review their startup and discovered tool catalog for each run, then approve each tool call. Remote and host-specific servers may need a connection Nova does not yet support.</p>
+    <p className="panel-note">Local plugin programs run as your user and can access files or networks. Remote servers receive data sent to their tools. Review the connection and tool catalog for each run, then approve each tool call. Some host-specific connections and OAuth are not yet supported.</p>
     <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importPluginPackage(); if (imported) setNotice(`Imported ${imported.name}; it is disabled.`); })}>Import plugin package…</button>
     {workActive && <p className="field-hint">Stop active runs and checks before changing plugins.</p>}
     {notice && <p role="status" className="field-hint">{notice}</p>}
@@ -179,10 +179,25 @@ function PluginPackagesPanel({ workActive }: { workActive: boolean }) {
     {packages.map((pkg) => <div className="runtime-detail" key={pkg.id}>
       <label><input type="checkbox" checked={pkg.enabled} disabled={busy || workActive} onChange={(event) => void perform(() => api.setPluginPackageEnabled(pkg.id, event.target.checked))} /> <strong>{pkg.name}</strong></label>
       <p className="field-hint">{pkg.servers.length} server{pkg.servers.length === 1 ? "" : "s"} · {pkg.skills.length} skill{pkg.skills.length === 1 ? "" : "s"} · {pkg.files} files</p>
-      <ul>{pkg.servers.map((server) => <li key={server.name}><label><input type="checkbox" checked={server.enabled && !pkg.disabledServers.includes(server.name)} disabled={busy || workActive || !server.enabled || !!server.unsupported.length} onChange={(event) => void perform(() => api.setPluginServerEnabled(pkg.id, server.name, event.target.checked))} /> {server.name} · {server.transport}</label>{server.enabled ? "" : " · disabled in source"}{server.unsupported.length ? ` · unavailable: ${server.unsupported.join(" ")}` : ""}{server.environmentNames.length ? ` · environment: ${server.environmentNames.join(", ")}` : ""}</li>)}</ul>
+      <ul>{pkg.servers.map((server) => <li key={server.name}><label><input type="checkbox" checked={server.enabled && !pkg.disabledServers.includes(server.name)} disabled={busy || workActive || !server.enabled || !!server.unsupported.length} onChange={(event) => void perform(() => api.setPluginServerEnabled(pkg.id, server.name, event.target.checked))} /> {server.name} · {server.transport}</label>{server.enabled ? "" : " · disabled in source"}{server.unsupported.length ? ` · unavailable: ${server.unsupported.join(" ")}` : ""}{server.environmentNames.length ? ` · environment: ${server.environmentNames.join(", ")}` : ""}{server.endpointOrigin ? ` · ${server.endpointOrigin}` : ""}{((server.supportsCredential && server.enabled) || server.credentialStored) ? <PluginCredentialControl pkg={pkg} server={server} disabled={busy || workActive} perform={perform} /> : null}</li>)}</ul>
       {pkg.warnings.map((warning) => <p className="field-hint" key={warning}>{warning}</p>)}
     </div>)}
   </section>;
+}
+
+
+function PluginCredentialControl({ pkg, server, disabled, perform }: { pkg: PluginPackage; server: PluginServerSummary; disabled: boolean; perform: (operation: () => Promise<void>) => Promise<void> }) {
+  const [token, setToken] = useState("");
+  const save = () => {
+    const value = token; setToken("");
+    void perform(() => api.setPluginCredential(pkg.id, server.name, value));
+  };
+  return <div className="plugin-credential">
+    {server.supportsCredential && server.enabled && <label className="field"><span>Bearer token for {server.name}</span><input type="password" autoComplete="off" value={token} disabled={disabled} onChange={(event) => setToken(event.target.value)} aria-label={`Bearer token for ${server.name}`} /></label>}
+    <p className="field-hint">{server.credentialStored ? "A token is saved." : "No token saved."} Nova encrypts it with Windows and sends it only to this reviewed server during an opted-in plugin run. It is bound to this exact imported package.</p>
+    {server.supportsCredential && server.enabled && <button type="button" className="secondary-button" disabled={disabled || !token} onClick={save}>Save token</button>}{" "}
+    {server.credentialStored && <button type="button" className="secondary-button" disabled={disabled} onClick={() => { setToken(""); void perform(() => api.setPluginCredential(pkg.id, server.name, "")); }}>Remove token</button>}
+  </div>;
 }
 
 function SkillPackagesPanel({ workActive }: { workActive: boolean }) {

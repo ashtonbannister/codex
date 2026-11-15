@@ -117,3 +117,26 @@ test("individual servers can be excluded without overriding source restrictions"
   await run.dispose();
   await assert.rejects(f.store.setServerEnabled(pkg.id, "first", false), /last supported server/);
 });
+
+
+test("previously imported remote servers refresh their supported status without being enabled", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-plugin-migration-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+  const source = path.join(root, "source"); await mkdir(source);
+  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "http", url: "https://example.invalid/mcp" } } }));
+  const data = path.join(root, "data"); const store = new PluginPackageStore(data);
+  const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint);
+  const metadata = path.join(data, "plugin-packages", pkg.id, "package.json");
+  const old = JSON.parse(await readFile(metadata, "utf8")); old.servers[0].unsupported = ["Remote MCP connections are not yet supported."]; old.disabledServers = ["remote"];
+  await writeFile(metadata, JSON.stringify(old));
+  const refreshed = (await store.list())[0]!;
+  assert.equal(refreshed.servers[0]!.supportsCredential, true); assert.deepEqual(refreshed.servers[0]!.unsupported, []);
+  assert.deepEqual(refreshed.disabledServers, ["remote"]); assert.equal(refreshed.enabled, false);
+  const identity = { id: pkg.id, fingerprint: pkg.fingerprint, server: "remote" };
+  assert.deepEqual(await store.credentialIdentity(pkg.id, "remote"), identity);
+  await writeFile(path.join(data, "plugin-packages", pkg.id, "files", ".mcp.json"), "changed");
+  const invalid = (await store.list())[0]!;
+  assert.match(invalid.servers[0]!.unsupported.join(" "), /verification failed/);
+  await assert.rejects(store.credentialIdentity(pkg.id, "remote"), /changed/);
+  assert.deepEqual(await store.credentialIdentity(pkg.id, "remote", true), identity);
+});

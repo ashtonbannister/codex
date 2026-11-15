@@ -692,6 +692,7 @@ export class WorkspaceService {
     private readonly localKey: (connection: ReturnType<typeof connectionFromSettings>) => string | undefined = () => undefined,
     private readonly createDesktopSession?: () => Promise<DesktopControlSession>,
     private readonly approvePlugin?: PluginApproval,
+    private readonly pluginCredential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined,
   ) {
     this.statePath = path.join(dataDir, "workspace.json");
   }
@@ -2189,7 +2190,7 @@ export class WorkspaceService {
           try {
             if (request.usePlugins) {
               pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun();
-              plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd);
+              plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd, this.pluginCredential);
               context.prompt += pluginCopies.prompt;
             }
             if (request.desktopControl) {

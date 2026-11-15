@@ -164,6 +164,25 @@ test("plugins are imported disabled and opted in per run", async ({ page }) => {
   expect(requests[0]?.usePlugins).toBe(true);
 });
 
+test("remote plugin credentials can be saved and removed without displaying them", async ({ page }) => {
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true }); await page.goto("/");
+  await expect(page).toHaveTitle(/Nova/);
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Plugins" }).click();
+  await dialog.getByRole("button", { name: "Import plugin package…" }).click();
+  await expect(dialog.getByText("https://example.invalid")).toBeVisible();
+  const token = dialog.getByLabel("Bearer token for remote"); await expect(token).toHaveAttribute("type", "password");
+  await token.fill("synthetic-credential"); await dialog.getByRole("button", { name: "Save token" }).click();
+  await expect(token).toHaveValue(""); await expect(dialog.getByText("A token is saved.")).toBeVisible();
+  await expect(dialog).not.toContainText("synthetic-credential");
+  await dialog.getByRole("button", { name: "Remove token" }).click();
+  await expect(dialog.getByText("No token saved.")).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0); expect(errors).toEqual([]);
+  await page.screenshot({ path: "test-results/plugin-credentials.png" });
+});
+
 test("settings enforce timeout bounds and apply appearance", async ({
   page,
 }) => {

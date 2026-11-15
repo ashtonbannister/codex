@@ -15,6 +15,7 @@ const bridge: WorkbenchAPI = {
   importPluginPackage: () => ipcRenderer.invoke("plugins:import"),
   setPluginPackageEnabled: (id, enabled) => ipcRenderer.invoke("plugins:enabled", { id, enabled }),
   setPluginServerEnabled: (id, name, enabled) => ipcRenderer.invoke("plugins:server", { id, name, enabled }),
+  setPluginCredential: (id, name, token) => ipcRenderer.invoke("plugins:credential", { id, name, token }),
   listSkillPackages: () => ipcRenderer.invoke("skills:list"),
   importSkillPackage: () => ipcRenderer.invoke("skills:import"),
   setSkillPackageEnabled: (id, enabled) => ipcRenderer.invoke("skills:enabled", { id, enabled }),

@@ -53,7 +53,7 @@ const summary = (launch: Launch) => ({
 });
 
 /** Start only reviewed servers and gate every tool call independently. */
-export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd()): Promise<{
+export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined): Promise<{
   url: string; token: string; dispose(): Promise<void>;
 }> {
   signal.throwIfAborted();
@@ -71,6 +71,11 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
           return process.env[envKey]!;
         });
         if (/\$\{|[\0\r\n]/.test(headers[key]!) || headers[key]!.length > 8192) throw new Error("Invalid remote plugin header value.");
+      }
+      const savedToken = credential({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, server: server.name });
+      if (savedToken) {
+        if (Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This server already configures an Authorization header.");
+        headers.Authorization = `Bearer ${savedToken}`;
       }
       remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers });
       continue;

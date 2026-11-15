@@ -139,8 +139,10 @@ export function requiredEnvironmentNames(server: PluginServerConfig): string[] {
   return [...names].sort();
 }
 /** Only this summary may be displayed: it deliberately omits environment values and arguments. */
-export function pluginServerSummary(server: PluginServerConfig): { name: string; transport: string; enabled: boolean; environmentNames: string[]; unsupported: string[] } {
-  return { name: server.name, transport: server.transport, enabled: server.enabled, environmentNames: requiredEnvironmentNames(server), unsupported: server.unsupported };
+export function pluginServerSummary(server: PluginServerConfig): import("../../shared/plugins").PluginServerSummary {
+  const remote = server.transport !== "stdio" && server.url;
+  return { name: server.name, transport: server.transport, enabled: server.enabled, environmentNames: requiredEnvironmentNames(server), unsupported: server.unsupported,
+    ...(remote ? { endpointOrigin: new URL(server.url!).origin, supportsCredential: !Object.keys(server.headers ?? {}).some((name) => name.toLowerCase() === "authorization") && !server.unsupported.length } : {}) };
 }
 
 /** Resolve the known npm npx shim directly through Node instead of a Windows shell. */

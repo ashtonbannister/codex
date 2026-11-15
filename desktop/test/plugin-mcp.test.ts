@@ -107,14 +107,16 @@ test("remote MCP plugin requires connection, catalog and call approvals and keep
   const address = server.address(); if (!address || typeof address === "string") throw new Error("No test port");
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-remote-plugin-"));
   const source = path.join(root, "source"); await mkdir(source);
-  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "http", startup_timeout_sec: 5, url: `http://127.0.0.1:${address.port}/mcp?private=synthetic-query`, headers: { Authorization: "Bearer synthetic-test-secret" } } } }));
+  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "http", startup_timeout_sec: 5, url: `http://127.0.0.1:${address.port}/mcp?private=synthetic-query` } } }));
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
   const copies = await store.prepareRun();
   t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
   await assert.rejects(startPluginMcp(copies.packages, async () => false, new AbortController().signal), /declined/);
   assert.equal(requests, 0);
   const approvals: Array<{ action: string; detail: string }> = []; let allow = false;
-  const gateway = await startPluginMcp(copies.packages, async (request) => { approvals.push(request); return request.action !== "call" || allow; }, new AbortController().signal);
+  const gateway = await startPluginMcp(copies.packages, async (request) => { approvals.push(request); return request.action !== "call" || allow; }, new AbortController().signal, process.cwd(), (identity) => {
+    assert.deepEqual(identity, { id: pkg.id, fingerprint: pkg.fingerprint, server: "remote" }); return "synthetic-test-secret";
+  });
   t.after(async () => { await gateway.dispose(); });
   assert.doesNotMatch(approvals[0]!.detail, /synthetic-test-secret|synthetic-query/);
   assert.match(approvals[0]!.detail, /Authorization/);

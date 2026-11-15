@@ -4,6 +4,9 @@ export interface PluginServerSummary {
   enabled: boolean;
   environmentNames: string[];
   unsupported: string[];
+  endpointOrigin?: string;
+  supportsCredential?: boolean;
+  credentialStored?: boolean;
 }
 export interface PluginPackage {
   id: string;

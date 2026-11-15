@@ -2662,6 +2662,16 @@ kbd {
   border-radius: 5px;
   margin: 0;
 }
+.plugin-credential {
+  max-width: 460px;
+  margin: 10px 0 14px;
+}
+.plugin-credential .field {
+  margin-bottom: 8px;
+}
+.runtime-detail .plugin-credential .field-hint {
+  margin: 0 0 8px;
+}
 .runtime-detail .field-hint {
   margin: 7px 0 0 21px;
   overflow-wrap: anywhere;

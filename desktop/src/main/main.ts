@@ -24,6 +24,7 @@ import type {
 } from "../shared/types";
 import { WorkspaceService } from "./services/workspace-service";
 import { LocalKeyStore } from "./services/local-key-store";
+import { PluginCredentialStore } from "./services/plugin-credentials";
 import { SkillPackageStore } from "./services/skill-packages";
 import { PluginPackageStore } from "./services/plugin-packages";
 import { DesktopControlSession, windowsAutomationRunner } from "./services/desktop-control";
@@ -169,6 +170,7 @@ const ACCOUNT_OPERATIONS = new Set([
   "plugins:import",
   "plugins:enabled",
   "plugins:server",
+  "plugins:credential",
   "provider:login-start",
 ]);
 
@@ -222,11 +224,18 @@ function handle(
 }
 
 let localKeyStore: LocalKeyStore;
+let pluginCredentials: PluginCredentialStore;
 const localKey = (connection: ReturnType<typeof validateLocalConnection>) => localKeyStore.get(connection);
 
 function registerHandlers(service: WorkspaceService) {
   const plugins = new PluginPackageStore(path.join(app.getPath("userData"), "workspace"));
-  handle("plugins:list", () => plugins.list());
+  handle("plugins:list", async () => (await plugins.list()).map((pkg) => ({ ...pkg, servers: pkg.servers.map((server) => ({ ...server, credentialStored: pluginCredentials.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }) })) })));
+  handle("plugins:credential", async (payload) => {
+    const input = objectPayload(payload);
+    if (typeof input.token !== "string") throw new Error("Invalid plugin credential.");
+    const identity = await plugins.credentialIdentity(identifier(input.id), identifier(input.name), input.token === "");
+    await pluginCredentials.set(identity, input.token);
+  });
   handle("plugins:import", async () => {
     const selected = await dialog.showOpenDialog(window!, { title: "Choose a plugin package folder", buttonLabel: "Review plugin", properties: ["openDirectory"] });
     if (selected.canceled || !selected.filePaths[0]) return null;
@@ -859,6 +868,8 @@ if (!app.requestSingleInstanceLock()) {
       const dataDir = path.join(app.getPath("userData"), "workspace");
       localKeyStore = new LocalKeyStore(dataDir, safeStorage);
       await localKeyStore.load();
+      pluginCredentials = new PluginCredentialStore(dataDir, safeStorage);
+      await pluginCredentials.load();
       workspace = new WorkspaceService(
         dataDir,
         broadcast,
@@ -891,6 +902,7 @@ if (!app.requestSingleInstanceLock()) {
           });
           return result.response === 1;
         },
+        (identity) => pluginCredentials.get(identity),
       );
       await workspace.initialize();
       registerHandlers(workspace);

@@ -183,6 +183,7 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
     async importPluginPackage() { return null; },
     async setPluginPackageEnabled() {},
     async setPluginServerEnabled() {},
+    async setPluginCredential() {},
     async listSkillPackages() { return []; },
     async importSkillPackage() { return null; },
     async setSkillPackageEnabled() {},

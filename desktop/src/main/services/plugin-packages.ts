@@ -150,7 +150,13 @@ export class PluginPackageStore {
     await this.ensureRoot();
     const ids = (await readdir(this.root)).filter((name) => idPattern.test(name)).sort();
     if (ids.length > 100) throw new Error("Too many plugin packages.");
-    return Promise.all(ids.map((id) => this.readPackage(id, false)));
+    return Promise.all(ids.map(async (id) => {
+      try { return await this.readPackage(id, true); }
+      catch {
+        const pkg = await this.readPackage(id, false);
+        return { ...pkg, servers: pkg.servers.map((server) => ({ ...server, supportsCredential: false, unsupported: [...new Set([...server.unsupported, "Package verification failed; import a fresh copy."])] })) };
+      }
+    }));
   }
   private catalog(packages: Array<{ pkg: PluginPackage; root: string }>): string {
     const skills = packages.flatMap(({ pkg, root }) => pkg.skills.map((skill) => ({ plugin: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")) })));
@@ -208,6 +214,13 @@ export class PluginPackageStore {
     } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   }
 
+  async credentialIdentity(id: string, name: string, remove = false): Promise<{ id: string; fingerprint: string; server: string }> {
+    await this.ensureRoot();
+    const pkg = await this.readPackage(id, !remove);
+    const server = pkg.servers.find((item) => item.name === name);
+    if (!server || (!remove && (!server.supportsCredential || !server.enabled))) throw new Error("This server cannot use a saved bearer token. Review its configuration.");
+    return { id: pkg.id, fingerprint: pkg.fingerprint, server: name };
+  }
   async setServerEnabled(id: string, name: string, enabled: boolean): Promise<void> {
     if (typeof enabled !== "boolean" || !/^[A-Za-z0-9_-]{1,80}$/.test(name)) throw new Error("Invalid plugin server setting.");
     await this.ensureRoot();
