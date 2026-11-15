@@ -758,6 +758,7 @@ export async function installFakeDesktopBridge(
             provider: request.provider,
             model: request.model ?? "Provider default",
             reasoningEffort: request.reasoningEffort,
+            desktopControl: request.desktopControl,
             mode: request.mode,
             prompt: request.prompt,
             status: config.complete ? "completed" : "running",

@@ -22,6 +22,7 @@ import {
 } from "../src/shared/types";
 import { buildRunContext } from "../src/main/services/context";
 import { SkillPackageStore } from "../src/main/services/skill-packages";
+import { DesktopControlSession } from "../src/main/services/desktop-control";
 import {
   captureMemoryFingerprint,
   normalizeMemoryFilePath,
@@ -40,10 +41,10 @@ if(process.argv.includes('--version')){console.log('fake-cli 1');process.exit(0)
 if(process.argv.includes('--help')){console.log('--json --sandbox --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools');process.exit(0)}
 if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture-1',configRequirements:{requirements:null}}));process.exit(0)}
 let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',value=>input+=value);
-process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
+process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('DESKTOP_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_desktop.url='));if(!arg)throw Error('missing MCP config');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_DESKTOP_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:'desktop',arguments:{action:'list'}});if(list.result.tools[0].name!=='desktop'||result.result.isError)throw Error('MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'DESKTOP_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
 `;
 
-async function fixture(t: { after(fn: () => Promise<void>): void }) {
+async function fixture(t: { after(fn: () => Promise<void>): void }, desktop?: () => Promise<DesktopControlSession>) {
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-m2-"));
   const repo = path.join(root, "project");
   await mkdir(repo);
@@ -70,7 +71,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const executable = path.join(root, "fake-cli.mjs");
   await writeFile(executable, fakeCli);
   const dataDir = path.join(root, "state");
-  const service = new WorkspaceService(dataDir, () => undefined);
+  const service = new WorkspaceService(dataDir, () => undefined, undefined, desktop);
   t.after(async () => {
     await service.dispose();
     await rm(root, { recursive: true, force: true });
@@ -451,6 +452,28 @@ test("enabled skills are included in a run through isolated copies", async (t) =
   assert.match(sent, /sample-skill/);
   assert.match(sent, /skill-run-copies/);
   assert.equal(run.contextSummary?.characters, sent.length);
+});
+
+test("desktop opt-in connects a per-run approved MCP tool to the provider", async (t) => {
+  let approvals = 0;
+  const makeSession = async () => new DesktopControlSession(async (args) => args[0] === "list-windows" ? "[]" : "{}", async () => { approvals++; return true; }, os.tmpdir());
+  const { service, project } = await fixture(t, makeSession);
+  const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "codex", mode: "plan", prompt: "DESKTOP_MCP_TEST", desktopControl: true })).id);
+  assert.equal(run.status, "completed");
+  assert.equal(run.desktopControl, true);
+  assert.equal(approvals, 1);
+  assert.ok(run.events.some((event) => event.text === "DESKTOP_MCP_OK"));
+  assert.ok(run.contextSummary?.warnings.some((warning) => warning.includes("Desktop observations")));
+});
+
+test("only one Nova run can own desktop control at a time", async (t) => {
+  const makeSession = async () => new DesktopControlSession(async () => "[]", async () => true, os.tmpdir());
+  const { service, project } = await fixture(t, makeSession);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "WAIT_FOR_CANCEL", desktopControl: true };
+  const running = await service.startRun(request);
+  await assert.rejects(service.startRun(request), /Another Nova run is using desktop control/);
+  await service.cancelRun(running.id);
+  assert.equal((await finishRun(service, running.id)).status, "cancelled");
 });
 
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {

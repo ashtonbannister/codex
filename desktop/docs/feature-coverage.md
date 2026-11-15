@@ -1,4 +1,4 @@
-# Nova Workbench feature coverage — 0.5.5
+# Nova Workbench feature coverage — 0.5.6
 
 This records what this application implements, not everything present in a vendor's desktop app. **Implemented** means there is a working code path and an explicit failure path; it does not mean a live account, installed model, or proprietary UI has been tested on the user's machine. Consult the matching commit's GitHub Actions results for automated evidence.
 
@@ -27,7 +27,8 @@ This records what this application implements, not everything present in a vendo
 | Nova context back to OEM Codex | Native publication removed; use explicit visible Markdown export for a copy | Compatibility IPC rejects immediately; no thread creation/injection or private-state synchronization |
 | Codex and Claude coding | Separately installed CLIs, private Nova Codex runtime and normal Claude Code account, explicit provider selection | Provider permissions, model availability, usage limits and billing remain separate |
 | Local Responses models | Configurable Ollama/LM Studio/custom loopback API, metadata-only model discovery, Codex harness against Responses-native server | Discovery does not prove a model is loaded/capable; no model download or hosted fallback |
-| Local Chat Completions models | Per-run loopback translation for streaming text and supported tool calls | Not complete Responses parity: no media/attachments, encrypted reasoning/native response IDs, background jobs, hosted tools or structured-output formats |
+| Local Chat Completions models | Per-run loopback translation for streaming text and supported tool calls | Inline tool images are forwarded to vision-capable models; other media/attachments, encrypted reasoning/native response IDs, background jobs, hosted tools and structured-output formats remain unsupported |
+| Windows desktop control | Per-run opt-in; window selection, inspection, screenshot, and supported UI actions through a private MCP server with approval for every request | Codex and local agents only; Claude safe mode is unsupported; actual model and server vision/tool support varies; general plugin tools are not enabled |
 | Skill package imports | Explicit folder review/import; complete bounded copies with per-run disposable copies, catalog sent to Codex, Claude and local workers | Links and oversized packages are refused; only imported skills are offered; plugin servers/tools and dependencies are not installed |
 | Thinking strength | Codex advertised levels, Claude CLI effort, and local reasoning request | Availability and actual model behavior depend on the provider/server; local servers can ignore the request |
 | Existing Codex reference files | Explicit preview/import of allowlisted Markdown memories, instructions, skill references and plans with import fingerprints | Independent copies, not background freshness reads; references do not install skills/plugins or migrate private memory/automation databases |
@@ -40,11 +41,11 @@ These are application gaps, not promises that every vendor exposes an interchang
 
 | Capability | Current status |
 | --- | --- |
-| General MCP server/plugin administration and provider tool discovery | Not implemented; inherited MCP/hooks/plugins are disabled by the bounded adapter contract |
-| Interactive per-tool approvals/permission center | Not implemented; server-originated tool/approval requests are denied rather than silently approved |
+| General MCP server/plugin administration and provider tool discovery | Not implemented; inherited MCP/hooks/plugins are disabled; only the explicitly enabled Nova desktop server is connected |
+| Interactive per-tool approvals/permission center | General provider approval center is not implemented; the Nova desktop tool separately asks for approval on every request |
 | Autonomous multi-agent teams, delegation and automatic model routing | Not implemented |
 | Scheduled/background automations, goals, queues and proactive tasks | Not implemented; existing native state is inventory-only |
-| Voice/dictation, live audio/video and computer/browser use | Not implemented |
+| Voice/dictation, live audio/video and browser-specific use | Not implemented |
 | Multimodal attachment transfer and generated-image workflows | Not implemented in the shared transcript/local bridge |
 | Complete native model catalog, billing/usage dashboard and account management | No comprehensive UI; status and manual provider/model selection do not certify entitlements or remaining quota |
 | Full Claude Desktop conversation import/resume | Not implemented; Claude Code account/worker integration is not a desktop-history adapter |

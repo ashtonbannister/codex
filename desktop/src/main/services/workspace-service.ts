@@ -75,6 +75,10 @@ import {
 } from "./codex-readonly";
 import { ensureNovaCodexHome } from "./nova-runtime";
 import { SkillPackageStore } from "./skill-packages";
+import type { DesktopControlSession } from "./desktop-control";
+import { startDesktopMcp } from "./desktop-mcp";
+
+import { NOVA_DESKTOP_SKILL } from "./desktop-skill";
 import {
   createIsolatedWorktree,
   getWorkspaceDiff,
@@ -683,6 +687,7 @@ export class WorkspaceService {
     private readonly dataDir: string,
     private readonly onChange: (state: WorkspaceState) => void,
     private readonly localKey: (connection: ReturnType<typeof connectionFromSettings>) => string | undefined = () => undefined,
+    private readonly createDesktopSession?: () => Promise<DesktopControlSession>,
   ) {
     this.statePath = path.join(dataDir, "workspace.json");
   }
@@ -1462,6 +1467,12 @@ export class WorkspaceService {
       usesOriginalCheckout ? project.path : cwd,
     );
     await this.addSkills(preview);
+    if (request.desktopControl) {
+      preview.prompt += NOVA_DESKTOP_SKILL;
+      preview.characters = preview.prompt.length;
+      preview.estimatedTokens = Math.ceil(preview.characters / 4);
+      preview.warnings.push("Desktop observations and actions require separate user approval and may share window content with this provider.");
+    }
     if (project.kind === "folder" && request.mode === "build")
       preview.warnings.unshift(
         "This is a folder conversation. Build is disabled until a committed Git project is opened; Plan remains available.",
@@ -1921,6 +1932,7 @@ export class WorkspaceService {
   ): Promise<Run> {
     this.ready();
     const request = validateRunRequest(value);
+    if (request.desktopControl && !this.createDesktopSession) throw new Error("Desktop control is unavailable in this environment.");
     return this.exclusive(async () => {
       this.ready();
       if (this.state.accountRecovery || this.state.accountOperation)
@@ -1987,6 +1999,8 @@ export class WorkspaceService {
         throw new Error(
           "This project already has a build worker. Only one writer per project is allowed in this milestone.",
         );
+      if (request.desktopControl && this.state.runs.some((run) => run.desktopControl && ACTIVE.has(run.status)))
+        throw new Error("Another Nova run is using desktop control. Finish or stop it first.");
       const created = !thread;
       thread ??= {
         id: randomUUID(),
@@ -2047,6 +2061,7 @@ export class WorkspaceService {
         provider: request.provider,
         model,
         reasoningEffort: request.reasoningEffort,
+        desktopControl: request.desktopControl || undefined,
         mode: request.mode,
         prompt: request.prompt,
         status: "queued",
@@ -2132,34 +2147,48 @@ export class WorkspaceService {
             this.addEvent(run, {
               kind: "status",
               text:
-                request.mode === "build"
-                  ? "Working in an isolated branch. No automatic merge, commit, or verification."
-                  : "Planning with read-only tools. No project writes requested.",
+                request.desktopControl
+                  ? "Desktop control is enabled for this run. Each window observation and action requires your approval."
+                  : request.mode === "build"
+                    ? "Working in an isolated branch. No automatic merge, commit, or verification."
+                    : "Planning with read-only tools. No project writes requested.",
             });
             await this.persist();
           });
           if (this.closing) controller.abort();
           const preparedSkills = await new SkillPackageStore(this.dataDir).prepareRun();
           context.prompt += preparedSkills.prompt;
-          if (preparedSkills.prompt) {
-            context.characters = context.prompt.length;
-            context.estimatedTokens = Math.ceil(context.characters / 4);
-            await this.exclusive(async () => {
-              if (run.contextSummary) { run.contextSummary.characters = context.characters; run.contextSummary.estimatedTokens = context.estimatedTokens; run.contextSummary.warnings.push("Enabled imported skill names, descriptions, and paths were supplied to the provider."); }
-              await this.persist();
-            });
-          }
-          const local = request.provider === "ollama"
-            ? await prepareLocalProvider(settings, model, controller.signal, this.localKey(connectionFromSettings(settings)), receiveThinking, request.reasoningEffort)
-            : undefined;
+          let desktop: Awaited<ReturnType<typeof startDesktopMcp>> | undefined;
+          let local: Awaited<ReturnType<typeof prepareLocalProvider>> | undefined;
           let result: Awaited<ReturnType<typeof runProvider>>;
           try {
+            if (request.desktopControl) {
+              desktop = await startDesktopMcp(await this.createDesktopSession!(), controller.signal);
+              context.prompt += NOVA_DESKTOP_SKILL;
+            }
+            if (preparedSkills.prompt || desktop) {
+              context.characters = context.prompt.length;
+              context.estimatedTokens = Math.ceil(context.characters / 4);
+              await this.exclusive(async () => {
+                if (run.contextSummary) {
+                  run.contextSummary.characters = context.characters;
+                  run.contextSummary.estimatedTokens = context.estimatedTokens;
+                  if (preparedSkills.prompt) run.contextSummary.warnings.push("Enabled imported skill names, descriptions, and paths were supplied to the provider.");
+                  if (desktop) run.contextSummary.warnings.push("Desktop observations and actions require separate user approval and may share window content with this provider.");
+                }
+                await this.persist();
+              });
+            }
+            local = request.provider === "ollama"
+              ? await prepareLocalProvider(settings, model, controller.signal, this.localKey(connectionFromSettings(settings)), receiveThinking, request.reasoningEffort)
+              : undefined;
             result = await runProvider({
                   command: {
                     ...executable,
                     env: {
                       ...executable.env,
                       ...local?.env,
+                      ...(desktop ? { NOVA_DESKTOP_TOKEN: desktop.token } : {}),
                       CODEX_HOME: workerHome,
                     },
                     args: providerArguments(
@@ -2174,6 +2203,7 @@ export class WorkspaceService {
                         claudePartialMessages: providerStatus?.supportsPartialMessages,
                         skillDirectory: preparedSkills.directory,
                         reasoningEffort: request.reasoningEffort,
+                        desktopMcpUrl: desktop?.url,
                       },
                     ),
                   },
@@ -2183,6 +2213,7 @@ export class WorkspaceService {
                   signal: controller.signal,
                   timeoutMs: settings.timeoutMinutes * 60_000,
                   maxBytes: settings.maxOutputKb * 1024,
+                  allowDesktopImages: !!desktop,
                   onEvent: (event) => {
                     if (event.thinkingDelta) {
                       receiveThinking(event.thinkingDelta);
@@ -2195,6 +2226,7 @@ export class WorkspaceService {
                   },
                 });
           } finally {
+            await desktop?.dispose();
             await local?.dispose();
             flushThinking();
           }

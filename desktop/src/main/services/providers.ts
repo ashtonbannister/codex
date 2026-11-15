@@ -708,7 +708,7 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
-  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort } = {},
+  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string } = {},
 ): string[] {
   if (provider === "claude") {
     return [
@@ -764,6 +764,11 @@ export function providerArguments(
     "features.plugins=false",
     "--config",
     "features.apps=false",
+    ...(options.desktopMcpUrl ? [
+      "--config", `mcp_servers.nova_desktop.url=${JSON.stringify(options.desktopMcpUrl)}`,
+      "--config", 'mcp_servers.nova_desktop.bearer_token_env_var="NOVA_DESKTOP_TOKEN"',
+      "--config", 'mcp_servers.nova_desktop.default_tools_approval_mode="approve"',
+    ] : []),
     "--config",
     'web_search="disabled"',
     "--config",
@@ -796,6 +801,24 @@ export function providerArguments(
   ];
 }
 
+// Desktop screenshots are binary tool payloads, not visible output text. Keep a
+// separate hard cap without exempting other MCP servers or arbitrary output.
+const MAX_DESKTOP_FRAME = 12 * 1024 * 1024;
+const MAX_DESKTOP_IMAGES = 128 * 1024 * 1024;
+export function desktopImageBytes(line: string): number {
+  try {
+    const event = JSON.parse(line);
+    const item = event?.item;
+    if (event?.type !== "item.completed" || item?.type !== "mcp_tool_call" || item.server !== "nova_desktop" || item.tool !== "desktop" || !Array.isArray(item.result?.content)) return 0;
+    let count = 0;
+    for (const part of item.result.content) {
+      if (part?.type !== "image" || !["image/png", "image/jpeg", "image/webp"].includes(part.mimeType) || typeof part.data !== "string" || part.data.length > MAX_DESKTOP_FRAME || !/^[A-Za-z0-9+/]+={0,2}$/.test(part.data)) continue;
+      count += part.data.length;
+    }
+    return count;
+  } catch { return 0; }
+}
+
 export async function runProvider(options: {
   command: ProviderCommand;
   provider: ProviderId;
@@ -803,6 +826,7 @@ export async function runProvider(options: {
   prompt: string;
   timeoutMs: number;
   maxBytes: number;
+  allowDesktopImages?: boolean;
   signal: AbortSignal;
   onEvent: (event: NormalizedEvent) => void;
 }): Promise<ProcessResult> {
@@ -845,6 +869,7 @@ export async function runProvider(options: {
     const stderrDecoder = new StringDecoder("utf8");
     let buffer = "";
     let bytes = 0;
+    let desktopImages = 0;
     let completed = false;
     let claudeStreamedThinking = false;
     let failure: string | undefined;
@@ -881,22 +906,33 @@ export async function runProvider(options: {
       if (event.events.length || event.thinkingDelta || event.sessionId || event.usage || event.completed || event.failed)
         options.onEvent(event);
     };
+    const accountDesktopLine = (line: string, newline: boolean) => {
+      const images = desktopImageBytes(line);
+      desktopImages += images;
+      bytes += Buffer.byteLength(line, "utf8") + (newline ? 1 : 0) - images;
+      if (desktopImages > MAX_DESKTOP_IMAGES) { fail("Desktop screenshots exceeded the per-run image limit."); return; }
+      if (bytes > options.maxBytes) { fail("Agent output exceeded this run's configured limit. The process was stopped; the worktree is preserved."); return; }
+      emitLine(line);
+    };
     const consume = (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > options.maxBytes) {
-        fail(
-          "Agent output exceeded this run's configured limit. The process was stopped; the worktree is preserved.",
-        );
-        return;
+      if (!options.allowDesktopImages) {
+        bytes += chunk.length;
+        if (bytes > options.maxBytes) {
+          fail("Agent output exceeded this run's configured limit. The process was stopped; the worktree is preserved.");
+          return;
+        }
       }
       buffer += decoder.write(chunk);
       let index: number;
       while ((index = buffer.indexOf("\n")) >= 0) {
-        emitLine(buffer.slice(0, index));
+        const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
+        if (options.allowDesktopImages) accountDesktopLine(line, true);
+        else emitLine(line);
+        if (failure) return;
       }
-      if (buffer.length > options.maxBytes)
-        fail("Agent emitted an oversized JSON event.");
+      const maxLine = options.allowDesktopImages ? options.maxBytes + MAX_DESKTOP_FRAME + 64 * 1024 : options.maxBytes;
+      if (Buffer.byteLength(buffer, "utf8") > maxLine) fail("Agent emitted an oversized JSON event.");
     };
     child.stdout.on("data", consume);
     child.stderr.on("data", (chunk: Buffer) => {
@@ -932,7 +968,10 @@ export async function runProvider(options: {
       settled = true;
       options.signal.removeEventListener("abort", abort);
       buffer += decoder.end();
-      if (buffer && bytes <= options.maxBytes) emitLine(buffer);
+      if (buffer && bytes <= options.maxBytes) {
+        if (options.allowDesktopImages) accountDesktopLine(buffer, false);
+        else emitLine(buffer);
+      }
       const cancelled = options.signal.aborted && !terminationUnconfirmed;
       const error = terminationUnconfirmed
         ? `Worker termination could not be confirmed. Nova disconnected its output after a bounded wait. Inspect and stop any remaining CLI processes before using this project again. Cleanup diagnostic: ${terminationDiagnostic(child)}.`

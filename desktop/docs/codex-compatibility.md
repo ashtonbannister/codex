@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.5
+# Codex import and runtime boundaries — v0.5.6
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 
@@ -43,6 +43,10 @@ Account work is owned and bounded. Main-process gating prevents conflicting Nova
 Independent import folders support Plan. Build still requires an explicitly opened, committed Git project and an isolated Nova-owned worktree; importing a conversation does not grant write access to its recorded source checkout.
 
 The Context inspector shows bounded reference selection and omissions. Every provider has its own context limits and behavior; copying text does not preserve private reasoning, native tools/state, images/attachments, or unlimited history. Earlier imported/native-linked threads keep their visible text and provenance, but future execution is detached from their OEM native session and source working folder.
+
+## Desktop control
+
+The Desktop checkbox enables a private, authenticated MCP server for one Codex or local-agent run. Every window listing, selection, observation, screenshot and action asks for user approval. The backend uses Microsoft's separately licensed Windows automation CLI, bundled in Windows builds. It requires a recently listed window, a fresh inspection for element actions, and a stable window identity; protected targets are refused. Window contents and captures may be sent to the selected provider after approval. This is not the proprietary OpenAI desktop-use runtime, and it does not provide general plugin or MCP administration. Claude's current safe-mode worker cannot load the selected server and rejects this combination explicitly. Local screenshots require a vision-capable server and model.
 
 ## Skill packages
 

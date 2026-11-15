@@ -363,6 +363,21 @@ test("thinking strength reaches the selected provider", async ({ page }) => {
   expect(requests.map(({ provider, reasoningEffort }) => [provider, reasoningEffort])).toEqual([["codex", "high"], ["claude", "high"], ["ollama", "high"]]);
 });
 
+test("desktop control is opt-in for one run", async ({ page }) => {
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true });
+  await page.goto("/");
+  const control = page.getByRole("checkbox", { name: "Desktop" });
+  await expect(control).not.toBeChecked();
+  await control.check();
+  await page.getByRole("textbox", { name: "Message your coding agent" }).fill("Inspect my app");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(control).not.toBeChecked();
+  const requests = await page.evaluate(() => (window as unknown as { __workbenchTest: { requests: RunRequest[] } }).__workbenchTest.requests);
+  expect(requests[0]?.desktopControl).toBe(true);
+  await page.getByRole("combobox", { name: "Choose agent" }).selectOption("claude");
+  await expect(control).toBeDisabled();
+});
+
 test("discovered local models can be selected from the composer", async ({ page }) => {
   await installFakeDesktopBridge(page);
   await page.goto("/");

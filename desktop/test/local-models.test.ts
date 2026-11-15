@@ -108,6 +108,20 @@ test("Responses translation preserves text, namespace/custom tools and tool-resu
   assert.throws(() => responsesToChat({ model: "other", input: "x" }, "tiny"), /different/);
 });
 
+test("local bridge forwards inline tool images after all parallel tool results", () => {
+  const converted = responsesToChat({ model: "tiny", input: [
+    { role: "user", content: "Look" },
+    { type: "function_call", call_id: "one", name: "desktop", arguments: "{}" },
+    { type: "function_call", call_id: "two", name: "other", arguments: "{}" },
+    { type: "function_call_output", call_id: "one", output: [{ type: "input_text", text: "Captured" }, { type: "input_image", image_url: "data:image/png;base64,YWJj" }] },
+    { type: "function_call_output", call_id: "two", output: "Done" },
+  ] }, "tiny");
+  const messages = converted.body.messages as Json[];
+  assert.deepEqual(messages.map((item) => item.role), ["user", "assistant", "tool", "tool", "user"]);
+  assert.equal(messages[4].content[1].image_url.url, "data:image/png;base64,YWJj");
+  assert.throws(() => responsesToChat({ model: "tiny", input: [{ type: "function_call_output", call_id: "one", output: [{ type: "input_image", image_url: "https://example.invalid/pixel" }] }] }, "tiny"), /inline/);
+});
+
 test("chat bridge streams text and function calls, then accepts a tool-result follow-up", async (t) => {
   const received: Json[] = [];
   const base = await localServer(t, (_path, body, response) => {

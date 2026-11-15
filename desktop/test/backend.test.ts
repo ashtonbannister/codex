@@ -68,6 +68,10 @@ process.stdin.on('end', () => {
   if (input.includes('REPEATED_EVENTS')) { setInterval(() => console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Still working'}})), 50); return; }
   if (input.includes('WAIT_FOR_CANCEL')) { setInterval(() => {}, 1000); return; }
   if (input.includes('FAIL_TERMINAL')) { console.log(JSON.stringify({type:'turn.failed',error:{message:'Expected test failure'}})); return; }
+  if (input.includes('BIG_DESKTOP_IMAGE') || input.includes('BIG_OTHER_IMAGE')) {
+    console.log(JSON.stringify({type:'item.completed',item:{type:'mcp_tool_call',server:input.includes('BIG_OTHER_IMAGE')?'other':'nova_desktop',tool:'desktop',status:'completed',result:{content:[{type:'image',mimeType:'image/png',data:'A'.repeat(100000)}]}}}));
+    console.log(JSON.stringify({type:'turn.completed'})); return;
+  }
   if (input.includes('TOO_MUCH_OUTPUT')) { console.log('x'.repeat(80_000)); setInterval(() => {}, 1000); return; }
   if (input.includes('WRITE_TEST_FILE')) fs.writeFileSync('agent-change.txt','An isolated test change.');
   if (process.argv.includes('--safe-mode')) {
@@ -255,6 +259,10 @@ test("run request validation rejects unknown providers, shell-like models, and o
   );
 });
 
+test("desktop control cannot bypass Claude's isolated worker", () => {
+  assert.throws(() => validateRunRequest({ projectId: "p", provider: "claude", mode: "plan", prompt: "Test", desktopControl: true }), /not yet available/);
+});
+
 test("provider argument lists never use bypasses or shell interpolation", () => {
   const cwd = "C:\\Projects\\a & b";
   const codex = providerArguments("codex", cwd, "plan", "gpt-test");
@@ -282,6 +290,10 @@ test("provider argument lists never use bypasses or shell interpolation", () => 
   const claudeEffort = providerArguments("claude", cwd, "build", "", { reasoningEffort: "high", skillDirectory: "C:/nova/run-skills" });
   assert.equal(claudeEffort[claudeEffort.indexOf("--effort") + 1], "high");
   assert.equal(claudeEffort[claudeEffort.indexOf("--add-dir") + 1], "C:/nova/run-skills");
+  const desktopUrl = "http://127.0.0.1:34567/mcp";
+  const codexDesktop = providerArguments("codex", cwd, "plan", "", { desktopMcpUrl: desktopUrl });
+  assert.ok(codexDesktop.includes(`mcp_servers.nova_desktop.url="${desktopUrl}"`));
+  assert.ok(codexDesktop.includes('mcp_servers.nova_desktop.bearer_token_env_var="NOVA_DESKTOP_TOKEN"'));
   const claude = providerArguments("claude", cwd, "build", "");
   assert.ok(claude.includes("--safe-mode"));
   assert.ok(claude.includes("--restricted"));
@@ -601,6 +613,16 @@ test("protocol failure and output overflow are recorded as failures", async (t) 
   const result = await terminal(service, overflow.id);
   assert.equal(result.status, "failed");
   assert.match(result.error!, /output exceeded/i);
+});
+
+test("desktop image payloads are separately bounded without exempting other tool output", async (t) => {
+  const { executable, root, dataDir } = await fixture(t);
+  const command = await resolveExecutable(executable);
+  const home = await ensureNovaCodexHome(dataDir);
+  const run = (prompt: string, allowDesktopImages: boolean) => runProvider({ command: { ...command, env: { ...command.env, CODEX_HOME: home }, args: [] }, provider: "codex", cwd: root, prompt, timeoutMs: 10000, maxBytes: 65536, allowDesktopImages, signal: new AbortController().signal, onEvent: () => {} });
+  assert.equal((await run("BIG_DESKTOP_IMAGE", true)).completed, true);
+  assert.match((await run("BIG_OTHER_IMAGE", true)).error!, /output exceeded/i);
+  assert.match((await run("BIG_DESKTOP_IMAGE", false)).error!, /output exceeded/i);
 });
 
 test("process timeout kills a worker instead of leaving it waiting", async (t) => {

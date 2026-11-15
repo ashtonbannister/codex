@@ -104,6 +104,7 @@ export function App() {
   const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [codexModelsError, setCodexModelsError] = useState("");
   const [modelsRefresh, setModelsRefresh] = useState(0);
+  const [desktopControl, setDesktopControl] = useState(false);
   const [surface, setSurface] = useState<"workspace" | "library">("workspace");
   const [libraryResource, setLibraryResource] = useState<
     CodexMemorySource | undefined
@@ -173,11 +174,12 @@ export function App() {
             provider,
             model: configuredModel || undefined,
             reasoningEffort,
+            desktopControl,
             mode,
             prompt: draft.trim(),
           }
         : null,
-    [projectId, threadId, provider, configuredModel, reasoningEffort, mode, draft],
+    [projectId, threadId, provider, configuredModel, reasoningEffort, desktopControl, mode, draft],
   );
   const memoryVersion = activeMemories
     .map((entry) => `${entry.id}:${entry.updatedAt}:${entry.filePath ?? ""}`)
@@ -404,9 +406,10 @@ export function App() {
     try {
       const chatProject = projectId ? null : await api.ensureChatWorkspace();
       const request = contextRequest ?? {
-        projectId: chatProject!.id, provider, model: configuredModel || undefined, reasoningEffort, mode: "plan" as const, prompt: draft.trim(),
+        projectId: chatProject!.id, provider, model: configuredModel || undefined, reasoningEffort, desktopControl, mode: "plan" as const, prompt: draft.trim(),
       };
       const run = await api.startRun(request);
+      setDesktopControl(false);
       if (chatProject) setProjectId(chatProject.id);
       composerDraft.clearSubmitted(submittedKey, submittedDraft, run.threadId);
       if (composerDraft.currentKey.current === submittedKey) {
@@ -430,6 +433,7 @@ export function App() {
   };
   const changeProvider = (value: ProviderId) => {
     composerDraft.update({ provider: value, model: "", reasoningEffort: undefined });
+    if (value === "claude") setDesktopControl(false);
   };
   const openSettings = (section: "general" | "storage" | "recovery" = "general") => {
     setSettingsSection(section);
@@ -1070,6 +1074,7 @@ export function App() {
                       {reasoningEffort && !availableEfforts.includes(reasoningEffort) && <option value={reasoningEffort}>{reasoningEffort} (not listed for this model)</option>}
                       {availableEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                     </select>
+                    <label title={provider === "claude" ? "Desktop control is not yet available with Claude’s isolated CLI mode" : "Allow this run to request window observations and actions; each request requires approval"}><input type="checkbox" disabled={provider === "claude"} checked={desktopControl} onChange={(event) => setDesktopControl(event.target.checked)} /> Desktop</label>
                     {provider === "codex" && codexModelsError && <span role="alert" title={codexModelsError}>Model list unavailable: {codexModelsError} Refresh to retry.</span>}
                     <div className="composer-right">
                       <div

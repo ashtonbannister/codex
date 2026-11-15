@@ -25,6 +25,8 @@ import type {
 import { WorkspaceService } from "./services/workspace-service";
 import { LocalKeyStore } from "./services/local-key-store";
 import { SkillPackageStore } from "./services/skill-packages";
+import { DesktopControlSession, windowsAutomationRunner } from "./services/desktop-control";
+import { lstat } from "node:fs/promises";
 import {
   inspectCodexInstallation,
   resolveCodexHome,
@@ -833,6 +835,25 @@ if (!app.requestSingleInstanceLock()) {
         dataDir,
         broadcast,
         localKey,
+        async () => {
+          if (process.platform !== "win32") throw new Error("Desktop control is available on Windows only.");
+          const binary = app.isPackaged
+            ? path.join(process.resourcesPath, "winapp", "winapp.exe")
+            : path.join(app.getAppPath(), "node_modules", "@microsoft", "winappcli", "bin", "win-x64", "winapp.exe");
+          const info = await lstat(binary);
+          if (!info.isFile() || info.isSymbolicLink()) throw new Error("The Windows desktop-control component is unavailable. Reinstall this Nova build.");
+          const executable = await realpath(binary);
+          return new DesktopControlSession(windowsAutomationRunner(executable, path.join(dataDir, "winapp-cache")), async (request) => {
+            if (!window || window.isDestroyed() || quitting) return false;
+            const result = await dialog.showMessageBox(window, {
+              type: "question", buttons: ["Deny", "Allow once"], defaultId: 0, cancelId: 0,
+              title: "Nova desktop action request",
+              message: request.action,
+              detail: `${request.target ? `Window: ${confirmationValue(request.target)}\n\n` : ""}${confirmationValue(request.detail)}\n\nThis request came from the active agent. Approve only after reviewing the window and action.`,
+            });
+            return result.response === 1;
+          }, path.join(dataDir, "desktop-captures"));
+        },
       );
       await workspace.initialize();
       registerHandlers(workspace);
