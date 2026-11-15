@@ -12,7 +12,7 @@ import { McpRemoteClient } from "./mcp-remote";
 
 type Json = Record<string, unknown>;
 type PreparedPackage = { pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[] };
-export type PluginApproval = (request: { action: "skills" | "commands" | "skill-shell" | "start" | "discover" | "call"; title: string; detail: string }) => Promise<boolean>;
+export type PluginApproval = (request: { action: "skills" | "commands" | "skill-shell" | "skill-fork" | "start" | "discover" | "call"; title: string; detail: string }) => Promise<boolean>;
 interface Launch {
   pkg: PluginPackage; server: PluginServerConfig; root: string;
   dataDir: string;

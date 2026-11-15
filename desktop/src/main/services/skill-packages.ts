@@ -46,8 +46,14 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   const name = typeof header.name === "string" && header.name.trim() ? header.name.trim().slice(0, 800) : path.posix.basename(path.posix.dirname(relative)) || "skill";
   const description = typeof header.description === "string" ? header.description.replace(/\s+/g, " ").trim().slice(0, 800) : "";
   const unsupported: string[] = [], warnings: string[] = [];
-  if (header.context !== undefined || header.agent !== undefined) unsupported.push("Forked or agent-specific skill contexts are not supported.");
-  if (header.model !== undefined) unsupported.push("Skill-specific model overrides are not supported.");
+  let forkAgent: "general-purpose" | "Explore" | "Plan" | undefined;
+  if (header.context === "fork") {
+    if (header.agent === undefined || header.agent === "general-purpose" || header.agent === "Explore" || header.agent === "Plan") forkAgent = (header.agent ?? "general-purpose") as typeof forkAgent;
+    else unsupported.push("This skill requests an unsupported custom fork agent.");
+    try { flag("background", true); } catch { unsupported.push("Invalid fork background setting."); }
+    warnings.push("Forked skills require explicit invocation and run in a separate provider session.");
+  } else if (header.context !== undefined || header.agent !== undefined || header.background !== undefined) unsupported.push("This skill requests an unsupported context or agent.");
+  if (header.model !== undefined && header.model !== "inherit") unsupported.push("Skill-specific model overrides are not supported.");
   if (header.hooks !== undefined) unsupported.push("Skill hooks are not supported.");
   if (header["disallowed-tools"] !== undefined) unsupported.push("Skill-specific tool restrictions are not supported.");
   let namedArguments: string[] | undefined;
@@ -59,9 +65,9 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (requiresShell) warnings.push("Shell-generated context requires explicit invocation and command approval.");
   if (/\$\{user_config\./.test(body)) unsupported.push("This skill requires plugin settings.");
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
-  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell, userInvocable = flag("user-invocable", true);
+  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent, userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */
@@ -267,7 +273,7 @@ export class SkillPackageStore {
   }
   async prompt(input = "", provider?: "codex" | "claude" | "ollama"): Promise<string> {
     const references = skillReferences(input);
-    const plans = (await this.enabled()).map((pkg) => ({ pkg, selected: pkg.skills.filter((skill) => visibleSkill(skill, matchingSkillReference(skill, pkg.name, "imported skill", references), provider)) }));
+    const plans = (await this.enabled()).map((pkg) => ({ pkg, selected: pkg.skills.filter((skill) => !skill.forkAgent && visibleSkill(skill, matchingSkillReference(skill, pkg.name, "imported skill", references), provider)) }));
     return this.catalog(this.entries(plans, (pkg) => path.join(this.root, pkg.id, "files")));
   }
   async previewInvoked(input: string): Promise<SelectedSkill[]> {
@@ -311,7 +317,7 @@ export class SkillPackageStore {
       const review = this.entries(packages, (pkg) => path.join(directory, pkg.id));
       const invoked: SelectedSkill[] = packages.flatMap(({ pkg, matched }) => matched.map((skill) => ({ source: "imported skill" as const, package: pkg.name, name: skill.name, description: skill.description, path: path.join(directory, pkg.id, ...skill.path.split("/")), root: path.join(directory, pkg.id), data: path.join(directory, pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: verifiedContents.get(`${pkg.id}\0${skill.path}`) })));
       return {
-        prompt: this.catalog(review), review, invoked,
+        prompt: this.catalog(this.entries(packages.map((entry) => ({ ...entry, selected: entry.selected.filter((skill) => !skill.forkAgent) })), (pkg) => path.join(directory, pkg.id))), review, invoked,
         directory,
         verify: async () => {
           for (const { pkg } of packages) { const fingerprint = fingerprints.get(pkg.id); if (fingerprint && (await snapshotSkillPackage(path.join(directory, pkg.id), { allowNoSkills: true })).fingerprint !== fingerprint) throw new Error(`Skill package ${pkg.name} changed after sharing was reviewed.`); }

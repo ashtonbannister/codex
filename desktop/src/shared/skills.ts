@@ -7,6 +7,7 @@ export interface SkillDescriptor {
   namedArguments?: string[];
   shell?: "bash" | "powershell";
   requiresShell?: boolean;
+  forkAgent?: "general-purpose" | "Explore" | "Plan";
   allowedProviders?: Array<"codex" | "claude" | "ollama">;
   unsupported?: string[];
   warnings?: string[];

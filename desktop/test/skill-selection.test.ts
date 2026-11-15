@@ -17,9 +17,9 @@ test("manual-only skills are excluded from automatic catalogs and copies but wor
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-skill-selection-")); t.after(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
   const source = path.join(root, "source"); await mkdir(source);
   await skill(source, "automatic", ""); await skill(source, "manual", "disable-model-invocation: yes\n", "Review $0 and $1. All: $ARGUMENTS. Directory: ${CLAUDE_SKILL_DIR}");
-  await skill(source, "model-only", "user-invocable: no\n"); await skill(source, "forked", "context: fork\n");
+  await skill(source, "model-only", "user-invocable: no\n"); await skill(source, "forked", "context: fork\n"); await skill(source, "custom-fork", "context: fork\nagent: custom-agent\n");
   const store = new SkillPackageStore(path.join(root, "data")); const preview = await store.preview(source);
-  assert.equal(preview.skills.find((item) => item.name === "manual")!.disableModelInvocation, true); assert.equal(preview.skills.find((item) => item.name === "model-only")!.userInvocable, false); assert.match(preview.skills.find((item) => item.name === "forked")!.unsupported!.join(" "), /Forked/);
+  assert.equal(preview.skills.find((item) => item.name === "manual")!.disableModelInvocation, true); assert.equal(preview.skills.find((item) => item.name === "model-only")!.userInvocable, false); assert.equal(preview.skills.find((item) => item.name === "forked")!.forkAgent, "general-purpose"); assert.match(preview.skills.find((item) => item.name === "custom-fork")!.unsupported!.join(" "), /custom fork agent/);
   const pkg = await store.install(source, preview.fingerprint); const automatic = await store.prepareRun("ordinary request");
   assert.deepEqual(automatic.review.map((item) => item.name).sort(), ["automatic", "model-only"]); assert.doesNotMatch(automatic.prompt, /manual description|forked description/);
   await assert.rejects(readFile(path.join(automatic.directory!, pkg.id, "skills", "manual", "SKILL.md")), { code: "ENOENT" });
@@ -30,7 +30,7 @@ test("manual-only skills are excluded from automatic catalogs and copies but wor
   assert.match(explicit.prompt, /manual description/); await explicit.verify(); await explicit.dispose();
   const named = await store.prepareRun("Please use $manual"); assert.equal(named.invoked.length, 1); await named.dispose();
   const modelOnly = await store.prepareRun("/model-only"); await assert.rejects(renderExplicitSkill(modelOnly.invoked[0]!, root), /cannot be invoked directly/); await modelOnly.dispose();
-  const unsupported = await store.prepareRun("/forked"); await assert.rejects(renderExplicitSkill(unsupported.invoked[0]!, root), /unavailable/); await unsupported.dispose();
+  const forked = await store.prepareRun("/forked"); assert.equal(forked.invoked[0]!.descriptor.forkAgent, "general-purpose"); assert.match((await renderExplicitSkill(forked.invoked[0]!, root)).content, /Synthetic/); await forked.dispose();
   assert.equal(skillReferences('/manual "two words" second')[0]!.args, '"two words" second');
 });
 

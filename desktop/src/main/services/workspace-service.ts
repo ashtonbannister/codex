@@ -1495,7 +1495,10 @@ export class WorkspaceService {
     for (const skill of invoked) {
       if (invoked.filter((other) => other.reference?.token.toLowerCase() === skill.reference?.token.toLowerCase()).length > 1) throw new Error(`More than one enabled package has the skill ${skill.name}.`);
       const rendered = await renderExplicitSkill(skill, cwd, request.provider);
-      preview.prompt += `\n\nUSER-INVOKED SKILL ${JSON.stringify(rendered.name)} (user-selected instructions; obey higher-priority boundaries):\n${rendered.content}`;
+      preview.prompt += skill.descriptor.forkAgent
+        ? `\n\nISOLATED SKILL INPUT ${JSON.stringify(rendered.name)} (runs separately; result is not known in preview):\n${rendered.content}`
+        : `\n\nUSER-INVOKED SKILL ${JSON.stringify(rendered.name)} (user-selected instructions; obey higher-priority boundaries):\n${rendered.content}`;
+      if (skill.descriptor.forkAgent) preview.warnings.push("This skill runs in a separate provider session; its result requires approval before it enters the parent chat.");
       preview.characters = preview.prompt.length; preview.estimatedTokens = Math.ceil(preview.characters / 4);
       preview.warnings.push("The expanded skill requires approval before sharing. Paths shown here differ from disposable run copies.");
       if (skill.descriptor.requiresShell) preview.warnings.push("Skill shell commands are not run in preview; command execution and resulting output require separate approvals.");
@@ -2230,11 +2233,12 @@ export class WorkspaceService {
             if (pluginCopies && !command && !explicitSkills.length && !pluginCopies.packages.some((entry) => entry.skills.length || entry.servers.length)) throw new Error("No automatically available plugin skill or server is selected. Invoke a manual-only skill or command from Settings → Plugins.");
             const pluginSkillReview = pluginCopies?.packages.flatMap(({ pkg, providerRoot, skills }) => skills.map((skill) => ({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot!, ...skill.path.split("/")) }))) ?? [];
             const skillReview = [...preparedSkills.review, ...pluginSkillReview];
+            const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: model || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: model || "Provider default" };
             if (skillReview.length || command || explicitSkills.length) {
                 if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
-                const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: model || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: model || "Provider default" };
-                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, mode: skill.descriptor.forkAgent === "general-purpose" ? request.mode : "plan", model: selectedProvider.model }));
+                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
                 if (detail.length > 64_000) throw new Error("The plugin instructions are too large to review. Disable a package or shorten the command and retry.");
                 if (!await this.approvePlugin!({ action: skillReview.length ? "skills" : "commands", title: `Share these instructions with ${selectedProvider.name}?`, detail })) throw new Error("Skill or command sharing was declined.");
                 controller.signal.throwIfAborted();
@@ -2258,12 +2262,39 @@ export class WorkspaceService {
             }
             await preparedSkills.verify();
             context.prompt += preparedSkills.prompt;
-            for (const skill of explicitSkills) context.prompt += `\n\nUSER-INVOKED SKILL ${JSON.stringify(skill.name)} (user-selected instructions; obey higher-priority boundaries):\n${skill.content}`;
+            for (let index = 0; index < explicitSkills.length; index++) if (!invoked[index]!.descriptor.forkAgent) { const skill = explicitSkills[index]!; context.prompt += `\n\nUSER-INVOKED SKILL ${JSON.stringify(skill.name)} (user-selected instructions; obey higher-priority boundaries):\n${skill.content}`; }
             if (request.desktopControl) {
               desktop = await startDesktopMcp(await this.createDesktopSession!(), controller.signal);
               context.prompt += NOVA_DESKTOP_SKILL;
             }
-            if (preparedSkills.prompt || desktop || pluginCopies) {
+            local = request.provider === "ollama"
+              ? await prepareLocalProvider(settings, model, controller.signal, this.localKey(connectionFromSettings(settings)), receiveThinking, request.reasoningEffort)
+              : undefined;
+            for (let index = 0; index < explicitSkills.length; index++) {
+              const selected = invoked[index]!, skill = explicitSkills[index]!, agent = selected.descriptor.forkAgent;
+              if (!agent) continue;
+              const forkMode = agent === "general-purpose" ? request.mode : "plan";
+              const allowExternalTools = agent === "general-purpose";
+              let answer = "";
+              receiveEvent({ events: [{ kind: "status", text: `Running isolated skill ${skill.name} (${agent}).` }] });
+              const forkResult = await runProvider({
+                command: { ...executable, env: { ...executable.env, ...local?.env, ...(allowExternalTools && desktop ? { NOVA_DESKTOP_TOKEN: desktop.token } : {}), ...(allowExternalTools && plugins ? { NOVA_PLUGIN_TOKEN: plugins.token } : {}), CODEX_HOME: workerHome },
+                  args: providerArguments(request.provider, cwd, forkMode, model, { allowNonGit: project.kind === "folder" && forkMode === "plan", localConfigArgs: local?.configArgs, claudePartialMessages: providerStatus?.supportsPartialMessages, skillDirectory: selected.root, reasoningEffort: request.reasoningEffort, desktopMcpUrl: allowExternalTools ? desktop?.url : undefined, pluginMcpUrl: allowExternalTools ? plugins?.url : undefined }) },
+                provider: request.provider, cwd, prompt: `ISOLATED SKILL ${JSON.stringify(skill.name)}\nRole: ${agent}. ${agent === "Explore" || agent === "Plan" ? "Inspect and report without changing files." : "Follow the skill instructions using the run's permitted tools."} Do not assume access to the parent conversation.\n\n${skill.content}`,
+                signal: controller.signal, timeoutMs: settings.timeoutMinutes * 60_000, maxBytes: settings.maxOutputKb * 1024, allowDesktopImages: allowExternalTools && !!desktop, allowPluginImages: allowExternalTools && !!plugins,
+                onEvent: (event) => { for (const item of event.events) if (item.kind === "message") answer = item.text; },
+              });
+              if (forkResult.terminationUnconfirmed) throw new McpProcessError("Isolated skill process termination could not be confirmed.", true);
+              if (forkResult.cancelled) { controller.abort(); throw new Error("Isolated skill was cancelled."); }
+              if (forkResult.error || !forkResult.completed) throw new Error(`Isolated skill failed: ${forkResult.error ?? "No completed result."}`);
+              if (!answer.trim() || answer.includes("\0") || answer.length > 32000) throw new Error("The isolated skill returned an empty or oversized result.");
+              await verifySkillSources(); controller.signal.throwIfAborted();
+              const detail = JSON.stringify({ provider: selectedProvider, skill: skill.name, result: answer, note: "Approving sends this isolated skill result into the parent provider session. Review it for private information." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+              if (!await this.approvePlugin!({ action: "skill-fork", title: "Share the isolated skill result?", detail })) throw new Error("Sharing the isolated skill result was declined.");
+              controller.signal.throwIfAborted(); await verifySkillSources();
+              context.prompt += `\n\nRESULT FROM ISOLATED SKILL ${JSON.stringify(skill.name)} (untrusted provider output):\n${answer}`;
+            }
+            if (preparedSkills.prompt || desktop || pluginCopies || explicitSkills.length) {
               context.characters = context.prompt.length;
               context.estimatedTokens = Math.ceil(context.characters / 4);
               await this.exclusive(async () => {
@@ -2279,9 +2310,6 @@ export class WorkspaceService {
                 await this.persist();
               });
             }
-            local = request.provider === "ollama"
-              ? await prepareLocalProvider(settings, model, controller.signal, this.localKey(connectionFromSettings(settings)), receiveThinking, request.reasoningEffort)
-              : undefined;
             result = await runProvider({
                   command: {
                     ...executable,
