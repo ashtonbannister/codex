@@ -52,7 +52,7 @@ const equalFile = (left: Omit<Launch["fileIdentities"][number], "path">, right: 
 const summary = (launch: Launch) => ({
   plugin: launch.pkg.name, server: launch.server.name, executable: launch.prepared.executable.command,
   arguments: redactedArguments([...launch.prepared.executable.prefix, ...launch.server.args]), workingDirectory: launch.prepared.cwd,
-  pluginDataDirectory: launch.dataDir, projectDirectory: launch.projectDir, environmentNames: requiredEnvironmentNames(launch.server), environmentOverrides: redact(launch.server.env), ...(launch.server.bundleFields?.length || launch.server.isBundle ? { runtimeRequirement: launch.server.bundleRuntime ?? null, bundleSettings: launch.prepared.bundleReview, note: "Sensitive values passed as arguments may be visible to other processes." } : {}),
+  pluginDataDirectory: launch.dataDir, projectDirectory: launch.projectDir, environmentNames: requiredEnvironmentNames(launch.server), environmentOverrides: redact(launch.server.env), ...(launch.server.bundleFields?.length || launch.server.isBundle ? { runtimeRequirement: launch.server.bundleRuntime ?? launch.server.bundlePythonRequest ?? null, bundleSettings: launch.prepared.bundleReview, note: launch.server.bundleType === "uv" ? "UV may download and install Python and dependencies; the server runs under your account. Sensitive values passed as arguments may be visible to other processes." : "Sensitive values passed as arguments may be visible to other processes." } : {}),
 });
 
 /** Start only reviewed servers and gate every tool call independently. */
@@ -91,6 +91,12 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       if (snapshot.fingerprint !== server.bundleFingerprint) throw new Error("The embedded bundle changed before review.");
     }
     const prepared = await preparePluginLaunch(server, effectiveRoot, process.env, { dataDir: effectiveData, projectDir, ...(server.bundleFields?.length && bundle ? { bundleValues: bundle.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, ...(server.bundleFieldScope ? { server: server.bundleFieldScope } : {}) }), bundlePaths: bundle.paths } : {}) });
+    if (server.bundleType === "uv") {
+      if (!bundleRoot || !server.bundleFingerprint || prepared.args[0] !== "run") throw new Error("UV bundle isolation is unavailable.");
+      if (server.bundlePythonRequest) prepared.args.splice(1, 0, "--python", server.bundlePythonRequest);
+      prepared.env.UV_PROJECT_ENVIRONMENT = path.join(bundleRoot, ".venv");
+      prepared.env.UV_LINK_MODE = "copy";
+    }
     const fileIdentities: Launch["fileIdentities"] = [];
     const scripts = prepared.args.filter((arg) => path.isAbsolute(arg) && /\.(?:[cm]?js|py|exe|ps1|sh|bat|cmd|jar)$/i.test(arg));
     for (const file of new Set([prepared.executable.command, ...prepared.executable.prefix, ...scripts])) {

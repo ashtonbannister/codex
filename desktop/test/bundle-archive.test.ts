@@ -200,3 +200,38 @@ test("imports a reviewed .skill archive with support files and rejects changed a
   await assert.rejects(store.install(archive, preview.fingerprint), /changed/);
   await writeFile(archive, zip([{ name: "../escape", data: Buffer.from("x") }])); await assert.rejects(store.preview(archive));
 });
+
+
+test("MCPB 0.4 UV bundle runs offline after approval in an isolated copy", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-uv-bundle-"));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const archive = path.join(root, "fixture.mcpb");
+  const python = `import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg: continue
+    if msg["method"] == "initialize": result = {"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"uv-fixture","version":"1"}}
+    elif msg["method"] == "tools/list": result = {"tools":[{"name":"hello","inputSchema":{"type":"object"}}]}
+    else: result = {}
+    print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":result}), flush=True)
+`;
+  const config = manifest({ manifest_version: "0.4", server: { type: "uv", entry_point: "src/server.py", mcp_config: { command: "uv", args: ["run", "--offline", "--no-python-downloads", "--directory", "${__dirname}", "src/server.py"] } }, compatibility: { platforms: [process.platform], runtimes: { python: ">=3.10,<4.0" } } });
+  await writeFile(archive, zip([{ name: "manifest.json", data: config }, { name: "pyproject.toml", data: Buffer.from('[project]\nname="nova-uv-fixture"\nversion="0.0.1"\nrequires-python=">=3.10"\ndependencies=[]\n') }, { name: "src/server.py", data: Buffer.from(python) }]));
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(archive);
+  assert.deepEqual(preview.servers[0]!.unsupported, []); assert.match(preview.warnings.join(" "), /download/);
+  const pkg = await store.install(archive, preview.fingerprint); await store.setEnabled(pkg.id, true); const copies = await store.prepareRun();
+  const target = copies.packages[0]!; assert.notEqual(target.servers[0]!.bundleRoot, target.root);
+  const details: string[] = [];
+  await assert.rejects(startPluginMcp(copies.packages, async (request) => { details.push(request.detail); return false; }, new AbortController().signal, root), /declined/);
+  await assert.rejects(readFile(path.join(target.servers[0]!.bundleRoot!, "uv.lock")), { code: "ENOENT" }); assert.match(details[0]!, /download and install/);
+  const gateway = await startPluginMcp(copies.packages, async () => true, new AbortController().signal, root);
+  const response = await fetch(gateway.url, { method: "POST", headers: { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+  assert.equal(((await response.json()) as any).result.tools.length, 1);
+  const { snapshotSkillPackage } = await import("../src/main/services/skill-packages"); assert.equal((await snapshotSkillPackage(target.root, { allowNoSkills: true })).fingerprint, pkg.fingerprint);
+  await gateway.dispose(); await copies.dispose();
+  const content = [{ name: "pyproject.toml", data: Buffer.from('[project]\nname="fixture"\nversion="0.0.1"\n') }, { name: "src/server.py", data: Buffer.from(python) }];
+  await writeFile(archive, zip([{ name: "manifest.json", data: manifest({ manifest_version: "0.4", server: { type: "uv", entry_point: "src/server.py" } }) }, ...content]));
+  assert.deepEqual((await store.preview(archive)).servers[0]!.unsupported, []);
+  await writeFile(archive, zip([{ name: "manifest.json", data: manifest({ manifest_version: "0.4", server: { type: "uv", entry_point: "src/server.py", mcp_config: { command: "uv", args: ["run", "-p3.9", "src/server.py"] } } }) }, ...content]));
+  assert.match((await store.preview(archive)).servers[0]!.unsupported.join(" "), /Python override/);
+});

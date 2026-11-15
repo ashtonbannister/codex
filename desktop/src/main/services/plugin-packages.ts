@@ -37,13 +37,14 @@ function manifestPath(value: string): string {
 function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; commands: CommandDefinition[]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
   const manifest = object(readJson(snapshot, "manifest.json"));
   const version = manifest.manifest_version ?? manifest.dxt_version;
-  if (typeof version !== "string" || !["0.1", "0.2", "0.3"].includes(version)) throw new Error("This MCP bundle manifest version is not supported.");
+  if (typeof version !== "string" || !["0.1", "0.2", "0.3", "0.4"].includes(version)) throw new Error("This MCP bundle manifest version is not supported.");
   const server = object(manifest.server);
-  if (!["node", "python", "binary"].includes(String(server.type)) || typeof server.entry_point !== "string") throw new Error("This MCP bundle server type is not supported.");
+  if (!["node", "python", "binary", ...(version === "0.4" ? ["uv"] : [])].includes(String(server.type)) || typeof server.entry_point !== "string") throw new Error("This MCP bundle server type is not supported.");
   let entry = manifestPath(server.entry_point);
   if (process.platform === "win32" && server.type === "binary" && !path.extname(entry) && snapshot.files.some((file) => file.path.toLowerCase() === `${entry}.exe`.toLowerCase())) entry += ".exe";
   if (!snapshot.files.some((file) => file.path.toLowerCase() === entry.toLowerCase())) throw new Error("The bundle server entry point is missing.");
-  const config = object(server.mcp_config);
+  if (server.type === "uv" && (!/\.py$/i.test(entry) || !snapshot.files.some((file) => file.path.toLowerCase() === "pyproject.toml") || snapshot.files.some((file) => /^(?:server\/(?:lib|venv)|\.venv)\//i.test(file.path)))) throw new Error("A UV bundle requires a Python entry point and pyproject.toml without a bundled environment.");
+  const config = server.mcp_config === undefined && server.type === "uv" ? { command: "uv", args: ["run", "--directory", "${__dirname}", entry] } : object(server.mcp_config);
   const overrides = config.platform_overrides === undefined ? {} : object(config.platform_overrides);
   const platform = overrides[process.platform] === undefined ? {} : object(overrides[process.platform]);
   const combined: Record<string, unknown> = { ...config, ...platform, env: { ...(config.env === undefined ? {} : object(config.env)), ...(platform.env === undefined ? {} : object(platform.env)) } };
@@ -53,17 +54,25 @@ function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name
   const [parsed] = parsePluginMcp({ mcpServers: { bundle: convert(combined) } });
   const warnings: string[] = [];
   const bundleFields = parseBundleFields(manifest.user_config);
-  parsed!.isBundle = true; parsed!.bundleType = server.type as "node" | "python" | "binary"; parsed!.bundleFields = bundleFields;
+  parsed!.isBundle = true; parsed!.bundleType = server.type as "node" | "python" | "binary" | "uv"; parsed!.bundleFields = bundleFields;
+  if (server.type === "uv") {
+    if (!/^(?:uv|uv\.exe)$/i.test(parsed!.command ?? "") || parsed!.args[0] !== "run" || parsed!.args.some((arg) => /^(?:-p(?:=|$|[0-9])|--python(?:=|$))/.test(arg))) parsed!.unsupported.push("This UV bundle uses an unsupported execution command or Python override.");
+    parsed!.startupTimeoutMs = 120_000;
+    warnings.push("UV may download and install Python and dependencies after server startup approval.");
+  }
   if (manifest.compatibility !== undefined) {
     const compatibility = object(manifest.compatibility);
     if (compatibility.platforms !== undefined && (!Array.isArray(compatibility.platforms) || !compatibility.platforms.every((value) => typeof value === "string") || !compatibility.platforms.includes(process.platform))) parsed!.unsupported.push("This bundle does not support the current platform.");
     if (compatibility.runtimes !== undefined) {
       const runtimes = object(compatibility.runtimes); const keys = Object.keys(runtimes);
-      if (keys.length > 1 || keys.some((name) => !["node", "python"].includes(name) || name !== server.type)) parsed!.unsupported.push("This bundle declares runtime requirements Nova cannot verify for its server type.");
+      if (keys.length > 1 || keys.some((name) => !["node", "python"].includes(name) || (server.type === "uv" ? name !== "python" : name !== server.type))) parsed!.unsupported.push("This bundle declares runtime requirements Nova cannot verify for its server type.");
       else if (keys.length) {
         const name = keys[0] as "node" | "python"; const raw = runtimes[name];
         if (typeof raw !== "string" || raw.length > 256 || !validRange(raw.replace(/,/g, " "))) parsed!.unsupported.push("This bundle declares an invalid runtime version range.");
-        else parsed!.bundleRuntime = { name, range: raw.replace(/,/g, " ") };
+        else if (server.type === "uv") {
+          if (!/^(?:>=|<=|>|<|==)?\d+(?:\.\d+){0,2}(?:\s*,\s*(?:>=|<=|>|<|==)?\d+(?:\.\d+){0,2})*$/.test(raw)) parsed!.unsupported.push("This UV bundle uses an unsupported Python version range.");
+          else parsed!.bundlePythonRequest = raw.replace(/\s/g, "");
+        } else parsed!.bundleRuntime = { name, range: raw.replace(/,/g, " ") };
       }
     }
     if (Object.keys(compatibility).some((field) => !["platforms", "runtimes", "claude_desktop"].includes(field))) parsed!.unsupported.push("This bundle declares an unsupported compatibility requirement.");
@@ -449,6 +458,16 @@ export class PluginPackageStore {
           const child = await lstat(bundleDataDir);
           if (!child.isDirectory() || child.isSymbolicLink() || normalize(await realpath(bundleDataDir)) !== normalize(bundleDataDir)) throw new Error("Embedded bundle data storage is unavailable or redirected.");
           server.bundleRoot = bundleRoot; server.bundleDataDir = bundleDataDir;
+        }
+        for (const server of servers) if (server.bundleType === "uv" && !server.bundleRoot) {
+          const uvRoot = path.join(directory, "embedded", pkg.id, `uv-${server.name}`);
+          for (const file of snapshot.files) {
+            const target = path.join(uvRoot, ...file.path.split("/")); await mkdir(path.dirname(target), { recursive: true, mode: 0o700 }); await writeFile(target, file.data, { flag: "wx", mode: 0o700 });
+          }
+          const uvData = path.join(dataDir, "uv", server.name); await mkdir(uvData, { recursive: true, mode: 0o700 });
+          const info = await lstat(uvData);
+          if (!info.isDirectory() || info.isSymbolicLink() || normalize(await realpath(uvData)) !== normalize(uvData)) throw new Error("UV bundle data storage is unavailable or redirected.");
+          server.bundleRoot = uvRoot; server.bundleDataDir = uvData; server.bundleFingerprint = snapshot.fingerprint;
         }
         const selected = pkg.skills.filter((skill) => visibleSkill(skill, matchingSkillReference(skill, pkg.name, "plugin", references), provider));
         const matched = pkg.skills.filter((skill) => !!matchingSkillReference(skill, pkg.name, "plugin", references));

@@ -16,7 +16,8 @@ export interface PluginServerConfig {
   literalHeaders?: Record<string, string>;
   bearerTokenEnvVar?: string;
   isBundle?: boolean;
-  bundleType?: "node" | "python" | "binary";
+  bundleType?: "node" | "python" | "binary" | "uv";
+  bundlePythonRequest?: string;
   bundleArchivePath?: string;
   bundleFingerprint?: string;
   bundleFieldScope?: string;
