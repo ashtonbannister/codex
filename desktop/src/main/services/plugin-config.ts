@@ -17,6 +17,11 @@ export interface PluginServerConfig {
   bearerTokenEnvVar?: string;
   isBundle?: boolean;
   bundleType?: "node" | "python" | "binary";
+  bundleArchivePath?: string;
+  bundleFingerprint?: string;
+  bundleFieldScope?: string;
+  bundleRoot?: string;
+  bundleDataDir?: string;
   bundleRuntime?: { name: "node" | "python"; range: string };
   bundleFields?: import("./bundle-config").BundleDefinition[];
   authMode?: "none" | "bearer" | "oauth" | "mixed";

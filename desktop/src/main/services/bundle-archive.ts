@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { lstat, mkdir, open, readdir, realpath, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { crc32 } from "node:zlib";
 import { fromBufferPromise } from "yauzl";
@@ -13,8 +13,8 @@ const key = (value: string) => process.platform === "win32" ? path.resolve(value
 const validComponent = (part: string) => part.length > 0 && part.length <= 255 && part !== "." && part !== ".." && !/[<>:"\\|?*\x00-\x1f\x7f]/.test(part) && !/[. ]$/.test(part) && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part);
 
 /** Extract a reviewed local bundle into a fresh private staging directory without executing it. */
-export async function withBundleArchive<T>(selected: string, dataDir: string, use: (folder: string) => Promise<T>): Promise<T> {
-  if (!path.isAbsolute(selected) || !/\.(?:mcpb|dxt|zip)$/i.test(selected)) throw new Error("Choose a local MCP bundle archive.");
+export async function withBundleArchive<T>(selected: string, dataDir: string, use: (folder: string) => Promise<T>, expectedDigest?: string): Promise<T> {
+  if (!path.isAbsolute(selected) || !/\.(?:mcpb|dxt|zip|plugin)$/i.test(selected)) throw new Error("Choose a local MCP bundle archive.");
   const before = await lstat(selected);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink > 1 || before.size > MAX_ARCHIVE) throw new Error("The selected archive is linked, unavailable or too large.");
   const handle = await open(selected, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
@@ -25,6 +25,7 @@ export async function withBundleArchive<T>(selected: string, dataDir: string, us
     bytes = await handle.readFile(); const after = await handle.stat();
     if (bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw new Error("The selected archive changed while reading.");
   } finally { await handle.close(); }
+  if (expectedDigest && createHash("sha256").update(bytes).digest("hex") !== expectedDigest) throw new Error("The embedded bundle changed before it was unpacked.");
   const staging = path.join(dataDir, "bundle-staging"); await mkdir(staging, { recursive: true, mode: 0o700 });
   const info = await lstat(staging);
   if (!info.isDirectory() || info.isSymbolicLink() || key(await realpath(staging)) !== key(staging)) throw new Error("Bundle staging is unavailable or redirected.");
@@ -55,6 +56,11 @@ export async function withBundleArchive<T>(selected: string, dataDir: string, us
       }
       if (!files.size) throw new Error("The archive is empty.");
     } finally { zip.close(); }
-    return await use(folder);
+    let packageRoot = folder;
+    if (/\.(?:zip|plugin)$/i.test(selected)) {
+      const entries = await readdir(folder, { withFileTypes: true });
+      if (entries.length === 1 && entries[0]!.isDirectory()) packageRoot = path.join(folder, entries[0]!.name);
+    }
+    return await use(packageRoot);
   } finally { await removeOwnedTree(staging, folder); }
 }

@@ -243,18 +243,22 @@ const localKey = (connection: ReturnType<typeof validateLocalConnection>) => loc
 function registerHandlers(service: WorkspaceService) {
   const plugins = new PluginPackageStore(path.join(app.getPath("userData"), "workspace"));
   handle("plugins:list", async () => (await plugins.list()).map((pkg) => {
-    const settings = bundleConfigStore.get({ id: pkg.id, fingerprint: pkg.fingerprint });
     const folders: Record<string, string> = { HOME: app.getPath("home"), DESKTOP: app.getPath("desktop"), DOCUMENTS: app.getPath("documents"), DOWNLOADS: app.getPath("downloads") };
 
     return { ...pkg, servers: pkg.servers.map((server) => ({ ...server, credentialStored: pluginCredentials.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }), oauthConnected: pluginOAuthStore.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }) })),
-      ...(pkg.bundleFields ? { bundleFields: pkg.bundleFields.map((field) => ({ ...field, ...(Object.hasOwn(settings, field.key) ? { configured: true, ...(!field.sensitive ? { value: settings[field.key] } : {}) } : !field.sensitive && field.value !== undefined ? { value: expandBundleDefault(field.value, folders) } : {}) })) } : {}) };
+      ...(pkg.bundleFields ? { bundleFields: pkg.bundleFields.map((field) => {
+        const settings = bundleConfigStore.get({ id: pkg.id, fingerprint: pkg.fingerprint, ...(field.server ? { server: field.server } : {}) });
+        return { ...field, ...(Object.hasOwn(settings, field.key) ? { configured: true, ...(!field.sensitive ? { value: settings[field.key] } : {}) } : !field.sensitive && field.value !== undefined ? { value: expandBundleDefault(field.value, folders) } : {}) };
+      }) } : {}) };
   }));
   handle("plugins:bundle-setting", async (payload) => {
-    const input = objectPayload(payload); const entry = await plugins.bundleField(identifier(input.id), identifier(input.field), input.value === null);
-    await bundleConfigStore.set({ id: entry.id, fingerprint: entry.fingerprint }, entry.definition, input.value);
+    const input = objectPayload(payload); const scope = input.server === undefined ? undefined : identifier(input.server);
+    const entry = await plugins.bundleField(identifier(input.id), identifier(input.field), input.value === null, scope);
+    await bundleConfigStore.set({ id: entry.id, fingerprint: entry.fingerprint, ...(entry.server ? { server: entry.server } : {}) }, entry.definition, input.value);
   });
   handle("plugins:bundle-path", async (payload) => {
-    const input = objectPayload(payload); const entry = await plugins.bundleField(identifier(input.id), identifier(input.field));
+    const input = objectPayload(payload); const scope = input.server === undefined ? undefined : identifier(input.server);
+    const entry = await plugins.bundleField(identifier(input.id), identifier(input.field), false, scope);
     if (!["file", "directory"].includes(entry.definition.type)) throw new Error("This bundle setting is not a path.");
     const properties: Array<"openFile" | "openDirectory" | "multiSelections"> = [entry.definition.type === "file" ? "openFile" : "openDirectory"];
     if (entry.definition.multiple) properties.push("multiSelections");
@@ -309,7 +313,7 @@ function registerHandlers(service: WorkspaceService) {
     return selected.canceled || !selected.filePaths[0] ? null : importPlugin(selected.filePaths[0]);
   });
   handle("plugins:import-bundle", async () => {
-    const selected = await dialog.showOpenDialog(window!, { title: "Choose an MCP bundle", buttonLabel: "Review bundle", properties: ["openFile"], filters: [{ name: "MCP bundles", extensions: ["mcpb", "dxt", "zip"] }] });
+    const selected = await dialog.showOpenDialog(window!, { title: "Choose a plugin archive or MCP bundle", buttonLabel: "Review package", properties: ["openFile"], filters: [{ name: "Plugin archives and MCP bundles", extensions: ["mcpb", "dxt", "zip", "plugin"] }] });
     return selected.canceled || !selected.filePaths[0] ? null : importPlugin(selected.filePaths[0]);
   });
   handle("plugins:enabled", async (payload) => {

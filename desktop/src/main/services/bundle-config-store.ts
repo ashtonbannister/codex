@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { validateBundleValue, type BundleDefinition, type BundleValue } from "./bundle-config";
-export interface BundleIdentity { id: string; fingerprint: string }
+export interface BundleIdentity { id: string; fingerprint: string; server?: string }
 const keyOf = (value: BundleIdentity) => {
   if (!/^[a-f0-9-]{36}$/i.test(value.id) || !/^[a-f0-9]{64}$/.test(value.fingerprint)) throw new Error("Invalid bundle configuration identity.");
-  return createHash("sha256").update(JSON.stringify([value.id, value.fingerprint])).digest("hex");
+  if (value.server !== undefined && !/^[A-Za-z0-9_-]{1,80}$/.test(value.server)) throw new Error("Invalid bundle server identity.");
+  return createHash("sha256").update(JSON.stringify(value.server ? [value.id, value.fingerprint, value.server] : [value.id, value.fingerprint])).digest("hex");
 };
 export class BundleConfigStore {
   private readonly file: string; private readonly entries = new Map<string, Record<string, BundleValue>>(); private queue: Promise<void> = Promise.resolve();

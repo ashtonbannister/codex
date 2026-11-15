@@ -74,7 +74,7 @@ test("plugin bundle references are reported unsupported instead of silently igno
   const f = await fixture(t);
   await writeFile(path.join(f.source, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "fixture", mcpServers: ["https://example.invalid/plugin.mcpb"] }));
   const preview = await f.store.preview(f.source);
-  assert.ok(preview.servers.some((server) => server.unsupported.some((reason) => reason.includes("bundles"))));
+  assert.ok(preview.servers.some((server) => server.unsupported.some((reason) => /bundle/i.test(reason))));
   const pkg = await f.store.install(f.source, preview.fingerprint);
   assert.ok(pkg.disabledServers.some((name) => name.startsWith("unsupported_bundle_")));
   await f.store.setEnabled(pkg.id, true);

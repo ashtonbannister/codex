@@ -172,7 +172,7 @@ function PluginPackagesPanel({ workActive }: { workActive: boolean }) {
     <p className="field-hint">Import a Codex or Claude plugin folder, or a local MCP bundle. Nova copies the package and keeps it disabled until you enable it.</p>
     <p className="panel-note">Local plugin programs run as your user and can access files or networks. Remote servers receive data sent to their tools. Review the connection and tool catalog for each run, then approve each tool call. Some host-specific connections and OAuth configurations are not yet supported.</p>
     <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importPluginPackage(); if (imported) setNotice(`Imported ${imported.name}; it is disabled.`); })}>Import plugin package…</button>{" "}
-    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importPluginBundle(); if (imported) setNotice(`Imported ${imported.name}; it is disabled.`); })}>Import MCP bundle…</button>
+    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importPluginBundle(); if (imported) setNotice(`Imported ${imported.name}; it is disabled.`); })}>Import plugin archive…</button>
     {workActive && <p className="field-hint">Stop active runs and checks before changing plugins.</p>}
     {notice && <p role="status" className="field-hint">{notice}</p>}
     {error && <p role="alert" className="form-error">{error}</p>}
@@ -181,7 +181,7 @@ function PluginPackagesPanel({ workActive }: { workActive: boolean }) {
       <label><input type="checkbox" checked={pkg.enabled} disabled={busy || workActive} onChange={(event) => void perform(() => api.setPluginPackageEnabled(pkg.id, event.target.checked))} /> <strong>{pkg.name}</strong></label>
       <p className="field-hint">{pkg.servers.length} server{pkg.servers.length === 1 ? "" : "s"} · {pkg.skills.length} skill{pkg.skills.length === 1 ? "" : "s"} · {pkg.files} files</p>
       <ul>{pkg.servers.map((server) => <li key={server.name}><label><input type="checkbox" checked={server.enabled && !pkg.disabledServers.includes(server.name)} disabled={busy || workActive || !server.enabled || !!server.unsupported.length} onChange={(event) => void perform(() => api.setPluginServerEnabled(pkg.id, server.name, event.target.checked))} /> {server.name} · {server.transport}</label>{server.enabled ? "" : " · disabled in source"}{server.unsupported.length ? ` · unavailable: ${server.unsupported.join(" ")}` : ""}{server.environmentNames.length ? ` · environment: ${server.environmentNames.join(", ")}` : ""}{server.endpointOrigin ? ` · ${server.endpointOrigin}` : ""}{((server.enabled && (server.supportsCredential || server.supportsOAuth)) || server.credentialStored || server.oauthConnected) ? <PluginCredentialControl pkg={pkg} server={server} disabled={busy || workActive} perform={perform} /> : null}</li>)}</ul>
-      {!!pkg.bundleFields?.length && <div className="bundle-settings"><p className="field-hint">Bundle settings are encrypted on this device. Sensitive values are not displayed after saving.</p>{pkg.bundleFields.map((field) => <BundleSetting key={field.key} pkg={pkg} field={field} disabled={busy || workActive} perform={perform} />)}</div>}
+      {!!pkg.bundleFields?.length && <div className="bundle-settings"><p className="field-hint">Bundle settings are encrypted on this device. Sensitive values are not displayed after saving.</p>{pkg.bundleFields.map((field) => <BundleSetting key={`${field.server ?? "bundle"}:${field.key}`} pkg={pkg} field={field} disabled={busy || workActive} perform={perform} />)}</div>}
       {pkg.warnings.map((warning) => <p className="field-hint" key={warning}>{warning}</p>)}
     </div>)}
   </section>;
@@ -196,15 +196,17 @@ function BundleSetting({ pkg, field, disabled, perform }: { pkg: PluginPackage; 
   const save = () => {
     const input = field.type === "boolean" ? Boolean(value) : field.type === "number" ? Number(value) : field.multiple ? String(value).split(/\r?\n/).map((item) => item.trim()).filter(Boolean) : String(value);
     if (field.sensitive) setValue("");
-    void perform(() => api.setBundleSetting(pkg.id, field.key, input));
+    void perform(() => api.setBundleSetting(pkg.id, field.key, input, field.server));
   };
-  const choose = () => void perform(async () => { const selected = await api.chooseBundlePath(pkg.id, field.key); if (selected !== null) await api.setBundleSetting(pkg.id, field.key, selected); });
-  return <div className="plugin-credential">
-    {field.type === "boolean" ? <label><input type="checkbox" checked={Boolean(value)} disabled={disabled} onChange={(event) => setValue(event.target.checked)} /> {field.title}</label> : <label className="field"><span>{field.title}{field.required ? " · required" : ""}</span>{field.multiple ? <textarea aria-label={field.title} value={String(value)} disabled={disabled} onChange={(event) => setValue(event.target.value)} placeholder="One path per line" /> : <input aria-label={field.title} type={field.sensitive ? "password" : field.type === "number" ? "number" : "text"} min={field.min} max={field.max} autoComplete="off" value={String(value)} disabled={disabled} onChange={(event) => setValue(event.target.value)} />}</label>}
+  const choose = () => void perform(async () => { const selected = await api.chooseBundlePath(pkg.id, field.key, field.server); if (selected !== null) await api.setBundleSetting(pkg.id, field.key, selected, field.server); });
+  const label = field.server ? `${field.title} (${field.server})` : field.title;
+  return <div className="plugin-credential" role={field.server ? "group" : undefined} aria-label={field.server ? `Settings for ${field.server}` : undefined}>
+    {field.server && <p className="field-hint">Server: {field.server}</p>}
+    {field.type === "boolean" ? <label><input type="checkbox" checked={Boolean(value)} disabled={disabled} onChange={(event) => setValue(event.target.checked)} /> {field.title}</label> : <label className="field"><span>{field.title}{field.required ? " · required" : ""}</span>{field.multiple ? <textarea aria-label={label} value={String(value)} disabled={disabled} onChange={(event) => setValue(event.target.value)} placeholder="One path per line" /> : <input aria-label={label} type={field.sensitive ? "password" : field.type === "number" ? "number" : "text"} min={field.min} max={field.max} autoComplete="off" value={String(value)} disabled={disabled} onChange={(event) => setValue(event.target.value)} />}</label>}
     <p className="field-hint">{field.description}{field.sensitive && field.configured ? " · Saved securely" : ""}</p>
-    <button type="button" className="secondary-button" disabled={disabled || (field.type === "number" && String(value).trim() === "") || (field.sensitive && !value)} onClick={save}>Save {field.title}</button>{" "}
-    {(field.type === "file" || field.type === "directory") && <button type="button" className="secondary-button" disabled={disabled} onClick={choose}>Browse {field.title}…</button>}{" "}
-    {field.configured && <button type="button" className="secondary-button" disabled={disabled} onClick={() => { setValue(field.type === "boolean" ? false : ""); void perform(() => api.setBundleSetting(pkg.id, field.key, null)); }}>Clear {field.title}</button>}
+    <button type="button" className="secondary-button" disabled={disabled || (field.type === "number" && String(value).trim() === "") || (field.sensitive && !value)} aria-label={`Save ${label}`} onClick={save}>Save {field.title}</button>{" "}
+    {(field.type === "file" || field.type === "directory") && <button type="button" className="secondary-button" disabled={disabled} aria-label={`Browse ${label}…`} onClick={choose}>Browse {field.title}…</button>}{" "}
+    {field.configured && <button type="button" className="secondary-button" disabled={disabled} aria-label={`Clear ${label}`} onClick={() => { setValue(field.type === "boolean" ? false : ""); void perform(() => api.setBundleSetting(pkg.id, field.key, null, field.server)); }}>Clear {field.title}</button>}
   </div>;
 }
 

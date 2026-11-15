@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { validRange } from "semver";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -115,9 +115,17 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
     if (declared.length > 32) throw new Error("Too many plugin MCP manifest entries.");
     for (const entry of declared) {
       let config: unknown;
-      if (typeof entry === "string" && (/^https:\/\//i.test(entry) || /\.(?:mcpb|dxt)$/i.test(entry))) {
+      if (typeof entry === "string" && /^https:\/\//i.test(entry)) {
         const bundleName = `unsupported_bundle_${++bundleNumber}`;
-        servers.set(bundleName, { name: bundleName, transport: "http", enabled: true, args: [], env: {}, envVars: [], disabledTools: [], omitToolsFrom: [], unsupported: ["MCP bundles and bundle URLs are not yet supported."] });
+        servers.set(bundleName, { name: bundleName, transport: "http", enabled: true, args: [], env: {}, envVars: [], disabledTools: [], omitToolsFrom: [], unsupported: ["Remote bundle URLs are not yet supported."] });
+        continue;
+      }
+      if (typeof entry === "string" && /\.(?:mcpb|dxt)$/i.test(entry)) {
+        const bundleArchivePath = manifestPath(entry);
+        const stem = path.posix.basename(bundleArchivePath).replace(/\.(?:mcpb|dxt)$/i, "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32) || "bundle";
+        const bundleName = `bundle_${stem}_${createHash("sha256").update(bundleArchivePath.toLowerCase()).digest("hex").slice(0, 10)}`;
+        if (servers.has(bundleName)) throw new Error("A plugin declares the same embedded bundle more than once.");
+        servers.set(bundleName, { name: bundleName, transport: "stdio", enabled: true, args: [], env: {}, envVars: [], disabledTools: [], omitToolsFrom: [], unsupported: [], bundleArchivePath });
         continue;
       }
       if (typeof entry === "string") config = readJson(snapshot, manifestPath(entry));
@@ -153,6 +161,35 @@ export class PluginPackageStore {
     const info = await lstat(this.root);
     if (!info.isDirectory() || info.isSymbolicLink() || normalize(await realpath(this.root)) !== normalize(this.root)) throw new Error("Nova's plugin storage is unavailable or redirected.");
   }
+  private async resolvePackage(snapshot: PackageSnapshot, sourceRoot: string, fallbackName: string): Promise<ReturnType<typeof parsePluginPackage>> {
+    const parsed = parsePluginPackage(snapshot, fallbackName);
+    const embedded = parsed.servers.filter((server) => server.bundleArchivePath);
+    if (!embedded.length) return parsed;
+    if (embedded.length > 20) throw new Error("A plugin contains too many embedded bundles.");
+    const fields = [...(parsed.bundleFields ?? [])]; const warnings = [...parsed.warnings];
+    const servers: PluginServerConfig[] = [];
+    let totalFiles = 0, totalBytes = 0;
+    for (const entry of parsed.servers) {
+      if (!entry.bundleArchivePath) { servers.push(entry); continue; }
+      const matches = snapshot.files.filter((file) => file.path.toLowerCase() === entry.bundleArchivePath!.toLowerCase());
+      if (matches.length !== 1) throw new Error("An embedded bundle is missing or ambiguous.");
+      const file = matches[0]!;
+      const resolved = await withBundleArchive(path.join(sourceRoot, ...file.path.split("/")), this.dataDir, async (folder) => {
+        const contents = await snapshotSkillPackage(folder, { allowNoSkills: true });
+        const bundle = parseMcpBundle(contents, entry.name);
+        return { contents, bundle };
+      }, file.digest);
+      totalFiles += resolved.contents.files.length; totalBytes += resolved.contents.bytes;
+      if (totalFiles > 2000 || totalBytes > 64 * 1024 * 1024) throw new Error("Embedded bundles exceed the package extraction limit.");
+      const server = { ...resolved.bundle.servers[0]!, name: entry.name, bundleArchivePath: file.path, bundleFingerprint: resolved.contents.fingerprint, bundleFieldScope: entry.name };
+      servers.push(server);
+      for (const field of resolved.bundle.bundleFields ?? []) fields.push({ ...field, server: entry.name });
+      warnings.push(...resolved.bundle.warnings.map((warning) => `${resolved.bundle.name}: ${warning}`));
+    }
+    if (fields.length > 200) throw new Error("Embedded bundles contain too many settings.");
+    warnings.push(`${embedded.length} embedded bundle(s) contain ${totalFiles} files and ${totalBytes.toLocaleString()} expanded bytes; their servers run only after review.`);
+    return { ...parsed, servers, warnings, ...(fields.length ? { bundleFields: fields } : {}) };
+  }
   async preview(selected: string): Promise<Omit<PluginPackage, "id" | "enabled" | "disabledServers">> {
     await this.ensureRoot();
     if ((await lstat(selected)).isFile()) {
@@ -163,7 +200,7 @@ export class PluginPackageStore {
     const source = await realpath(selected);
     if (inside(source, this.root) || inside(this.root, source)) throw new Error("Choose a source separate from Nova's plugin storage.");
     const snapshot = await snapshotSkillPackage(selected, { allowNoSkills: true });
-    const parsed = parsePluginPackage(snapshot, path.basename(source));
+    const parsed = await this.resolvePackage(snapshot, selected, path.basename(source));
     return { name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint: snapshot.fingerprint, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
   }
   async install(selected: string, fingerprint: string): Promise<PluginPackage> {
@@ -205,14 +242,17 @@ export class PluginPackageStore {
         !Number.isSafeInteger(pkg.files) || !Number.isSafeInteger(pkg.bytes) || !Array.isArray(pkg.servers) || pkg.servers.length > 100 ||
         !pkg.servers.every((server) => server && typeof server.name === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(server.name) && typeof server.transport === "string" && typeof server.enabled === "boolean" && Array.isArray(server.environmentNames) && server.environmentNames.every((name) => typeof name === "string") && Array.isArray(server.unsupported) && server.unsupported.every((reason) => typeof reason === "string")) ||
         !Array.isArray(pkg.skills) || pkg.skills.length > 200 || !pkg.skills.every((skill) => skill && typeof skill.path === "string" && typeof skill.name === "string" && typeof skill.description === "string") ||
-        (pkg.bundleFields !== undefined && (!Array.isArray(pkg.bundleFields) || pkg.bundleFields.length > 50 || pkg.bundleFields.some((field) => !field || typeof field.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(field.key) || !["string", "number", "boolean", "file", "directory"].includes(field.type) || typeof field.title !== "string" || typeof field.description !== "string" || typeof field.required !== "boolean" || typeof field.sensitive !== "boolean" || typeof field.multiple !== "boolean" || (field.sensitive && field.value !== undefined)))) ||
+        (pkg.bundleFields !== undefined && (!Array.isArray(pkg.bundleFields) || pkg.bundleFields.length > 200 || pkg.bundleFields.some((field) => !field || typeof field.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(field.key) || !["string", "number", "boolean", "file", "directory"].includes(field.type) || typeof field.title !== "string" || typeof field.description !== "string" || typeof field.required !== "boolean" || typeof field.sensitive !== "boolean" || typeof field.multiple !== "boolean" || (field.server !== undefined && (typeof field.server !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(field.server))) || (field.sensitive && field.value !== undefined)))) ||
         !Array.isArray(pkg.disabledServers) || pkg.disabledServers.some((name) => typeof name !== "string" || !pkg.servers.some((server) => server.name === name)) ||
         !Array.isArray(pkg.warnings) || pkg.warnings.length > 100 || pkg.warnings.some((warning) => typeof warning !== "string") || !/^[a-f0-9]{64}$/.test(pkg.fingerprint)) throw new Error("Invalid plugin metadata.");
     if (verify) {
       const snapshot = await snapshotSkillPackage(path.join(directory, "files"), { allowNoSkills: true });
       if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed. Disable it or import a fresh copy.`);
-      const parsed = parsePluginPackage(snapshot, pkg.name);
-      return { ...pkg, name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
+      const parsed = await this.resolvePackage(snapshot, path.join(directory, "files"), pkg.name);
+      const known = new Set(pkg.servers.map((server) => server.name));
+      const disabled = new Set(pkg.disabledServers.filter((name) => parsed.servers.some((server) => server.name === name)));
+      for (const server of parsed.servers) if (!known.has(server.name) || !server.enabled || server.unsupported.length) disabled.add(server.name);
+      return { ...pkg, name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), disabledServers: [...disabled], warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
     }
     return pkg;
   }
@@ -261,7 +301,8 @@ export class PluginPackageStore {
       for (const pkg of verified) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"), { allowNoSkills: true });
         if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before launch.`);
-        const servers = parsePluginPackage(snapshot, pkg.name).servers.filter((server) => server.enabled && !pkg.disabledServers.includes(server.name));
+        const sourceRoot = path.join(this.root, pkg.id, "files");
+        const servers = (await this.resolvePackage(snapshot, sourceRoot, pkg.name)).servers.filter((server) => server.enabled && !pkg.disabledServers.includes(server.name));
         if (servers.some((server) => server.unsupported.length)) throw new Error(`Plugin ${pkg.name} contains an enabled server with unsupported settings. Review it in Settings → Plugins.`);
         totalBytes += snapshot.bytes; totalServers += servers.length;
         if (totalBytes > 128 * 1024 * 1024 || totalServers > 20) throw new Error("Enabled plugin packages exceed the per-run limit.");
@@ -275,6 +316,28 @@ export class PluginPackageStore {
         await mkdir(dataDir, { recursive: true, mode: 0o700 });
         const dataInfo = await lstat(dataDir);
         if (!dataInfo.isDirectory() || dataInfo.isSymbolicLink() || normalize(await realpath(dataDir)) !== normalize(dataDir)) throw new Error("Plugin data directory is unavailable or redirected.");
+        for (const server of servers) if (server.bundleArchivePath) {
+          const archive = snapshot.files.find((file) => file.path === server.bundleArchivePath);
+          if (!archive || !server.bundleFingerprint || !server.bundleFieldScope) throw new Error("Embedded bundle metadata is unavailable.");
+          const bundleRoot = path.join(directory, "embedded", pkg.id, server.bundleFieldScope);
+          await withBundleArchive(path.join(root, ...archive.path.split("/")), this.dataDir, async (folder) => {
+            const contents = await snapshotSkillPackage(folder, { allowNoSkills: true });
+            if (contents.fingerprint !== server.bundleFingerprint) throw new Error("The embedded bundle changed before launch.");
+            totalBytes += contents.bytes; if (totalBytes > 128 * 1024 * 1024) throw new Error("Enabled plugin packages exceed the per-run limit.");
+            for (const file of contents.files) {
+              const target = path.join(bundleRoot, ...file.path.split("/"));
+              await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+              await writeFile(target, file.data, { flag: "wx", mode: 0o700 });
+            }
+          }, archive.digest);
+          const bundleDataRoot = path.join(dataDir, "embedded"); await mkdir(bundleDataRoot, { recursive: true, mode: 0o700 });
+          const parent = await lstat(bundleDataRoot);
+          if (!parent.isDirectory() || parent.isSymbolicLink() || normalize(await realpath(bundleDataRoot)) !== normalize(bundleDataRoot)) throw new Error("Embedded bundle data storage is unavailable or redirected.");
+          const bundleDataDir = path.join(bundleDataRoot, server.bundleFieldScope); await mkdir(bundleDataDir, { recursive: true, mode: 0o700 });
+          const child = await lstat(bundleDataDir);
+          if (!child.isDirectory() || child.isSymbolicLink() || normalize(await realpath(bundleDataDir)) !== normalize(bundleDataDir)) throw new Error("Embedded bundle data storage is unavailable or redirected.");
+          server.bundleRoot = bundleRoot; server.bundleDataDir = bundleDataDir;
+        }
         packages.push({ pkg, root, dataDir, servers });
       }
       if (!totalServers) throw new Error("No enabled plugin servers are available.");
@@ -284,18 +347,21 @@ export class PluginPackageStore {
     } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   }
 
-  async bundleField(id: string, field: string, remove = false): Promise<{ id: string; fingerprint: string; definition: BundleDefinition }> {
+  async bundleField(id: string, field: string, remove = false, scope?: string): Promise<{ id: string; fingerprint: string; server?: string; definition: BundleDefinition }> {
     await this.ensureRoot(); const pkg = await this.readPackage(id, !remove);
     if (remove) {
-      const definition = pkg.bundleFields?.find((entry) => entry.key === field);
+      const definition = pkg.bundleFields?.find((entry) => entry.key === field && entry.server === scope);
       if (!definition) throw new Error("Bundle setting not found.");
-      return { id: pkg.id, fingerprint: pkg.fingerprint, definition };
+      return { id: pkg.id, fingerprint: pkg.fingerprint, ...(scope ? { server: scope } : {}), definition };
     }
     const snapshot = await snapshotSkillPackage(path.join(this.root, id, "files"), { allowNoSkills: true });
     if (snapshot.fingerprint !== pkg.fingerprint) throw new Error("The bundle changed before its settings were saved.");
-    const definition = parsePluginPackage(snapshot, pkg.name).servers.flatMap((server) => server.bundleFields ?? []).find((entry) => entry.key === field);
+    const sourceRoot = path.join(this.root, id, "files");
+    const resolved = await this.resolvePackage(snapshot, sourceRoot, pkg.name);
+    const server = resolved.servers.find((entry) => entry.bundleFieldScope === scope && (entry.bundleFields ?? []).some((item) => item.key === field));
+    const definition = server?.bundleFields?.find((entry) => entry.key === field);
     if (!definition) throw new Error("Bundle setting not found.");
-    return { id: pkg.id, fingerprint: pkg.fingerprint, definition };
+    return { id: pkg.id, fingerprint: pkg.fingerprint, ...(scope ? { server: scope } : {}), definition };
   }
   async oauthConnection(id: string, name: string): Promise<{ identity: { id: string; fingerprint: string; server: string }; endpoint: string; settings: import("./plugin-oauth").OAuthSettings; resourceHeaders: Record<string, string> }> {
     await this.ensureRoot();

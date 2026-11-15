@@ -16,6 +16,7 @@ export type PluginApproval = (request: { action: "start" | "discover" | "call"; 
 interface Launch {
   pkg: PluginPackage; server: PluginServerConfig; root: string;
   dataDir: string;
+  bundleRoot?: string;
   projectDir: string;
   directoryIdentities: Array<{ path: string; dev: number; ino: number }>;
   prepared: Awaited<ReturnType<typeof preparePluginLaunch>>;
@@ -55,7 +56,7 @@ const summary = (launch: Launch) => ({
 });
 
 /** Start only reviewed servers and gate every tool call independently. */
-export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }, bundle?: { values(identity: { id: string; fingerprint: string }): Record<string, import("./bundle-config").BundleValue>; paths: Record<string, string> }): Promise<{
+export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }, bundle?: { values(identity: { id: string; fingerprint: string; server?: string }): Record<string, import("./bundle-config").BundleValue>; paths: Record<string, string> }): Promise<{
   url: string; token: string; dispose(): Promise<void>;
 }> {
   signal.throwIfAborted();
@@ -78,7 +79,17 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers, oauthAvailable });
       continue;
     }
-    const prepared = await preparePluginLaunch(server, entry.root, process.env, { dataDir: entry.dataDir, projectDir, ...(server.isBundle && bundle ? { bundleValues: bundle.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint }), bundlePaths: bundle.paths } : {}) });
+    const bundleRoot = server.bundleRoot;
+    const effectiveRoot = bundleRoot ?? entry.root;
+    const effectiveData = server.bundleDataDir ?? entry.dataDir;
+    if (bundleRoot) {
+      const runRoot = path.dirname(entry.root); const relative = path.relative(runRoot, bundleRoot);
+      const dataRelative = path.relative(entry.dataDir, effectiveData);
+      if (!path.isAbsolute(bundleRoot) || !relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !dataRelative || dataRelative === ".." || dataRelative.startsWith(`..${path.sep}`) || path.isAbsolute(dataRelative) || !server.bundleFingerprint) throw new Error("Embedded bundle paths are invalid.");
+      const snapshot = await snapshotSkillPackage(bundleRoot, { allowNoSkills: true });
+      if (snapshot.fingerprint !== server.bundleFingerprint) throw new Error("The embedded bundle changed before review.");
+    }
+    const prepared = await preparePluginLaunch(server, effectiveRoot, process.env, { dataDir: effectiveData, projectDir, ...(server.isBundle && bundle ? { bundleValues: bundle.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, ...(server.bundleFieldScope ? { server: server.bundleFieldScope } : {}) }), bundlePaths: bundle.paths } : {}) });
     const fileIdentities: Launch["fileIdentities"] = [];
     const scripts = prepared.args.filter((arg) => path.isAbsolute(arg) && /\.(?:[cm]?js|py|exe|ps1|sh|bat|cmd|jar)$/i.test(arg));
     for (const file of new Set([prepared.executable.command, ...prepared.executable.prefix, ...scripts])) {
@@ -87,12 +98,12 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       fileIdentities.push({ path: file, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs });
     }
     const directoryIdentities: Launch["directoryIdentities"] = [];
-    for (const directory of new Set([entry.dataDir, projectDir, prepared.cwd])) {
+    for (const directory of new Set([effectiveData, projectDir, prepared.cwd])) {
       const info = await lstat(directory);
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("A plugin directory is unavailable or redirected.");
       directoryIdentities.push({ path: directory, dev: info.dev, ino: info.ino });
     }
-    launches.push({ pkg: entry.pkg, server, root: entry.root, dataDir: entry.dataDir, projectDir, prepared, fileIdentities, directoryIdentities });
+    launches.push({ pkg: entry.pkg, server, root: entry.root, dataDir: effectiveData, ...(bundleRoot ? { bundleRoot } : {}), projectDir, prepared, fileIdentities, directoryIdentities });
   }
   if (!launches.length && !remotes.length) throw new Error("No enabled plugin servers are available.");
   const startDetail = printable({ servers: [...launches.map(summary), ...remotes.map(({ pkg, server, endpoint, headers, oauthAvailable }) => ({ oauthSignedIn: oauthAvailable, plugin: pkg.name, server: server.name, transport: server.transport, endpoint: `${endpoint.origin}${endpoint.pathname}${endpoint.search ? "?[query hidden]" : ""}`, headerNames: Object.keys(headers), environmentNames: requiredEnvironmentNames(server) }))], note: "Local programs run with your user account and can access files or networks on startup. Remote connections send configured headers and may receive information during connection and tool calls. Remote services may continue processing after cancellation. Each tool call is reviewed. Header values and URL queries are hidden." });
@@ -104,6 +115,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
     if (snapshot.fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after review.`);
   }
   for (const launch of launches) {
+    if (launch.bundleRoot && (await snapshotSkillPackage(launch.bundleRoot, { allowNoSkills: true })).fingerprint !== launch.server.bundleFingerprint) throw new Error("The embedded bundle changed after review.");
     for (const file of launch.fileIdentities) {
       const info = await lstat(file.path).catch(() => { throw new Error("A reviewed plugin executable or script changed before startup."); });
       if (!info.isFile() || info.isSymbolicLink() || !equalFile(file, info)) throw new Error("A reviewed plugin executable or script changed before startup.");
@@ -141,6 +153,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       signal.throwIfAborted();
       const snapshot = await snapshotSkillPackage(launch.root, { allowNoSkills: true });
       if (snapshot.fingerprint !== launch.pkg.fingerprint) throw new Error("A plugin package changed before its server started.");
+      if (launch.bundleRoot && (await snapshotSkillPackage(launch.bundleRoot, { allowNoSkills: true })).fingerprint !== launch.server.bundleFingerprint) throw new Error("The embedded bundle changed before startup.");
       for (const file of launch.fileIdentities) {
         const info = await lstat(file.path).catch(() => { throw new Error("A plugin executable or script changed before its server started."); });
         if (!info.isFile() || info.isSymbolicLink() || !equalFile(file, info)) throw new Error("A plugin executable or script changed before its server started.");

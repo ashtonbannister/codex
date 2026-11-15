@@ -192,13 +192,25 @@ test("bundle import exposes protected settings and path selection", async ({ pag
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await installFakeDesktopBridge(page, { noProjects: true, complete: true }); await page.goto("/");
   await page.getByRole("button", { name: /^Settings/ }).click(); const dialog = page.getByRole("dialog", { name: "Workbench settings" });
-  await dialog.getByRole("tab", { name: "Plugins" }).click(); await dialog.getByRole("button", { name: "Import MCP bundle…" }).click();
+  await dialog.getByRole("tab", { name: "Plugins" }).click(); await dialog.getByRole("button", { name: "Import plugin archive…" }).click();
   await expect(dialog.getByText("Fixture bundle", { exact: true })).toBeVisible();
-  const token = dialog.getByLabel("API Token"); await expect(token).toHaveAttribute("type", "password"); await token.fill("synthetic-bundle-secret");
+  const token = dialog.getByLabel("API Token", { exact: true }); await expect(token).toHaveAttribute("type", "password"); await token.fill("synthetic-bundle-secret");
   await dialog.getByRole("button", { name: "Save API Token" }).click(); await expect(token).toHaveValue(""); await expect(dialog.getByText(/Saved securely/)).toBeVisible();
-  await dialog.getByRole("button", { name: "Browse Folders…" }).click(); await expect(dialog.getByLabel("Folders")).toHaveValue(/Synthetic/);
+  await dialog.getByRole("button", { name: "Browse Folders…" }).click(); await expect(dialog.getByLabel("Folders", { exact: true })).toHaveValue(/Synthetic/);
   await expect(dialog).not.toContainText("synthetic-bundle-secret"); await expect(page.locator("vite-error-overlay")).toHaveCount(0); expect(errors).toEqual([]);
   await page.screenshot({ path: "test-results/bundle-settings.png" });
+});
+
+test("same-named embedded settings remain distinct", async ({ page }) => {
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true, nestedBundles: true }); await page.goto("/");
+  await page.getByRole("button", { name: /^Settings/ }).click(); const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Plugins" }).click(); await dialog.getByRole("button", { name: "Import plugin archive…" }).click();
+  await dialog.getByLabel("Token (bundle_first)", { exact: true }).fill("synthetic-first"); await dialog.getByRole("button", { name: "Save Token (bundle_first)" }).click();
+  await expect(dialog.getByRole("group", { name: "Settings for bundle_first" }).getByText(/Saved securely/)).toBeVisible();
+  await expect(dialog.getByRole("group", { name: "Settings for bundle_second" }).getByText(/Saved securely/)).toHaveCount(0);
+  await dialog.getByLabel("Token (bundle_second)", { exact: true }).fill("synthetic-second"); await dialog.getByRole("button", { name: "Save Token (bundle_second)" }).click();
+  await expect(dialog.getByRole("group", { name: "Settings for bundle_second" }).getByText(/Saved securely/)).toBeVisible();
+  await page.screenshot({ path: "test-results/embedded-bundle-settings.png" });
 });
 
 test("settings enforce timeout bounds and apply appearance", async ({

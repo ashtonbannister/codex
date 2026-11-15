@@ -1,5 +1,6 @@
 export interface BundleField {
   key: string;
+  server?: string;
   type: "string" | "number" | "boolean" | "file" | "directory";
   title: string;
   description: string;
