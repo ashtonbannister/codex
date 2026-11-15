@@ -3,6 +3,7 @@ import { JSON_SCHEMA, load } from "js-yaml";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parseNamedArguments } from "./skill-arguments";
 import { removeOwnedTree } from "./owned-tree";
 import { withBundleArchive } from "./bundle-archive";
 import { matchingSkillReference, skillReferences, visibleSkill, type SelectedSkill } from "./skill-selection";
@@ -49,7 +50,8 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (header.model !== undefined) unsupported.push("Skill-specific model overrides are not supported.");
   if (header.hooks !== undefined) unsupported.push("Skill hooks are not supported.");
   if (header["disallowed-tools"] !== undefined) unsupported.push("Skill-specific tool restrictions are not supported.");
-  if (header.arguments !== undefined) unsupported.push("Named skill arguments are not supported.");
+  let namedArguments: string[] | undefined;
+  try { namedArguments = parseNamedArguments(header.arguments); } catch { unsupported.push("Invalid named skill arguments."); }
   if (header["allowed-tools"] !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
   const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
   if (/!`/.test(body)) unsupported.push("Automatic shell interpolation in skills is not supported.");
@@ -57,7 +59,7 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
   const disableModelInvocation = flag("disable-model-invocation", false), userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */

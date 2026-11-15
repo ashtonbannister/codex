@@ -2,6 +2,7 @@ import path from "node:path";
 import { JSON_SCHEMA, load } from "js-yaml";
 import type { PluginCommand, PluginPackage } from "../../shared/plugins";
 import type { PackageSnapshot } from "./skill-packages";
+import { parseNamedArguments } from "./skill-arguments";
 import { instructionSettings, type BundleDefinition, type BundleValue } from "./bundle-config";
 
 export interface CommandDefinition extends PluginCommand { body: string }
@@ -29,7 +30,7 @@ function decode(name: string, text: string, file: string | undefined, overrides:
       catch { unsupported.push("Command frontmatter could not be parsed."); }
     }
   }
-  const known = new Set(["description", "argument-hint", "disable-model-invocation", "user-invocable", "allowed-tools"]);
+  const known = new Set(["description", "argument-hint", "disable-model-invocation", "user-invocable", "allowed-tools", "arguments"]);
   if (Object.keys(metadata).some((key) => !known.has(key))) unsupported.push("This command uses unsupported frontmatter settings.");
   const flag = (value: unknown): boolean | undefined => {
     if (typeof value === "boolean") return value;
@@ -42,12 +43,14 @@ function decode(name: string, text: string, file: string | undefined, overrides:
   if (metadata["disable-model-invocation"] !== undefined && flag(metadata["disable-model-invocation"]) === undefined) unsupported.push("Invalid command invocation setting.");
   if (metadata["allowed-tools"] !== undefined || overrides.allowedTools !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
   if (Object.keys(overrides).some((key) => !["description", "argumentHint", "allowedTools"].includes(key))) unsupported.push("This command declares unsupported options.");
+  let namedArguments: string[] | undefined;
+  try { namedArguments = parseNamedArguments(metadata.arguments); } catch { unsupported.push("Invalid named command arguments."); }
   if (/!`/.test(body)) unsupported.push("Automatic shell interpolation in commands is not supported.");
   if (/\$\{(?:CLAUDE_SESSION_ID|CLAUDE_SKILL_DIR)/.test(body)) unsupported.push("This command uses unsupported context variables.");
   const description = overrides.description ?? metadata.description ?? ""; const argumentHint = overrides.argumentHint ?? metadata["argument-hint"];
   if (typeof description !== "string" || description.length > 800 || /\0/.test(description) || (argumentHint !== undefined && (typeof argumentHint !== "string" || argumentHint.length > 300 || /\0/.test(argumentHint)))) throw new Error("Invalid plugin command metadata.");
   if (!body.trim() || body.length > 48_000) unsupported.push("Command instructions are empty or too large to review.");
-  return { name, description: description.replace(/\s+/g, " ").trim(), ...(file ? { path: file } : {}), ...(typeof argumentHint === "string" ? { argumentHint: argumentHint.replace(/\s+/g, " ").trim() } : {}), unsupported, warnings, body };
+  return { ...(namedArguments ? { namedArguments } : {}), name, description: description.replace(/\s+/g, " ").trim(), ...(file ? { path: file } : {}), ...(typeof argumentHint === "string" ? { argumentHint: argumentHint.replace(/\s+/g, " ").trim() } : {}), unsupported, warnings, body };
 }
 export function parsePluginCommands(snapshot: PackageSnapshot, declaration: unknown): CommandDefinition[] {
   const result: CommandDefinition[] = []; const names = new Set<string>();
@@ -95,16 +98,22 @@ export function renderPluginCommand(command: CommandDefinition, input: string, l
   const args = splitArguments(input); let replaced = false;
   const roots: Record<string, string> = { CLAUDE_PLUGIN_ROOT: locations.root, CODEX_PLUGIN_ROOT: locations.root, PLUGIN_ROOT: locations.root, CLAUDE_PLUGIN_DATA: locations.data, CODEX_PLUGIN_DATA: locations.data, PLUGIN_DATA: locations.data, CLAUDE_PROJECT_DIR: locations.project, ...(locations.skillDir ? { CLAUDE_SKILL_DIR: locations.skillDir } : {}) };
   // One pass: values and arguments cannot introduce additional substitutions.
-  let output = command.body.replace(/(\\)?\$(ARGUMENTS(?:\[(\d+)\])?|\d+)|\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR|user_config\.[A-Za-z_][A-Za-z0-9_]*)\}/g, (whole, escaped: string | undefined, token: string | undefined, position: string | undefined, variable: string | undefined) => {
+  let output = command.body.replace(/(\\*)\$(ARGUMENTS\[\d+\]|[A-Za-z_][A-Za-z0-9_]*|\d+)|\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR|user_config\.[A-Za-z_][A-Za-z0-9_]*)\}/g, (whole, slashes: string | undefined, token: string | undefined, variable: string | undefined) => {
     if (variable) {
       if (!variable.startsWith("user_config.")) return roots[variable] ?? whole;
       const key = variable.slice("user_config.".length);
       if (!locations.config || !Object.hasOwn(locations.config, key)) throw new Error(`Plugin command setting ${key} is unavailable.`);
       return locations.config[key]!;
     }
-    if (escaped) return whole.slice(1);
-    if (token === "ARGUMENTS") { replaced = true; return input; }
-    const index = Number(position ?? token); if (index >= args.length) return whole; replaced = true; return args[index]!;
+    const indexed = /^ARGUMENTS\[(\d+)\]$/.exec(token ?? "");
+    const namedIndex = command.namedArguments?.indexOf(token ?? "") ?? -1;
+    const known = token === "ARGUMENTS" || !!indexed || /^\d+$/.test(token ?? "") || namedIndex >= 0;
+    if (!known) return whole;
+    if (slashes === "\\") return whole.slice(1);
+    const prefix = slashes ?? "";
+    if (token === "ARGUMENTS") { replaced = true; return prefix + input; }
+    if (namedIndex >= 0) { replaced = true; return prefix + (args[namedIndex] ?? ""); }
+    const index = Number(indexed?.[1] ?? token); if (index >= args.length) return whole; replaced = true; return prefix + args[index]!;
   });
   if (input && !replaced) output += `\n\nARGUMENTS: ${input}`;
   if (output.length > 60_000 || output.includes("\0")) throw new Error("The expanded plugin command is too large to review.");

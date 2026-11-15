@@ -54,3 +54,13 @@ test("plugin commands expand reviewed settings without exposing sensitive values
   const previewCommand = await store.previewCommand("/fixture:explain example", root, settings); assert.match(previewCommand!.content, /sensitive setting withheld/);
   await copies.dispose();
 });
+
+
+test("plugin command frontmatter supports named arguments", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-named-command-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(path.join(source, "commands"), { recursive: true }); await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" }));
+  await writeFile(path.join(source, "commands", "review.md"), "---\narguments: target format\n---\nReview $target as $format.");
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); assert.deepEqual(preview.commands![0]!.unsupported, []);
+  const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true); const copies = await store.prepareRun('/fixture:review "my file" json');
+  assert.equal(findPluginCommand('/fixture:review "my file" json', copies.packages, root)!.content, "Review my file as json."); await copies.dispose();
+});

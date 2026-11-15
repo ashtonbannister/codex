@@ -651,7 +651,7 @@ test("plugin skill settings are reviewed before provider access and secrets stay
 test("manual-only imported and plugin skills require explicit invocation and content approval", async (t) => {
   const reviews: Array<{ action: string; detail: string }> = []; let allow = true;
   const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return allow; });
-  const direct = path.join(root, "direct-manual"); await mkdir(direct); await writeFile(path.join(direct, "SKILL.md"), "---\nname: manual-direct\ndescription: Manual direct fixture\ndisable-model-invocation: true\n---\nReview $0. Full: $ARGUMENTS\n");
+  const direct = path.join(root, "direct-manual"); await mkdir(direct); await writeFile(path.join(direct, "SKILL.md"), "---\nname: manual-direct\ndescription: Manual direct fixture\ndisable-model-invocation: true\narguments: [target, second]\n---\nReview $target. Full: $ARGUMENTS\n");
   const directStore = new SkillPackageStore(dataDir); const directPreview = await directStore.preview(direct); await directStore.install(direct, directPreview.fingerprint);
   const source = path.join(root, "plugin-manual"); await mkdir(path.join(source, "skills", "manual"), { recursive: true }); await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" }));
   await writeFile(path.join(source, "skills", "manual", "SKILL.md"), "---\nname: manual-plugin\ndescription: Manual plugin fixture\ndisable-model-invocation: yes\n---\nInspect $0.\n");

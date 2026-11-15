@@ -84,3 +84,20 @@ test("provider copies omit uninvoked command instructions even when a skill is e
   const selected = await store.prepareRun("/fixture:review", "codex"); assert.match(await readFile(path.join(selected.packages[0]!.providerRoot!, "commands", "review.md"), "utf8"), /PRIVATE_UNINVOKED_COMMAND/);
   await assert.rejects(readFile(path.join(selected.packages[0]!.providerRoot!, "plugin.json")), { code: "ENOENT" }); await selected.verifyProviders(); await selected.dispose();
 });
+
+
+test("named skill arguments expand once for direct and plugin imports", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-named-skill-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(source);
+  await skill(source, "named", "arguments: [issue, branch, missing]\ndisable-model-invocation: true\n", String.raw`Issue $issue; branch $branch; missing <$missing>; escaped \$issue; unknown $other; indexed $ARGUMENTS[0].`);
+  await skill(source, "invalid", "arguments: [issue, issue]\n");
+  const store = new SkillPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.deepEqual(preview.skills.find((item) => item.name === "named")!.namedArguments, ["issue", "branch", "missing"]); assert.match(preview.skills.find((item) => item.name === "invalid")!.unsupported!.join(" "), /Invalid named/);
+  await store.install(source, preview.fingerprint); const run = await store.prepareRun('/named "two words" "$issue"');
+  const rendered = (await renderExplicitSkill(run.invoked[0]!, root)).content;
+  assert.match(rendered, /Issue two words; branch \$issue; missing <>; escaped \$issue; unknown \$other; indexed two words/); assert.doesNotMatch(rendered, /ARGUMENTS: /); await run.dispose();
+  const pluginSource = path.join(root, "plugin"); await mkdir(pluginSource); await writeFile(path.join(pluginSource, "plugin.json"), JSON.stringify({ name: "fixture" }));
+  await skill(pluginSource, "named", "arguments: issue branch\ndisable-model-invocation: true\n", "Issue $issue, branch $branch.");
+  const plugins = new PluginPackageStore(path.join(root, "data")); const plugin = await plugins.preview(pluginSource); const pkg = await plugins.install(pluginSource, plugin.fingerprint); await plugins.setEnabled(pkg.id, true);
+  const copied = await plugins.prepareRun('/fixture:named 42'); assert.match((await renderExplicitSkill(copied.invoked[0]!, root)).content, /Issue 42, branch \./); await copied.dispose();
+});

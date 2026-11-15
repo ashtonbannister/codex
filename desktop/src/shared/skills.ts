@@ -4,6 +4,7 @@ export interface SkillDescriptor {
   description: string;
   disableModelInvocation?: boolean;
   userInvocable?: boolean;
+  namedArguments?: string[];
   allowedProviders?: Array<"codex" | "claude" | "ollama">;
   unsupported?: string[];
   warnings?: string[];

@@ -3,6 +3,7 @@ export interface PluginCommand {
   description: string;
   path?: string;
   argumentHint?: string;
+  namedArguments?: string[];
   unsupported: string[];
   warnings: string[];
 }
