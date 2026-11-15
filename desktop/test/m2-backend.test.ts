@@ -693,6 +693,30 @@ test("custom Claude fork model is reviewed and used only by the isolated session
   assert.equal(run.status, "completed", run.error); assert.match(reviews[0]!.detail, /sonnet/); assert.match(reviews[0]!.detail, /effectiveTools/); assert.match(reviews[0]!.detail, /mcp__/); const fork = JSON.parse(reviews[1]!.detail) as { result: string }; assert.match(fork.result, /MODEL=sonnet/); assert.match(run.events.find((event) => event.kind === "message")!.text, /MODEL=parent-model/);
 });
 
+test("skill-level Claude model overrides are reviewed and scoped to the intended session", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; let allow = false;
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return allow; });
+  const source = path.join(root, "skill-model"); await mkdir(source);
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: modelled\ndescription: Fixture\nmodel: sonnet\n---\nReview $ARGUMENTS\n");
+  const store = new SkillPackageStore(dataDir); const preview = await store.preview(source); await store.install(source, preview.fingerprint);
+  const request = { projectId: project.id, provider: "claude" as const, model: "parent-model", mode: "plan" as const, prompt: "/modelled ECHO_PROMPT" };
+  const context = await service.previewContext(request); assert.ok(context.warnings.some((warning) => warning.includes("sonnet")));
+  const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(reviews[0]!.detail, /sonnet/); assert.ok(!denied.events.some((event) => event.kind === "message"));
+  allow = true; const run = await finishRun(service, (await service.startRun(request)).id); assert.equal(run.status, "completed", run.error); assert.equal(run.model, "sonnet"); assert.match(run.events.find((event) => event.kind === "message")!.text, /MODEL=sonnet/);
+  const other = path.join(root, "other-model"); await mkdir(other); await writeFile(path.join(other, "SKILL.md"), "---\nname: other-model\ndescription: Other\nmodel: opus\n---\nOther.\n"); const otherPreview = await store.preview(other); await store.install(other, otherPreview.fingerprint);
+  await assert.rejects(service.previewContext({ ...request, prompt: "$modelled $other-model" }), /conflicting parent models/);
+});
+
+test("fork skill model overrides agent model without changing the parent model", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return true; });
+  const source = path.join(root, "fork-skill-model"); await mkdir(path.join(source, "agents"), { recursive: true });
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: model-fork\ndescription: Fixture\ncontext: fork\nagent: reviewer\nmodel: opus\n---\nInspect $ARGUMENTS\n");
+  await writeFile(path.join(source, "agents", "reviewer.md"), "---\nname: reviewer\ndescription: Review\nmodel: haiku\n---\nReview.\n");
+  const store = new SkillPackageStore(dataDir); const preview = await store.preview(source); await store.install(source, preview.fingerprint);
+  const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "claude", model: "parent-model", mode: "plan", prompt: "/model-fork ECHO_PROMPT" })).id);
+  assert.equal(run.status, "completed", run.error); assert.equal(run.model, "parent-model"); assert.match(reviews[0]!.detail, /opus/); const fork = JSON.parse(reviews[1]!.detail) as { result: string; sourceModel: string }; assert.equal(fork.sourceModel, "opus"); assert.match(fork.result, /MODEL=opus/); assert.match(run.events.find((event) => event.kind === "message")!.text, /MODEL=parent-model/);
+});
+
 test("skill shell output is approved separately before provider sharing", async (t) => {
   const actions: string[] = []; const reviews: string[] = []; let mode: "deny-shell" | "deny-share" | "allow" = "deny-shell";
   const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { actions.push(request.action); reviews.push(request.detail); return mode === "allow" || (mode === "deny-share" && request.action === "skill-shell"); });

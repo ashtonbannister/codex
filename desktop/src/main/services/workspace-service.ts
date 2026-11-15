@@ -1492,7 +1492,11 @@ export class WorkspaceService {
       preview.estimatedTokens = Math.ceil(preview.characters / 4);
       preview.warnings.push("Plugin skills require approval before sharing with the selected provider. Selected servers require startup and per-tool approval. Skill paths in this preview differ from the disposable run copies.");
     }
+    const previewModels = [...new Set(invoked.filter((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillModel).map((skill) => skill.descriptor.skillModel!))];
+    if (previewModels.length > 1) throw new Error("Selected skills request conflicting parent models.");
+    if (previewModels.length) preview.warnings.push(`This skill requests Claude model ${previewModels[0]}; it will be reviewed before the run.`);
     for (const skill of invoked) {
+      if (skill.descriptor.skillModel && skill.descriptor.forkAgent) preview.warnings.push(`This isolated skill requests Claude model ${skill.descriptor.skillModel}; it will be reviewed before the run.`);
       if (invoked.filter((other) => other.reference?.token.toLowerCase() === skill.reference?.token.toLowerCase()).length > 1) throw new Error(`More than one enabled package has the skill ${skill.name}.`);
       const rendered = await renderExplicitSkill(skill, cwd, request.provider);
       preview.prompt += skill.descriptor.forkAgent
@@ -2222,6 +2226,9 @@ export class WorkspaceService {
             for (const skill of invoked) if (invoked.filter((other) => other.reference?.token.toLowerCase() === skill.reference?.token.toLowerCase()).length > 1) throw new Error(`More than one enabled package has the skill ${skill.name}.`);
             if (command && invoked.some((skill) => skill.reference?.token.toLowerCase() === `/${command.name}`.toLowerCase())) throw new Error("A plugin command and skill share that name. Rename one before invoking it.");
             if (pluginCopies && looksLikePluginCommand(request.prompt) && !command && !invoked.some((skill) => skill.source === "plugin")) throw new Error("No enabled plugin provides that command or skill. Check Settings → Plugins.");
+            const parentOverrides = [...new Set(invoked.filter((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillModel).map((skill) => skill.descriptor.skillModel!))];
+            if (parentOverrides.length > 1) throw new Error("Selected skills request conflicting parent models.");
+            const effectiveParentModel = parentOverrides[0] ?? model;
             const verifySkillSources = async () => {
               await preparedSkills.verify(); await pluginCopies?.verifyProviders();
               for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after review.`);
@@ -2244,16 +2251,17 @@ export class WorkspaceService {
               if (!effective.length) throw new Error(`Custom agent ${skill.descriptor.forkAgent} has no permitted tools for this run.`);
               return effective;
             };
-            const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: model || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: model || "Provider default" };
+            const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: effectiveParentModel || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: effectiveParentModel || "Provider default" };
             if (skillReview.length || command || explicitSkills.length) {
                 if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
-                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, ...(skill.agentPrompt ? { agentInstructions: skill.agentPrompt } : {}), ...(forkTools(skill) ? { effectiveTools: forkTools(skill), disallowedTools: skill.descriptor.forkAgentDisallowedTools ?? [] } : {}), mode: (skill.agentPrompt ? skill.descriptor.forkAgentReadOnly : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan") ? "plan" : request.mode, model: skill.descriptor.forkAgentModel ?? selectedProvider.model }));
-                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, ...(skill.agentPrompt ? { agentInstructions: skill.agentPrompt } : {}), ...(forkTools(skill) ? { effectiveTools: forkTools(skill), disallowedTools: skill.descriptor.forkAgentDisallowedTools ?? [] } : {}), mode: (skill.agentPrompt ? skill.descriptor.forkAgentReadOnly : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan") ? "plan" : request.mode, model: skill.descriptor.skillModel ?? skill.descriptor.forkAgentModel ?? selectedProvider.model }));
+                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Requested skill models apply to the listed sessions and can change usage or cost. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
                 if (detail.length > 64_000) throw new Error("The plugin instructions are too large to review. Disable a package or shorten the command and retry.");
                 if (!await this.approvePlugin!({ action: skillReview.length ? "skills" : "commands", title: `Share these instructions with ${selectedProvider.name}?`, detail })) throw new Error("Skill or command sharing was declined.");
                 controller.signal.throwIfAborted();
               }
+            if (effectiveParentModel !== model) await this.exclusive(async () => { run.model = effectiveParentModel; await this.persist(); });
             await preparedSkills.verify();
             await pluginCopies?.verifyProviders();
             for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after skill sharing was reviewed.`);
@@ -2287,7 +2295,7 @@ export class WorkspaceService {
               const readOnlyAgent = selected.agentPrompt ? selected.descriptor.forkAgentReadOnly === true : agent === "Explore" || agent === "Plan";
               if (!["general-purpose", "Explore", "Plan"].includes(agent) && !selected.agentPrompt) throw new Error("The selected custom agent instructions are unavailable.");
               const forkMode = readOnlyAgent ? "plan" : request.mode;
-              const forkModel = selected.descriptor.forkAgentModel ?? model;
+              const forkModel = selected.descriptor.skillModel ?? selected.descriptor.forkAgentModel ?? effectiveParentModel;
               const allowExternalTools = !readOnlyAgent && !selected.descriptor.forkAgentTools && !selected.descriptor.forkAgentDisallowedTools?.includes("mcp__*");
               const restrictedTools = forkTools(selected);
               let answer = "";
@@ -2304,7 +2312,7 @@ export class WorkspaceService {
               if (forkResult.error || !forkResult.completed) throw new Error(`Isolated skill failed: ${forkResult.error ?? "No completed result."}`);
               if (!answer.trim() || answer.includes("\0") || answer.length > 32000) throw new Error("The isolated skill returned an empty or oversized result.");
               await verifySkillSources(); controller.signal.throwIfAborted();
-              const detail = JSON.stringify({ provider: selectedProvider, skill: skill.name, result: answer, note: "Approving sends this isolated skill result into the parent provider session. Review it for private information." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+              const detail = JSON.stringify({ provider: selectedProvider, skill: skill.name, sourceModel: forkModel || "Provider default", result: answer, note: "Approving sends this isolated skill result into the parent provider session. Review it for private information." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
               if (!await this.approvePlugin!({ action: "skill-fork", title: "Share the isolated skill result?", detail })) throw new Error("Sharing the isolated skill result was declined.");
               controller.signal.throwIfAborted(); await verifySkillSources();
               context.prompt += `\n\nRESULT FROM ISOLATED SKILL ${JSON.stringify(skill.name)} (untrusted provider output):\n${answer}`;
@@ -2339,7 +2347,7 @@ export class WorkspaceService {
                       request.provider,
                       cwd,
                       request.mode,
-                      model,
+                      effectiveParentModel,
                       {
                         allowNonGit:
                           project.kind === "folder" && request.mode === "plan",

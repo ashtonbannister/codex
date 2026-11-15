@@ -55,7 +55,11 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
     try { flag("background", true); } catch { unsupported.push("Invalid fork background setting."); }
     warnings.push("Forked skills require explicit invocation and run in a separate provider session.");
   } else if (header.context !== undefined || header.agent !== undefined || header.background !== undefined) unsupported.push("This skill requests an unsupported context or agent.");
-  if (header.model !== undefined && header.model !== "inherit") unsupported.push("Skill-specific model overrides are not supported.");
+  let skillModel: string | undefined;
+  if (header.model !== undefined && header.model !== "inherit") {
+    if (typeof header.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(header.model)) { skillModel = header.model; warnings.push("This skill requests a Claude model override and requires explicit invocation."); }
+    else unsupported.push("This skill requests an invalid model override.");
+  }
   if (header.hooks !== undefined) unsupported.push("Skill hooks are not supported.");
   if (header["disallowed-tools"] !== undefined) unsupported.push("Skill-specific tool restrictions are not supported.");
   let namedArguments: string[] | undefined;
@@ -67,9 +71,9 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (requiresShell) warnings.push("Shell-generated context requires explicit invocation and command approval.");
   if (/\$\{user_config\./.test(body)) unsupported.push("This skill requires plugin settings.");
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
-  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent, userInvocable = flag("user-invocable", true);
+  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent || !!skillModel, userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(skillModel ? { skillModel } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */

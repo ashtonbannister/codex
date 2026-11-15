@@ -21,12 +21,14 @@ export function matchingSkillReference(skill: SkillDescriptor, packageName: stri
   return references.find((reference) => reference.name.toLowerCase() === skill.name.toLowerCase() && (source === "plugin" ? !!reference.namespace && reference.namespace.toLowerCase() === packageName.toLowerCase() : !reference.namespace));
 }
 export function visibleSkill(skill: SkillDescriptor, reference?: SkillReference, provider?: "codex" | "claude" | "ollama"): boolean {
+  if (skill.skillModel && provider !== "claude") return false;
   if (skill.forkAgentPath && (skill.forkAgentTools || skill.forkAgentDisallowedTools || skill.forkAgentModel) && provider !== "claude") return false;
   if (skill.unsupported?.length || (skill.allowedProviders && (!provider || !skill.allowedProviders.includes(provider)))) return false;
   return !skill.disableModelInvocation || (!!reference && skill.userInvocable !== false);
 }
 export async function renderExplicitSkill(selected: SelectedSkill, project: string, provider?: "codex" | "claude" | "ollama"): Promise<{ name: string; path: string; warnings: string[]; content: string }> {
   if (!selected.reference) throw new Error("No explicit skill was selected.");
+  if (selected.descriptor.skillModel && provider !== "claude") throw new Error(`The skill ${selected.name} requires Claude for its model override.`);
   if (selected.descriptor.forkAgentPath && (selected.descriptor.forkAgentTools || selected.descriptor.forkAgentDisallowedTools || selected.descriptor.forkAgentModel) && provider !== "claude") throw new Error(`The custom agent ${selected.descriptor.forkAgent} requires Claude for its tool allowlist or model.`);
   if (selected.descriptor.allowedProviders && (!provider || !selected.descriptor.allowedProviders.includes(provider))) throw new Error(`The skill ${selected.name} is not available for the selected provider.`);
   if (selected.descriptor.userInvocable === false) throw new Error(`The skill ${selected.name} cannot be invoked directly.`);

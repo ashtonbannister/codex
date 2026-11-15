@@ -14,6 +14,7 @@ export interface SkillDescriptor {
   forkAgentDisallowedTools?: string[];
   forkAgentModel?: string;
   forkModelInherit?: boolean;
+  skillModel?: string;
   allowedProviders?: Array<"codex" | "claude" | "ollama">;
   unsupported?: string[];
   warnings?: string[];

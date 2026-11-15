@@ -101,3 +101,14 @@ test("named skill arguments expand once for direct and plugin imports", async (t
   const plugins = new PluginPackageStore(path.join(root, "data")); const plugin = await plugins.preview(pluginSource); const pkg = await plugins.install(pluginSource, plugin.fingerprint); await plugins.setEnabled(pkg.id, true);
   const copied = await plugins.prepareRun('/fixture:named 42'); assert.match((await renderExplicitSkill(copied.invoked[0]!, root)).content, /Issue 42, branch \./); await copied.dispose();
 });
+
+
+test("skill model overrides require explicit Claude invocation", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-skill-model-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(source); await skill(source, "modelled", "model: sonnet\n"); await skill(source, "invalid-model", "model: '../bad model'\n");
+  const store = new SkillPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.equal(preview.skills.find((item) => item.name === "modelled")!.skillModel, "sonnet"); assert.equal(preview.skills.find((item) => item.name === "modelled")!.disableModelInvocation, true); assert.match(preview.skills.find((item) => item.name === "invalid-model")!.unsupported!.join(" "), /invalid model/);
+  await store.install(source, preview.fingerprint); const automatic = await store.prepareRun("ordinary", "claude"); assert.equal(automatic.review.length, 0); await automatic.dispose();
+  const unsupported = await store.prepareRun("/modelled", "codex"); await assert.rejects(renderExplicitSkill(unsupported.invoked[0]!, root, "codex"), /requires Claude/); await unsupported.dispose();
+  const supported = await store.prepareRun("/modelled", "claude"); assert.match((await renderExplicitSkill(supported.invoked[0]!, root, "claude")).content, /Synthetic/); await supported.dispose();
+});
