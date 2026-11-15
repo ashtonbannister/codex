@@ -22,7 +22,7 @@ test("parses Codex and Claude stdio servers without exposing env values", () => 
 test("retains disabled servers and reports unsupported restrictions", () => {
   const parsed = parsePluginMcp({ mcpServers: { remote: { type: "http", url: "https://example.invalid/mcp", enabled: false, oauth: { scopes: ["x"] } }, restricted: { command: "node", omit_tools_from: ["direct"], tools: { read: { output_token_limit: 4 } }, env_vars: [{ name: "TOKEN", source: "remote" }] } } });
   assert.equal(parsed[0]!.enabled, false);
-  assert.match(parsed[0]!.unsupported.join(" "), /Remote MCP/);
+  assert.match(parsed[0]!.unsupported.join(" "), /authentication/);
   assert.match(parsed[1]!.unsupported.join(" "), /direct tool exposure/);
   assert.match(parsed[1]!.unsupported.join(" "), /Per-tool/);
   assert.match(parsed[1]!.unsupported.join(" "), /Remote environment/);
@@ -91,4 +91,14 @@ test("Windows npx plugins resolve to Node and npm's script without a shell", { s
   assert.equal(path.basename(prepared.executable.command).toLowerCase(), "node.exe");
   assert.equal(path.basename(prepared.executable.prefix[0]!).toLowerCase(), "npx-cli.js");
   assert.deepEqual(prepared.args.slice(1), ["--no-install", "synthetic-tool"]);
+});
+
+
+test("remote MCP configuration accepts reviewed HTTPS or loopback and rejects unsafe endpoints", () => {
+  const [remote] = parsePluginMcp({ mcpServers: { remote: { type: "sse", url: "https://example.invalid/mcp", headers: { Authorization: "Bearer ${NOVA_TEST_TOKEN}" } } } });
+  assert.deepEqual(remote!.unsupported, []);
+  assert.deepEqual(pluginServerSummary(remote!).environmentNames, ["NOVA_TEST_TOKEN"]);
+  assert.doesNotMatch(JSON.stringify(pluginServerSummary(remote!)), /Bearer/);
+  for (const url of ["http://example.invalid/mcp", "http://localhost/mcp", "https://user:password@example.invalid/mcp", "file:///tmp/mcp"]) assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url } } }), /HTTPS/);
+  assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url: "https://example.invalid/mcp", headers: { Host: "other" } } } }), /header/);
 });

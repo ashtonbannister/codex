@@ -11,6 +11,7 @@ export interface PluginServerConfig {
   args: string[];
   cwd?: string;
   url?: string;
+  headers?: Record<string, string>;
   env: Record<string, string>;
   envVars: string[];
   enabledTools?: string[];
@@ -89,9 +90,24 @@ export function parsePluginMcp(value: unknown, options: { allowEmpty?: boolean }
     const omitToolsFrom = list(value.omit_tools_from, "tool exposure list", 3);
     if (omitToolsFrom.some((item) => !["direct", "deferred", "code_mode"].includes(item))) throw new Error("Unsupported plugin tool exposure restriction.");
     if (omitToolsFrom.includes("direct")) unsupported.push("This server forbids direct tool exposure, which Nova cannot currently honor.");
-    if (type !== "stdio") unsupported.push("Remote MCP connections are not yet supported.");
+    let headers: Record<string, string> | undefined;
+    if (type !== "stdio") {
+      let endpoint: URL;
+      try { endpoint = new URL(url!); } catch { throw new Error("Invalid plugin URL."); }
+      if (url!.includes("${") || endpoint.username || endpoint.password || endpoint.hash || !(endpoint.protocol === "https:" || (endpoint.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(endpoint.hostname)))) throw new Error("Remote plugins require HTTPS or a loopback HTTP URL without embedded credentials.");
+      if (args.length || cwd || Object.keys(env).length || envVars.length) unsupported.push("Local process settings cannot be applied to a remote server.");
+      if (value.headers !== undefined) {
+        headers = Object.create(null) as Record<string, string>;
+        for (const [key, rawHeader] of Object.entries(record(value.headers, "HTTP headers"))) {
+          if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(key) || /^(?:host|origin|content-length|connection|transfer-encoding|accept|content-type|mcp-session-id|mcp-protocol-version)$/i.test(key) || typeof rawHeader !== "string" || rawHeader.length > 4096 || /[\0\r\n]/.test(rawHeader)) throw new Error("Invalid plugin HTTP header.");
+          if (Object.keys(headers).some((entry) => entry.toLowerCase() === key.toLowerCase())) throw new Error("Duplicate plugin HTTP header.");
+          headers[key] = rawHeader;
+        }
+        if (Object.keys(headers).length > 32) throw new Error("Too many plugin HTTP headers.");
+      }
+    } else if (value.headers !== undefined) unsupported.push("HTTP headers cannot be applied to a local server.");
     if (value.oauth !== undefined || value.oauth_resource !== undefined || value.scopes !== undefined || value.auth !== undefined) unsupported.push("This server requires provider-specific authentication.");
-    if (value.http_headers !== undefined || value.env_http_headers !== undefined || value.headers !== undefined || value.headersHelper !== undefined || value.http_headers_helper !== undefined || value.bearer_token !== undefined || value.bearer_token_env_var !== undefined) unsupported.push("HTTP authentication or headers require explicit connection setup.");
+    if (value.http_headers !== undefined || value.env_http_headers !== undefined || value.headersHelper !== undefined || value.http_headers_helper !== undefined || value.bearer_token !== undefined || value.bearer_token_env_var !== undefined) unsupported.push("HTTP authentication or headers require explicit connection setup.");
     if (value.environment_id !== undefined && value.environment_id !== "local") unsupported.push("This server targets an external execution environment.");
     if (value.tools !== undefined && Object.keys(record(value.tools, "per-tool settings")).length) unsupported.push("Per-tool plugin settings are not yet supported.");
     if (value.required === true) unsupported.push("Required-server startup semantics are not yet supported.");
@@ -108,7 +124,7 @@ export function parsePluginMcp(value: unknown, options: { allowEmpty?: boolean }
     const known = new Set(["type", "command", "args", "cwd", "url", "env", "env_vars", "enabled", "required", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools", "omit_tools_from", "default_tools_approval_mode", "tools", "supports_parallel_tool_calls", "tool_input_schema_max_bytes", "startup_readiness", "oauth", "oauth_resource", "scopes", "auth", "http_headers", "env_http_headers", "headers", "headersHelper", "http_headers_helper", "bearer_token", "bearer_token_env_var", "environment_id", "timeout", "alwaysLoad"]);
     const unknown = Object.keys(value).filter((key) => !known.has(key));
     if (unknown.length) unsupported.push("This server has unrecognized settings that Nova cannot safely honor.");
-    return { name, transport: type as PluginServerConfig["transport"], enabled: value.enabled !== false, ...(command ? { command } : {}), args, ...(cwd ? { cwd } : {}), ...(url ? { url } : {}), env, envVars: [...new Set(envVars)], ...(enabledTools ? { enabledTools } : {}), disabledTools, omitToolsFrom, ...(startupTimeoutMs ? { startupTimeoutMs } : {}), ...(toolTimeoutMs ? { toolTimeoutMs } : {}), unsupported: [...new Set(unsupported)] };
+    return { name, transport: type as PluginServerConfig["transport"], enabled: value.enabled !== false, ...(command ? { command } : {}), args, ...(cwd ? { cwd } : {}), ...(url ? { url } : {}), ...(headers ? { headers } : {}), env, envVars: [...new Set(envVars)], ...(enabledTools ? { enabledTools } : {}), disabledTools, omitToolsFrom, ...(startupTimeoutMs ? { startupTimeoutMs } : {}), ...(toolTimeoutMs ? { toolTimeoutMs } : {}), unsupported: [...new Set(unsupported)] };
   });
 }
 
@@ -116,7 +132,7 @@ const ROOT_VARIABLES = new Set(["CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "PLUG
 const VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 export function requiredEnvironmentNames(server: PluginServerConfig): string[] {
   const names = new Set([...Object.keys(server.env), ...server.envVars]);
-  for (const value of [server.command, server.cwd, server.url, ...server.args, ...Object.values(server.env)]) {
+  for (const value of [server.command, server.cwd, server.url, ...server.args, ...Object.values(server.env), ...Object.values(server.headers ?? {})]) {
     if (!value) continue;
     for (const match of value.matchAll(VARIABLE)) if (!ROOT_VARIABLES.has(match[1]!)) names.add(match[1]!);
   }

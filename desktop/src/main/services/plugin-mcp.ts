@@ -6,6 +6,7 @@ import { snapshotSkillPackage } from "./skill-packages";
 import { preparePluginLaunch, requiredEnvironmentNames, type PluginServerConfig } from "./plugin-config";
 import { McpProcessError, McpStdioClient, type ImportedMcpTool } from "./mcp-stdio";
 import { startLocalMcp } from "./mcp-http";
+import { McpRemoteClient } from "./mcp-remote";
 
 type Json = Record<string, unknown>;
 type PreparedPackage = { pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[] };
@@ -18,7 +19,7 @@ interface Launch {
   prepared: Awaited<ReturnType<typeof preparePluginLaunch>>;
   fileIdentities: Array<{ path: string; dev: number; ino: number; size: number; mtimeMs: number }>;
 }
-interface Entry { client: McpStdioClient; pkg: PluginPackage; server: PluginServerConfig; tool: ImportedMcpTool }
+interface Entry { client: McpStdioClient | McpRemoteClient; pkg: PluginPackage; server: PluginServerConfig; tool: ImportedMcpTool }
 
 function redact(value: unknown, key = "", depth = 0): unknown {
   if (depth > 12) throw new Error("The plugin request is too deeply nested to review.");
@@ -51,13 +52,29 @@ const summary = (launch: Launch) => ({
   pluginDataDirectory: launch.dataDir, projectDirectory: launch.projectDir, environmentNames: requiredEnvironmentNames(launch.server), environmentOverrides: redact(launch.server.env),
 });
 
-/** Start only reviewed stdio servers and gate every tool call independently. */
+/** Start only reviewed servers and gate every tool call independently. */
 export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd()): Promise<{
   url: string; token: string; dispose(): Promise<void>;
 }> {
   signal.throwIfAborted();
   const launches: Launch[] = [];
+  const remotes: Array<{ pkg: PluginPackage; server: PluginServerConfig; root: string; endpoint: URL; headers: Record<string, string> }> = [];
   for (const entry of packages) for (const server of entry.servers) {
+    if (server.transport !== "stdio") {
+      if (!server.enabled || server.unsupported.length || !server.url) throw new Error("This remote plugin cannot be started with its current settings.");
+      const endpoint = new URL(server.url);
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(server.headers ?? {})) {
+        headers[key] = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+          const envKey = Object.keys(process.env).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
+          if (!envKey || process.env[envKey] === undefined) throw new Error(`The plugin requires the environment variable ${name}.`);
+          return process.env[envKey]!;
+        });
+        if (/\$\{|[\0\r\n]/.test(headers[key]!) || headers[key]!.length > 8192) throw new Error("Invalid remote plugin header value.");
+      }
+      remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers });
+      continue;
+    }
     const prepared = await preparePluginLaunch(server, entry.root, process.env, { dataDir: entry.dataDir, projectDir });
     const fileIdentities: Launch["fileIdentities"] = [];
     const scripts = prepared.args.filter((arg) => path.isAbsolute(arg) && /\.(?:[cm]?js|py|exe|ps1|sh|bat|cmd|jar)$/i.test(arg));
@@ -74,8 +91,8 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
     }
     launches.push({ pkg: entry.pkg, server, root: entry.root, dataDir: entry.dataDir, projectDir, prepared, fileIdentities, directoryIdentities });
   }
-  if (!launches.length) throw new Error("No enabled plugin servers are available.");
-  const startDetail = printable({ servers: launches.map(summary), note: "These programs run with your user account and can access files or networks as soon as they start. Each later tool call is separately reviewed. Sensitive-looking environment values are redacted; inherited values are not displayed." });
+  if (!launches.length && !remotes.length) throw new Error("No enabled plugin servers are available.");
+  const startDetail = printable({ servers: [...launches.map(summary), ...remotes.map(({ pkg, server, endpoint, headers }) => ({ plugin: pkg.name, server: server.name, transport: server.transport, endpoint: `${endpoint.origin}${endpoint.pathname}${endpoint.search ? "?[query hidden]" : ""}`, headerNames: Object.keys(headers), environmentNames: requiredEnvironmentNames(server) }))], note: "Local programs run with your user account and can access files or networks on startup. Remote connections send configured headers and may receive information during connection and tool calls. Remote services may continue processing after cancellation. Each tool call is reviewed. Header values and URL queries are hidden." });
   if (!(await approve({ action: "start", title: "Start selected plugin servers?", detail: startDetail }))) throw new Error("Plugin startup was declined.");
   signal.throwIfAborted();
   // Revalidate reviewed package bytes and executable identities after the dialog.
@@ -93,7 +110,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== directory.dev || info.ino !== directory.ino || (process.platform === "win32" ? (await realpath(directory.path)).toLowerCase() !== path.resolve(directory.path).toLowerCase() : await realpath(directory.path) !== path.resolve(directory.path))) throw new Error("A reviewed plugin directory changed before startup.");
     }
   }
-  const clients: McpStdioClient[] = [];
+  const clients: Array<McpStdioClient | McpRemoteClient> = [];
   const entries = new Map<string, Entry>();
   const definitions: Json[] = [];
   let active = false;
@@ -101,6 +118,20 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
   const closeClients = async () => {
     const results = await Promise.all(clients.map(async (client) => { try { return await client.close(); } catch { return false; } }));
     if (results.some((result) => !result)) throw new McpProcessError("A plugin server's termination could not be confirmed. Inspect its processes before continuing.", true);
+  };
+  const registerTools = (pkg: PluginPackage, server: PluginServerConfig, client: McpStdioClient | McpRemoteClient, tools: ImportedMcpTool[]) => {
+    for (const tool of tools) {
+        if (server.enabledTools && !server.enabledTools.includes(tool.name)) continue;
+        if (server.disabledTools.includes(tool.name)) continue;
+        const hash = createHash("sha256").update(JSON.stringify([pkg.id, server.name, tool.name])).digest("hex").slice(0, 16);
+        const alias = `p_${hash}_${tool.name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40)}`;
+        if (entries.has(alias)) throw new Error("Plugin tool names collided.");
+        entries.set(alias, { client, pkg: pkg, server: server, tool });
+        const definition = { name: alias, description: `[${pkg.name} / ${server.name}] ${tool.description ?? "Imported plugin tool."}`, inputSchema: tool.inputSchema, ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}) };
+        definitionBytes += Buffer.byteLength(JSON.stringify(definition));
+        if (definitions.length >= 1024 || definitionBytes > 8 * 1024 * 1024) throw new Error("The enabled plugin tool catalog exceeds Nova's size limit.");
+        definitions.push(definition);
+      }
   };
   try {
     for (const launch of launches) {
@@ -121,18 +152,19 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       const deadline = Date.now() + timeout;
       await client.initialize(timeout);
       const tools = await client.listTools(Math.max(1, deadline - Date.now()));
-      for (const tool of tools) {
-        if (launch.server.enabledTools && !launch.server.enabledTools.includes(tool.name)) continue;
-        if (launch.server.disabledTools.includes(tool.name)) continue;
-        const hash = createHash("sha256").update(JSON.stringify([launch.pkg.id, launch.server.name, tool.name])).digest("hex").slice(0, 16);
-        const alias = `p_${hash}_${tool.name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40)}`;
-        if (entries.has(alias)) throw new Error("Plugin tool names collided.");
-        entries.set(alias, { client, pkg: launch.pkg, server: launch.server, tool });
-        const definition = { name: alias, description: `[${launch.pkg.name} / ${launch.server.name}] ${tool.description ?? "Imported plugin tool."}`, inputSchema: tool.inputSchema, ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}) };
-        definitionBytes += Buffer.byteLength(JSON.stringify(definition));
-        if (definitions.length >= 1024 || definitionBytes > 8 * 1024 * 1024) throw new Error("The enabled plugin tool catalog exceeds Nova's size limit.");
-        definitions.push(definition);
-      }
+      registerTools(launch.pkg, launch.server, client, tools);
+    }
+    for (const remote of remotes) {
+      signal.throwIfAborted();
+      const snapshot = await snapshotSkillPackage(remote.root, { allowNoSkills: true });
+      if (snapshot.fingerprint !== remote.pkg.fingerprint) throw new Error("A plugin package changed before its server connected.");
+      const client = new McpRemoteClient(remote.endpoint, remote.server.transport as "http" | "sse", remote.headers, signal);
+      clients.push(client);
+      const timeout = remote.server.startupTimeoutMs ?? 30_000;
+      const deadline = Date.now() + timeout;
+      await client.initialize(timeout);
+      const tools = await client.listTools(Math.max(1, deadline - Date.now()));
+      registerTools(remote.pkg, remote.server, client, tools);
     }
     if (!definitions.length) throw new Error("The enabled plugin servers exposed no allowed tools.");
     const catalog = [...entries.values()].map((entry) => `${entry.pkg.name} / ${entry.server.name} / ${entry.tool.name}`);
@@ -147,7 +179,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
         if (active) throw new Error("Another plugin action is awaiting approval or running.");
         active = true;
         try {
-          const detail = printable({ plugin: entry.pkg.name, server: entry.server.name, tool: entry.tool.name, arguments: redact(args), note: "Sensitive-looking values are redacted. The plugin server runs with your user account." });
+          const detail = printable({ plugin: entry.pkg.name, server: entry.server.name, tool: entry.tool.name, arguments: redact(args), note: "Sensitive-looking values are redacted. Local plugin servers run with your user account; remote servers receive these arguments and may continue after cancellation." });
           if (!(await approve({ action: "call", title: `Run ${entry.tool.name}?`, detail }))) throw new Error("Plugin tool call was declined.");
           requestSignal.throwIfAborted();
           return await entry.client.call(entry.tool.name, args, requestSignal, entry.server.toolTimeoutMs);

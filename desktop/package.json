@@ -1,6 +1,6 @@
 {
   "name": "nova-workbench",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "private": true,
   "description": "An independent, Windows-first desktop workbench for Codex, Claude Code, and local coding agents.",
   "author": "Inkform Labs",
@@ -24,6 +24,7 @@
     "pack:dir": "npm run build && electron-builder --dir --publish never"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "lucide-react": "1.72.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
@@ -55,11 +56,18 @@
       "package.json",
       "LICENSE",
       "NOTICE",
+      "THIRD-PARTY-LICENSES/**/*",
       "!node_modules/@microsoft/winappcli/**"
     ],
     "extraResources": [
-      { "from": "node_modules/@microsoft/winappcli/bin/win-x64", "to": "winapp" },
-      { "from": "node_modules/@microsoft/winappcli/LICENSE", "to": "licenses/winappcli-LICENSE" }
+      {
+        "from": "node_modules/@microsoft/winappcli/bin/win-x64",
+        "to": "winapp"
+      },
+      {
+        "from": "node_modules/@microsoft/winappcli/LICENSE",
+        "to": "licenses/winappcli-LICENSE"
+      }
     ],
     "asar": true,
     "win": {

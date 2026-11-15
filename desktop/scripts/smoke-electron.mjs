@@ -60,7 +60,7 @@ const launch = async () => {
     dialog.showMessageBox = async (...args) => {
       const options = args.at(-1);
       if (options?.title !== "Read this Codex import source?" ||
-        !options.detail?.includes(home) || options.buttons?.[1] !== "Read import source")
+        !options.detail?.includes(JSON.stringify(home)) || options.buttons?.[1] !== "Read import source")
         throw new Error("Unexpected native confirmation in isolated import smoke test.");
       confirmations.push(options.title);
       return { response: 1, checkboxChecked: false };
@@ -93,14 +93,24 @@ try {
   assert.equal(snapshot.state.verifications.length, 0);
   await page.evaluate(async (home) => {
     const value = await window.workbench.getSnapshot();
-    await window.workbench.updateSettings({
+    const settings = {
       ...value.state.settings,
       theme: "light",
       codexHome: home,
       localProvider: "custom",
       localBaseUrl: "http://127.0.0.1:8080/v1",
       localProtocol: "chat-completions",
-    });
+    };
+    // The initial Codex model discovery shares the account-operation gate.
+    // Wait for that bounded startup operation instead of racing its worker.
+    const deadline = Date.now() + 30_000;
+    while (true) {
+      try { await window.workbench.updateSettings(settings); break; }
+      catch (error) {
+        if (!String(error).includes("Provider account work is active") || Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
   }, codexHome);
   await page.getByRole("button", { name: "Codex library", exact: true }).click();
   await page.getByRole("button", { name: "Read Codex import source", exact: true }).waitFor();
