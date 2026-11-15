@@ -88,9 +88,9 @@ test("plugin gateway reviews and exposes a large paginated catalog", async (t) =
 
 
 test("remote MCP plugin requires connection, catalog and call approvals and keeps headers private", async (t) => {
-  let requests = 0; let calls = 0; const observed: string[] = [];
+  let requests = 0; let calls = 0; const observed: string[] = []; const literalHeaders: string[] = [];
   const server = createServer(async (request, response) => {
-    requests++; observed.push(request.headers.authorization ?? "");
+    requests++; observed.push(request.headers.authorization ?? ""); literalHeaders.push(String(request.headers["x-literal"] ?? ""));
     if (request.method !== "POST") { response.writeHead(405).end(); return; }
     let data = ""; for await (const part of request) data += part;
     const message = JSON.parse(data);
@@ -107,11 +107,13 @@ test("remote MCP plugin requires connection, catalog and call approvals and keep
   const address = server.address(); if (!address || typeof address === "string") throw new Error("No test port");
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-remote-plugin-"));
   const source = path.join(root, "source"); await mkdir(source);
-  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "http", startup_timeout_sec: 5, url: `http://127.0.0.1:${address.port}/mcp?private=synthetic-query` } } }));
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "portable-fixture" }));
+  await writeFile(path.join(source, "mcp.json"), JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", mcpServers: { remote: { type: "streamable-http", startup_timeout_sec: 5, url: `http://127.0.0.1:${address.port}/mcp?private=synthetic-query`, http_headers: { "X-Literal": "${NOT_EXPANDED}" }, extensions: { "com.openai": { auth: { type: "api_key", headerScheme: "bearer" } } } } } }));
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
   const copies = await store.prepareRun();
   t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
-  await assert.rejects(startPluginMcp(copies.packages, async () => false, new AbortController().signal), /declined/);
+  await assert.rejects(startPluginMcp(copies.packages, async () => true, new AbortController().signal), /requires a bearer token/);
+  await assert.rejects(startPluginMcp(copies.packages, async () => false, new AbortController().signal, process.cwd(), () => "synthetic-test-secret"), /declined/);
   assert.equal(requests, 0);
   const approvals: Array<{ action: string; detail: string }> = []; let allow = false;
   const gateway = await startPluginMcp(copies.packages, async (request) => { approvals.push(request); return request.action !== "call" || allow; }, new AbortController().signal, process.cwd(), (identity) => {
@@ -124,7 +126,7 @@ test("remote MCP plugin requires connection, catalog and call approvals and keep
   const list = await send(1, "tools/list"); const name = list.result.tools[0].name;
   assert.equal((await send(2, "tools/call", { name, arguments: { message: "hello" } })).result.isError, true); assert.equal(calls, 0);
   allow = true; assert.equal((await send(3, "tools/call", { name, arguments: { message: "hello" } })).result.content[0].text, "hello");
-  assert.equal(calls, 1); assert.ok(observed.every((value) => value === "Bearer synthetic-test-secret"));
+  assert.equal(calls, 1); assert.ok(observed.every((value) => value === "Bearer synthetic-test-secret")); assert.ok(literalHeaders.every((value) => value === "${NOT_EXPANDED}"));
   assert.deepEqual(approvals.map((item) => item.action), ["start", "discover", "call", "call"]);
 });
 
@@ -168,4 +170,32 @@ test("legacy SSE remote transport connects and calls a synthetic tool", async (t
   assert.equal(tools[0]!.name, "echo");
   const result = await client.call("echo", {}, new AbortController().signal, 3000);
   assert.equal((result.content as any[])[0].text, "sse works");
+});
+
+
+test("Codex bearer environment variable reaches only the approved remote server", async (t) => {
+  const previous = process.env.NOVA_PLUGIN_TEST_BEARER; process.env.NOVA_PLUGIN_TEST_BEARER = "synthetic-env-token";
+  t.after(() => { if (previous === undefined) delete process.env.NOVA_PLUGIN_TEST_BEARER; else process.env.NOVA_PLUGIN_TEST_BEARER = previous; });
+  const seen: string[] = [];
+  const server = createServer(async (request, response) => {
+    seen.push(request.headers.authorization ?? "");
+    if (request.method !== "POST") { response.writeHead(405).end(); return; }
+    let data = ""; for await (const part of request) data += part;
+    const message = JSON.parse(data);
+    if (message.id === undefined) { response.writeHead(202).end(); return; }
+    const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "synthetic", version: "1" } } : { tools: [{ name: "read", inputSchema: { type: "object" } }] };
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("No test port");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-plugin-env-")); const source = path.join(root, "source"); await mkdir(source);
+  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { remote: { url: `http://127.0.0.1:${address.port}/mcp`, bearer_token_env_var: "NOVA_PLUGIN_TEST_BEARER" } } }));
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const copies = await store.prepareRun(); t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+  const approvals: string[] = [];
+  const gateway = await startPluginMcp(copies.packages, async (request) => { approvals.push(request.detail); return true; }, new AbortController().signal);
+  t.after(async () => { await gateway.dispose(); });
+  assert.ok(seen.length > 0); assert.ok(seen.every((header) => header === "Bearer synthetic-env-token"));
+  assert.match(approvals[0]!, /NOVA_PLUGIN_TEST_BEARER/); assert.doesNotMatch(approvals.join(" "), /synthetic-env-token/);
 });

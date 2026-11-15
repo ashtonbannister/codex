@@ -63,7 +63,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
     if (server.transport !== "stdio") {
       if (!server.enabled || server.unsupported.length || !server.url) throw new Error("This remote plugin cannot be started with its current settings.");
       const endpoint = new URL(server.url);
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...server.literalHeaders };
       for (const [key, value] of Object.entries(server.headers ?? {})) {
         headers[key] = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
           const envKey = Object.keys(process.env).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
@@ -72,11 +72,19 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
         });
         if (/\$\{|[\0\r\n]/.test(headers[key]!) || headers[key]!.length > 8192) throw new Error("Invalid remote plugin header value.");
       }
+      if (server.bearerTokenEnvVar) {
+        const name = server.bearerTokenEnvVar;
+        const envKey = Object.keys(process.env).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
+        const value = envKey ? process.env[envKey] : undefined;
+        if (!value || !/^[\x21-\x7e]{1,4096}$/.test(value)) throw new Error(`The plugin requires a valid bearer token in the environment variable ${name}.`);
+        headers.Authorization = `Bearer ${value}`;
+      }
       const savedToken = credential({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, server: server.name });
       if (savedToken) {
         if (Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This server already configures an Authorization header.");
         headers.Authorization = `Bearer ${savedToken}`;
       }
+      if (server.authMode === "bearer" && !Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This plugin requires a bearer token. Save one in Settings → Plugins.");
       remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers });
       continue;
     }

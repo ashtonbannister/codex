@@ -1,4 +1,4 @@
-# Nova Workbench feature coverage — 0.5.10
+# Nova Workbench feature coverage — 0.5.11
 
 This records what this application implements, not everything present in a vendor's desktop app. **Implemented** means there is a working code path and an explicit failure path; it does not mean a live account, installed model, or proprietary UI has been tested on the user's machine. Consult the matching commit's GitHub Actions results for automated evidence.
 
@@ -42,7 +42,7 @@ These are application gaps, not promises that every vendor exposes an interchang
 
 | Capability | Current status |
 | --- | --- |
-| Remote plugin MCP tools | Imported HTTP and legacy SSE servers support static headers, environment references, or Windows-encrypted bearer tokens, HTTPS or loopback HTTP, and per-run connection, catalog and call reviews | Interactive OAuth and host-specific connectors are not implemented; cancellation cannot guarantee remote work stops |
+| Remote plugin MCP tools | Portable mcp.json and imported HTTP and legacy SSE servers support literal headers, bearer environment variables, or Windows-encrypted bearer tokens, HTTPS or loopback HTTP, and per-run connection, catalog and call reviews | Interactive OAuth and host-specific connectors are not implemented; cancellation cannot guarantee remote work stops |
 | General provider approval center | Not implemented; Nova's desktop and imported local-plugin gateways separately ask for approval on every request |
 | Autonomous multi-agent teams, delegation and automatic model routing | Not implemented |
 | Scheduled/background automations, goals, queues and proactive tasks | Not implemented; existing native state is inventory-only |

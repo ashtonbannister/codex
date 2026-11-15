@@ -140,3 +140,16 @@ test("previously imported remote servers refresh their supported status without 
   await assert.rejects(store.credentialIdentity(pkg.id, "remote"), /changed/);
   assert.deepEqual(await store.credentialIdentity(pkg.id, "remote", true), identity);
 });
+
+
+test("portable plugin uses mcp.json and its root overlay rather than a legacy fallback", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-portable-plugin-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+  const source = path.join(root, "source"); await mkdir(path.join(source, ".codex-plugin"), { recursive: true });
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "portable", extensions: { "com.openai": { hooks: "./hooks.json" } } }));
+  await writeFile(path.join(source, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "legacy", mcpServers: { legacy: { command: "legacy" } } }));
+  await writeFile(path.join(source, "mcp.json"), JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", mcpServers: { docs: { type: "streamable-http", url: "https://example.invalid/mcp", extensions: { "com.openai": { auth: { type: "none" } } } } } }));
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.equal(preview.name, "portable"); assert.deepEqual(preview.servers.map((server) => server.name), ["docs"]); assert.equal(preview.servers[0]!.transport, "http");
+  assert.match(preview.warnings.join(" "), /hooks/);
+});

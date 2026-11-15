@@ -102,3 +102,19 @@ test("remote MCP configuration accepts reviewed HTTPS or loopback and rejects un
   for (const url of ["http://example.invalid/mcp", "http://localhost/mcp", "https://user:password@example.invalid/mcp", "file:///tmp/mcp"]) assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url } } }), /HTTPS/);
   assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url: "https://example.invalid/mcp", headers: { Host: "other" } } } }), /header/);
 });
+
+
+test("parses portable streamable HTTP, declared auth, and Codex literal headers safely", () => {
+  const parsed = parsePluginMcp({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", mcpServers: {
+    token: { type: "streamable-http", url: "https://example.invalid/mcp", bearer_token_env_var: "DEMO_TOKEN", http_headers: { "X-Literal": "${NOT_EXPANDED}" }, extensions: { "com.openai": { auth: { type: "api_key", headerScheme: "bearer" } } } },
+    public: { type: "streamable-http", url: "https://example.invalid/public", extensions: { "com.openai": { auth: { type: "none" } } } },
+    oauth: { type: "streamable-http", url: "https://example.invalid/private", extensions: { "com.openai": { auth: { type: "oauth" } } } },
+  } });
+  assert.equal(parsed[0]!.transport, "http"); assert.equal(parsed[0]!.authMode, "bearer"); assert.equal(parsed[0]!.literalHeaders!["X-Literal"], "${NOT_EXPANDED}");
+  assert.deepEqual(pluginServerSummary(parsed[0]!).environmentNames, ["DEMO_TOKEN"]);
+  assert.equal(pluginServerSummary(parsed[0]!).supportsCredential, false);
+  assert.equal(pluginServerSummary(parsed[1]!).supportsCredential, false);
+  assert.match(parsed[2]!.unsupported.join(" "), /authentication/);
+  assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url: "https://example.invalid", bearer_token_env_var: "TOKEN", http_headers: { authorization: "literal" } } } }), /conflicting/);
+  assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url: "https://example.invalid", headers: { "X-Token": "a" }, http_headers: { "x-token": "b" } } } }), /Duplicate/);
+});

@@ -30,16 +30,29 @@ function manifestPath(value: string): string {
 }
 
 export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; warnings: string[] } {
-  const manifests = snapshot.files.filter((file) => [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"].includes(file.path.toLowerCase()));
-  const defaultConfig = snapshot.files.some((file) => file.path.toLowerCase() === ".mcp.json") ? parsePluginMcp(readJson(snapshot, ".mcp.json"), { allowEmpty: true }) : [];
+  const allManifests = snapshot.files.filter((file) => [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"].includes(file.path.toLowerCase()));
+  const portable = snapshot.files.some((file) => file.path.toLowerCase() === "plugin.json") && snapshot.files.some((file) => file.path.toLowerCase() === "mcp.json");
+  const manifests = portable ? allManifests.filter((file) => file.path.toLowerCase() !== ".codex-plugin/plugin.json") : allManifests;
+  const defaultFile = portable ? "mcp.json" : ".mcp.json";
+  const defaultConfig = snapshot.files.some((file) => file.path.toLowerCase() === defaultFile) ? parsePluginMcp(readJson(snapshot, defaultFile), { allowEmpty: true }) : [];
   const variants: Array<Map<string, PluginServerConfig>> = [];
   const warnings = new Set<string>();
+  if (portable && snapshot.files.some((file) => file.path.toLowerCase() === ".mcp.json")) warnings.add("The portable mcp.json is used; a legacy .mcp.json is loaded only if explicitly declared by the selected overlay.");
   const skillRoots = new Set<string>(["skills"]);
   if (!manifests.length) skillRoots.add(".");
   let name = fallbackName;
   let bundleNumber = 0;
   for (const file of manifests) {
-    const manifest = object(readJson(snapshot, file.path));
+    let manifest = object(readJson(snapshot, file.path));
+    if (portable && file.path.toLowerCase() === "plugin.json") {
+      const extensions = manifest.extensions === undefined ? {} : object(manifest.extensions);
+      const inline = extensions["com.openai"];
+      const fallback = allManifests.find((entry) => entry.path.toLowerCase() === ".codex-plugin/plugin.json");
+      const overlay = inline !== undefined ? object(inline) : fallback ? object(readJson(snapshot, fallback.path)) : {};
+      if (Object.keys(extensions).some((key) => key !== "com.openai")) warnings.add("Other host-specific plugin extensions are not loaded by Nova.");
+      manifest = { ...overlay, ...manifest, mcpServers: overlay.mcpServers ?? manifest.mcpServers, skills: manifest.skills ?? overlay.skills };
+      for (const field of ["onboardingSkill", "interface"]) if (overlay[field] !== undefined && field === "onboardingSkill") warnings.add("Plugin onboarding is not automatically invoked by Nova.");
+    }
     if (typeof manifest.name === "string" && manifest.name.trim() && manifest.name.length <= 128 && !/[\0\r\n]/.test(manifest.name)) name = manifest.name;
     if (manifest.skills !== undefined) {
       const declaredSkills = Array.isArray(manifest.skills) ? manifest.skills : [manifest.skills];
