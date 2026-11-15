@@ -5,7 +5,7 @@ import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { PluginPackage } from "../../shared/plugins";
 import { snapshotSkillPackage } from "./skill-packages";
-import { preparePluginLaunch, prepareRemotePluginHeaders, requiredEnvironmentNames, type PluginServerConfig } from "./plugin-config";
+import { preparePluginLaunch, prepareRemotePluginHeaders, remoteHeaderSettings, requiredEnvironmentNames, type PluginServerConfig } from "./plugin-config";
 import { McpProcessError, McpStdioClient, type ImportedMcpTool } from "./mcp-stdio";
 import { startLocalMcp } from "./mcp-http";
 import { McpRemoteClient } from "./mcp-remote";
@@ -61,12 +61,13 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
 }> {
   signal.throwIfAborted();
   const launches: Launch[] = [];
-  const remotes: Array<{ pkg: PluginPackage; server: PluginServerConfig; root: string; endpoint: URL; headers: Record<string, string>; oauthAvailable: boolean }> = [];
+  const remotes: Array<{ pkg: PluginPackage; server: PluginServerConfig; root: string; endpoint: URL; headers: Record<string, string>; oauthAvailable: boolean; settingReview: Array<{ name: string; value: string }> }> = [];
   for (const entry of packages) for (const server of entry.servers) {
     if (server.transport !== "stdio") {
       if (!server.enabled || server.unsupported.length || !server.url) throw new Error("This remote plugin cannot be started with its current settings.");
       const endpoint = new URL(server.url);
-      const headers = prepareRemotePluginHeaders(server, process.env);
+      const configured = remoteHeaderSettings(server, bundle?.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint }) ?? {}, bundle?.paths ?? {});
+      const headers = prepareRemotePluginHeaders(server, process.env, configured.values);
       const savedToken = credential({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, server: server.name });
       if (savedToken) {
         if (Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This server already configures an Authorization header.");
@@ -76,7 +77,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       if (oauthAvailable && Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This plugin has conflicting saved authentication methods.");
       if (server.authMode === "oauth" && !oauthAvailable) throw new Error("Sign in to this plugin in Settings → Plugins before starting a run.");
       if (server.authMode === "bearer" && !Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This plugin requires a bearer token. Save one in Settings → Plugins.");
-      remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers, oauthAvailable });
+      remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers, oauthAvailable, settingReview: configured.review });
       continue;
     }
     const bundleRoot = server.bundleRoot;
@@ -106,7 +107,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
     launches.push({ pkg: entry.pkg, server, root: entry.root, dataDir: effectiveData, ...(bundleRoot ? { bundleRoot } : {}), projectDir, prepared, fileIdentities, directoryIdentities });
   }
   if (!launches.length && !remotes.length) throw new Error("No enabled plugin servers are available.");
-  const startDetail = printable({ servers: [...launches.map(summary), ...remotes.map(({ pkg, server, endpoint, headers, oauthAvailable }) => ({ oauthSignedIn: oauthAvailable, plugin: pkg.name, server: server.name, transport: server.transport, endpoint: `${endpoint.origin}${endpoint.pathname}${endpoint.search ? "?[query hidden]" : ""}`, headerNames: Object.keys(headers), environmentNames: requiredEnvironmentNames(server) }))], note: "Local programs run with your user account and can access files or networks on startup. Remote connections send configured headers and may receive information during connection and tool calls. Remote services may continue processing after cancellation. Each tool call is reviewed. Header values and URL queries are hidden." });
+  const startDetail = printable({ servers: [...launches.map(summary), ...remotes.map(({ pkg, server, endpoint, headers, oauthAvailable, settingReview }) => ({ ...(settingReview.length ? { settings: settingReview } : {}), oauthSignedIn: oauthAvailable, plugin: pkg.name, server: server.name, transport: server.transport, endpoint: `${endpoint.origin}${endpoint.pathname}${endpoint.search ? "?[query hidden]" : ""}`, headerNames: Object.keys(headers), environmentNames: requiredEnvironmentNames(server) }))], note: "Local programs run with your user account and can access files or networks on startup. Remote connections send configured headers and may receive information during connection and tool calls. Remote services may continue processing after cancellation. Each tool call is reviewed. Header values and URL queries are hidden." });
   if (!(await approve({ action: "start", title: "Start selected plugin servers?", detail: startDetail }))) throw new Error("Plugin startup was declined.");
   signal.throwIfAborted();
   // Revalidate reviewed package bytes and executable identities after the dialog.

@@ -43,10 +43,11 @@ test("OAuth sign-in validates state, uses PKCE, encrypts the grant, and refreshe
   t.after(() => { server.closeAllConnections(); server.close(); });
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-oauth-"));
   const source = path.join(root, "source"); await mkdir(source);
-  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "synthetic-oauth" }));
-  await writeFile(path.join(source, "mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "streamable-http", url: `${origin}/mcp`, http_headers: { "X-Resource": "synthetic-tenant" }, extensions: { "com.openai": { auth: { type: "oauth", client: { mode: "dcr" } } } } } } }));
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "synthetic-oauth", userConfig: { tenant: { type: "string", title: "Tenant", description: "Tenant", required: true } } }));
+  await writeFile(path.join(source, "mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "streamable-http", url: `${origin}/mcp`, headers: { "X-Resource": "${user_config.tenant}" }, extensions: { "com.openai": { auth: { type: "oauth", client: { mode: "dcr" } } } } } } }));
   const packages = new PluginPackageStore(path.join(root, "data")); const preview = await packages.preview(source); const pkg = await packages.install(source, preview.fingerprint);
-  const connection = await packages.oauthConnection(pkg.id, "remote"); await packages.setEnabled(pkg.id, true);
+  const config = { values: () => ({ tenant: "synthetic-tenant" }), paths: {} };
+  const connection = await packages.oauthConnection(pkg.id, "remote", config); assert.deepEqual(connection.settingReview, [{ name: "tenant", value: "synthetic-tenant" }]); await packages.setEnabled(pkg.id, true);
   const copies = await packages.prepareRun(); t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
   const store = new PluginOAuthStore(root, encryption); const reviews: string[] = [];
   await signInPluginOAuth({ ...connection, store, signal: new AbortController().signal, review: async (request) => { reviews.push(request.title); return true; }, open: async (value) => {
@@ -64,7 +65,7 @@ test("OAuth sign-in validates state, uses PKCE, encrypts the grant, and refreshe
   const actions: string[] = [];
   const gateway = await startPluginMcp(copies.packages, async (request) => { actions.push(request.action); return true; }, new AbortController().signal, process.cwd(), () => undefined, {
     has: (value) => restored.has(value), token: (value, endpoint, settings, signal) => pluginOAuthToken({ endpoint, settings, identity: value, store: restored, signal, review: async () => true }),
-  });
+  }, config);
   const send = async (id: number, method: string, params: unknown = {}) => (await (await fetch(gateway.url, { method: "POST", headers: { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) })).json()) as any;
   const listed = await send(1, "tools/list"); const called = await send(2, "tools/call", { name: listed.result.tools[0].name, arguments: {} });
   assert.equal(called.result.content[0].text, "authenticated result");

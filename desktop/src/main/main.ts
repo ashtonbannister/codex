@@ -288,12 +288,13 @@ function registerHandlers(service: WorkspaceService) {
     const controller = new AbortController(); pluginOAuthController = controller;
     try {
       const input = objectPayload(payload); const id = identifier(input.id), name = identifier(input.name);
-      const connection = await plugins.oauthConnection(id, name);
+      const pluginSettings = { values: (identity: { id: string; fingerprint: string }) => bundleConfigStore.get(identity), paths: { HOME: app.getPath("home"), DESKTOP: app.getPath("desktop"), DOCUMENTS: app.getPath("documents"), DOWNLOADS: app.getPath("downloads") } };
+      const connection = await plugins.oauthConnection(id, name, pluginSettings);
       if (pluginCredentials.has(connection.identity)) throw new Error("Remove the saved bearer token before connecting a plugin account.");
-      if (!await reviewPluginOAuth({ title: "Connect this plugin?", detail: `Nova will contact ${new URL(connection.endpoint).origin} to discover its sign-in provider. The connection sends these configured header names: ${Object.keys(connection.resourceHeaders).join(", ") || "none"}. Authorization can grant access to your data. Review every destination and requested permission.` })) throw new Error("Plugin sign-in was declined.");
+      if (!await reviewPluginOAuth({ title: "Connect this plugin?", detail: `Nova will contact ${new URL(connection.endpoint).origin} to discover its sign-in provider. The connection sends these configured header names: ${Object.keys(connection.resourceHeaders).join(", ") || "none"}. ${connection.settingReview?.length ? `Settings sent in headers: ${JSON.stringify(connection.settingReview)}. ` : ""}Authorization can grant access to your data. Review every destination and requested permission.` })) throw new Error("Plugin sign-in was declined.");
       controller.signal.throwIfAborted();
       await signInPluginOAuth({ ...connection, store: pluginOAuthStore, signal: controller.signal, review: reviewPluginOAuth, open: (url) => shell.openExternal(url), beforeSave: async () => {
-        const current = await plugins.oauthConnection(id, name);
+        const current = await plugins.oauthConnection(id, name, pluginSettings);
         if (JSON.stringify(current) !== JSON.stringify(connection)) throw new Error("The plugin changed during sign-in. Import it again before retrying.");
       } });
     } finally { if (pluginOAuthController === controller) pluginOAuthController = undefined; }

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
 import { BundleConfigStore } from "../src/main/services/bundle-config-store";
-import { preparePluginLaunch } from "../src/main/services/plugin-config";
+import { preparePluginLaunch, prepareRemotePluginHeaders, remoteHeaderSettings } from "../src/main/services/plugin-config";
 import { startPluginMcp } from "../src/main/services/plugin-mcp";
 
 test("plugin settings are encrypted and reviewed before a local server receives them", async (t) => {
@@ -34,4 +34,18 @@ test("plugin settings are encrypted and reviewed before a local server receives 
   assert.equal(launch.env.AUTH, "synthetic-secret"); assert.equal(launch.env.MODE, "fast"); assert.deepEqual(launch.args.slice(-2), ["first", "second"]);
   const reviews: string[] = []; const gateway = await startPluginMcp(copies.packages, async (request) => { reviews.push(request.detail); return true; }, new AbortController().signal, root, undefined, undefined, { values: () => settings.get(identity), paths: {} });
   await gateway.dispose(); await copies.dispose(); assert.doesNotMatch(reviews.join(" "), /synthetic-secret/); assert.match(reviews[0]!, /\[redacted\]/); assert.match(reviews[0]!, /fast/);
+});
+
+
+test("sensitive remote header settings remain unavailable", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-remote-secret-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "plugin"); await mkdir(source);
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture", userConfig: { token: { type: "string", title: "Token", description: "Secret", sensitive: true } }, mcpServers: { remote: { url: "https://example.invalid/mcp", headers: { "X-Test": "${user_config.token}" } } } }));
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.match(preview.servers[0]!.unsupported.join(" "), /sensitive/); assert.equal(preview.servers[0]!.supportsOAuth, false);
+  const { parsePluginMcp } = await import("../src/main/services/plugin-config");
+  const server = parsePluginMcp({ mcpServers: { remote: { url: "https://example.invalid", headers: { "X-Test": "${user_config.token}" } } } })[0]!;
+  server.bundleFields = [{ key: "token", type: "string", title: "Token", description: "Secret", required: false, sensitive: true, multiple: false }];
+  assert.throws(() => remoteHeaderSettings(server, { token: "synthetic-secret" }), /sensitive/);
+  assert.throws(() => prepareRemotePluginHeaders(server, {}, { token: "synthetic-secret" }), /unavailable/);
 });

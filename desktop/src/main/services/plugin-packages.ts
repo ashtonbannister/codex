@@ -8,7 +8,7 @@ import { parseBundleFields, publicBundleFields, instructionSettings, type Bundle
 import { commandSummaries, findPluginCommand, looksLikePluginCommand, parsePluginCommands, type CommandDefinition } from "./plugin-commands";
 import type { PluginPackage } from "../../shared/plugins";
 import { matchingSkillReference, skillReferences, visibleSkill, type SelectedSkill } from "./skill-selection";
-import { parsePluginMcp, pluginServerSummary, prepareRemotePluginHeaders, type PluginServerConfig } from "./plugin-config";
+import { parsePluginMcp, pluginServerSummary, prepareRemotePluginHeaders, remoteHeaderSettings, type PluginServerConfig } from "./plugin-config";
 import { filterSkillSnapshot, snapshotSkillPackage, type PackageSnapshot } from "./skill-packages";
 
 const idPattern = /^[0-9a-f-]{36}$/;
@@ -159,7 +159,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   if (commandVariants.some((commands) => JSON.stringify(commands) !== JSON.stringify(commandVariants[0]))) throw new Error("Codex and Claude plugin manifests define different commands. Import a provider-specific package instead.");
   if (configVariants.some((fields) => JSON.stringify(fields) !== JSON.stringify(configVariants[0]))) throw new Error("Plugin manifests define different settings. Import a provider-specific package instead.");
   const pluginFields = configVariants[0] ?? [];
-  if (pluginFields.length) warnings.add("Plugin settings are available to local servers and reviewed instructions. Remote server configuration settings are not supported. Sensitive values are withheld from instructions.");
+  if (pluginFields.length) warnings.add("Plugin settings are available to local servers and reviewed instructions. Remote URLs and sensitive settings in remote headers are not supported. Sensitive values are withheld from instructions.");
   const commands = commandVariants[0] ?? [];
   for (const command of commands) {
     const references = [...command.body.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)];
@@ -169,7 +169,12 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   const servers = [...(variants[0]?.values() ?? [])];
   for (const server of servers) {
     if (server.transport === "stdio" && !server.bundleArchivePath) server.bundleFields = pluginFields;
-    else if (server.transport !== "stdio" && JSON.stringify(server).includes("${user_config.")) server.unsupported.push("Plugin settings in remote server configuration are not supported.");
+    else if (server.transport !== "stdio") {
+      server.bundleFields = pluginFields;
+      const templates = Object.values(server.headers ?? {}).join("\n");
+      const references = [...templates.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)];
+      if (templates.replace(/\$\{user_config\.[A-Za-z_][A-Za-z0-9_]*\}/g, "").includes("${user_config.") || references.some((reference) => !pluginFields.some((field) => field.key === reference[1] && !field.multiple && !field.sensitive))) server.unsupported.push("Remote headers refer to an undeclared, invalid, sensitive or multiple-value plugin setting.");
+    }
   }
   if (servers.length > 100) throw new Error("A plugin package cannot contain more than 100 MCP servers.");
   const skillKey = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
@@ -495,14 +500,15 @@ export class PluginPackageStore {
     if (!definition) throw new Error("Bundle setting not found.");
     return { id: pkg.id, fingerprint: pkg.fingerprint, ...(scope ? { server: scope } : {}), definition };
   }
-  async oauthConnection(id: string, name: string): Promise<{ identity: { id: string; fingerprint: string; server: string }; endpoint: string; settings: import("./plugin-oauth").OAuthSettings; resourceHeaders: Record<string, string> }> {
+  async oauthConnection(id: string, name: string, config?: Parameters<typeof findPluginCommand>[4]): Promise<{ identity: { id: string; fingerprint: string; server: string }; endpoint: string; settings: import("./plugin-oauth").OAuthSettings; resourceHeaders: Record<string, string>; settingReview?: Array<{ name: string; value: string }> }> {
     await this.ensureRoot();
     const pkg = await this.readPackage(id, true);
     const snapshot = await snapshotSkillPackage(path.join(this.root, id, "files"), { allowNoSkills: true });
     if (snapshot.fingerprint !== pkg.fingerprint) throw new Error("The plugin changed before sign-in.");
     const server = parsePluginPackage(snapshot, pkg.name).servers.find((entry) => entry.name === name);
     if (!server || !server.enabled || !server.url || !pluginServerSummary(server).supportsOAuth) throw new Error("This server does not support Nova sign-in.");
-    return { identity: { id: pkg.id, fingerprint: pkg.fingerprint, server: name }, endpoint: server.url, settings: server.oauthSettings ?? {}, resourceHeaders: prepareRemotePluginHeaders(server, process.env) };
+    const resolved = remoteHeaderSettings(server, config?.values({ id: pkg.id, fingerprint: pkg.fingerprint }) ?? {}, config?.paths ?? {});
+    return { identity: { id: pkg.id, fingerprint: pkg.fingerprint, server: name }, endpoint: server.url, settings: server.oauthSettings ?? {}, resourceHeaders: prepareRemotePluginHeaders(server, process.env, resolved.values), ...(resolved.review.length ? { settingReview: resolved.review } : {}) };
   }
   async credentialIdentity(id: string, name: string, remove = false): Promise<{ id: string; fingerprint: string; server: string }> {
     await this.ensureRoot();

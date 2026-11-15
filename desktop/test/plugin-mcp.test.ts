@@ -88,9 +88,9 @@ test("plugin gateway reviews and exposes a large paginated catalog", async (t) =
 
 
 test("remote MCP plugin requires connection, catalog and call approvals and keeps headers private", async (t) => {
-  let requests = 0; let calls = 0; const observed: string[] = []; const literalHeaders: string[] = [];
+  let requests = 0; let calls = 0; const observed: string[] = []; const literalHeaders: string[] = []; const tenantHeaders: string[] = [];
   const server = createServer(async (request, response) => {
-    requests++; observed.push(request.headers.authorization ?? ""); literalHeaders.push(String(request.headers["x-literal"] ?? ""));
+    requests++; observed.push(request.headers.authorization ?? ""); literalHeaders.push(String(request.headers["x-literal"] ?? "")); tenantHeaders.push(String(request.headers["x-tenant"] ?? ""));
     if (request.method !== "POST") { response.writeHead(405).end(); return; }
     let data = ""; for await (const part of request) data += part;
     const message = JSON.parse(data);
@@ -107,26 +107,27 @@ test("remote MCP plugin requires connection, catalog and call approvals and keep
   const address = server.address(); if (!address || typeof address === "string") throw new Error("No test port");
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-remote-plugin-"));
   const source = path.join(root, "source"); await mkdir(source);
-  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "portable-fixture" }));
-  await writeFile(path.join(source, "mcp.json"), JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", mcpServers: { remote: { type: "streamable-http", startup_timeout_sec: 5, url: `http://127.0.0.1:${address.port}/mcp?private=synthetic-query`, http_headers: { "X-Literal": "${NOT_EXPANDED}" }, extensions: { "com.openai": { auth: { type: "api_key", headerScheme: "bearer" } } } } } }));
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "portable-fixture", userConfig: { tenant: { type: "string", title: "Tenant", description: "Tenant identifier", required: true }, secret: { type: "string", title: "Secret", description: "Private", sensitive: true } } }));
+  await writeFile(path.join(source, "mcp.json"), JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", mcpServers: { remote: { type: "streamable-http", startup_timeout_sec: 5, url: `http://127.0.0.1:${address.port}/mcp?private=synthetic-query`, headers: { "X-Tenant": "${user_config.tenant}" }, http_headers: { "X-Literal": "${NOT_EXPANDED}" }, extensions: { "com.openai": { auth: { type: "api_key", headerScheme: "bearer" } } } } } }));
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
   const copies = await store.prepareRun();
   t.after(async () => { await copies.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
-  await assert.rejects(startPluginMcp(copies.packages, async () => true, new AbortController().signal), /requires a bearer token/);
-  await assert.rejects(startPluginMcp(copies.packages, async () => false, new AbortController().signal, process.cwd(), () => "synthetic-test-secret"), /declined/);
+  const config = { values: () => ({ tenant: "synthetic-tenant", secret: "synthetic-private" }), paths: {} };
+  await assert.rejects(startPluginMcp(copies.packages, async () => true, new AbortController().signal, process.cwd(), undefined, undefined, config), /requires a bearer token/);
+  await assert.rejects(startPluginMcp(copies.packages, async () => false, new AbortController().signal, process.cwd(), () => "synthetic-test-secret", undefined, config), /declined/);
   assert.equal(requests, 0);
   const approvals: Array<{ action: string; detail: string }> = []; let allow = false;
   const gateway = await startPluginMcp(copies.packages, async (request) => { approvals.push(request); return request.action !== "call" || allow; }, new AbortController().signal, process.cwd(), (identity) => {
     assert.deepEqual(identity, { id: pkg.id, fingerprint: pkg.fingerprint, server: "remote" }); return "synthetic-test-secret";
-  });
+  }, undefined, config);
   t.after(async () => { await gateway.dispose(); });
   assert.doesNotMatch(approvals[0]!.detail, /synthetic-test-secret|synthetic-query/);
-  assert.match(approvals[0]!.detail, /Authorization/);
+  assert.match(approvals[0]!.detail, /Authorization/); assert.match(approvals[0]!.detail, /synthetic-tenant/); assert.doesNotMatch(approvals[0]!.detail, /synthetic-private/);
   const send = async (id: number, method: string, params: unknown = {}) => (await (await fetch(gateway.url, { method: "POST", headers: { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) })).json()) as any;
   const list = await send(1, "tools/list"); const name = list.result.tools[0].name;
   assert.equal((await send(2, "tools/call", { name, arguments: { message: "hello" } })).result.isError, true); assert.equal(calls, 0);
   allow = true; assert.equal((await send(3, "tools/call", { name, arguments: { message: "hello" } })).result.content[0].text, "hello");
-  assert.equal(calls, 1); assert.ok(observed.every((value) => value === "Bearer synthetic-test-secret")); assert.ok(literalHeaders.every((value) => value === "${NOT_EXPANDED}"));
+  assert.equal(calls, 1); assert.ok(observed.every((value) => value === "Bearer synthetic-test-secret")); assert.ok(literalHeaders.every((value) => value === "${NOT_EXPANDED}")); assert.ok(tenantHeaders.every((value) => value === "synthetic-tenant"));
   assert.deepEqual(approvals.map((item) => item.action), ["start", "discover", "call", "call"]);
 });
 

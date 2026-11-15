@@ -204,15 +204,34 @@ export function pluginServerSummary(server: PluginServerConfig): import("../../s
     ...(remote ? { endpointOrigin: new URL(server.url!).origin, supportsCredential: !["none", "oauth", "mixed"].includes(server.authMode ?? "") && !server.bearerTokenEnvVar && ![...Object.keys(server.headers ?? {}), ...Object.keys(server.literalHeaders ?? {})].some((name) => name.toLowerCase() === "authorization") && !server.unsupported.length, supportsOAuth: !["none", "bearer"].includes(server.authMode ?? "") && !server.bearerTokenEnvVar && ![...Object.keys(server.headers ?? {}), ...Object.keys(server.literalHeaders ?? {})].some((name) => name.toLowerCase() === "authorization") && !server.unsupported.length } : {}) };
 }
 
+/** Resolve reviewed non-sensitive plugin settings referenced by fixed-endpoint remote headers. */
+export function remoteHeaderSettings(server: PluginServerConfig, saved: Record<string, BundleValue> = {}, paths: Record<string, string> = {}): { values: Record<string, string>; review: Array<{ name: string; value: string }> } {
+  const templates = Object.values(server.headers ?? {}).join("\n");
+  const keys = [...new Set([...templates.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((match) => match[1]!))];
+  if (templates.replace(/\$\{user_config\.[A-Za-z_][A-Za-z0-9_]*\}/g, "").includes("${user_config.")) throw new Error("Invalid remote plugin setting reference.");
+  const values: Record<string, string> = Object.create(null); const review: Array<{ name: string; value: string }> = [];
+  for (const key of keys) {
+    const field = server.bundleFields?.find((item) => item.key === key);
+    if (!field || field.multiple || field.sensitive) throw new Error(`Remote header setting ${key} is unknown, sensitive, or cannot be used in a header.`);
+    let value = saved[key] ?? field.defaultValue;
+    if (value === undefined) { if (field.required) throw new Error(`Configure ${field.title} in Settings → Plugins before connecting.`); value = ""; }
+    else { if (saved[key] === undefined) value = expandBundleDefault(value, paths); value = validateBundleValue(field, value); }
+    if (Array.isArray(value)) throw new Error("Multiple values cannot be used in a remote plugin header.");
+    values[key] = String(value); review.push({ name: key, value: values[key]! });
+  }
+  return { values, review };
+}
+
 /** Resolve only explicitly configured headers; values stay in the main process. */
-export function prepareRemotePluginHeaders(server: PluginServerConfig, inherited: NodeJS.ProcessEnv): Record<string, string> {
+export function prepareRemotePluginHeaders(server: PluginServerConfig, inherited: NodeJS.ProcessEnv, config: Record<string, string> = {}): Record<string, string> {
   const lookup = (name: string): string | undefined => {
     const key = Object.keys(inherited).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
     return key ? inherited[key] : undefined;
   };
   const headers: Record<string, string> = { ...server.literalHeaders };
   for (const [key, value] of Object.entries(server.headers ?? {})) {
-    headers[key] = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+    headers[key] = value.replace(/\$\{(user_config\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+      if (name.startsWith("user_config.")) { const key = name.slice("user_config.".length); if (!Object.hasOwn(config, key) || !server.bundleFields?.some((field) => field.key === key && !field.sensitive && !field.multiple)) throw new Error(`Remote plugin header setting ${key} is unavailable.`); return config[key]!; }
       const resolved = lookup(name); if (resolved === undefined) throw new Error(`The plugin requires the environment variable ${name}.`); return resolved;
     });
     if (/\$\{|[\0\r\n]/.test(headers[key]!) || headers[key]!.length > 8192) throw new Error("Invalid remote plugin header value.");
