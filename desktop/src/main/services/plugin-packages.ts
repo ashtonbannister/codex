@@ -203,16 +203,18 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
 }
 
 function skillBody(content: string): string { return content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, ""); }
-function expandSkillSettings(content: string, config: Record<string, string>): string {
+function expandSkillSettings(content: string, config: Record<string, string>, locations: Record<string, string>): string {
   const body = skillBody(content); const header = content.slice(0, content.length - body.length);
-  return header + body.replace(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, key: string) => {
+  return header + body.replace(/\$\{(user_config\.[A-Za-z_][A-Za-z0-9_]*|CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR)\}/g, (_match, name: string) => {
+    if (!name.startsWith("user_config.")) { if (!Object.hasOwn(locations, name)) throw new Error(`Plugin skill location ${name} is unavailable.`); return locations[name]!; }
+    const key = name.slice("user_config.".length);
     if (!Object.hasOwn(config, key)) throw new Error(`Plugin skill setting ${key} is unavailable.`);
     return config[key]!;
   });
 }
 
 /** Keep uninvoked command instructions out of provider-visible copies. */
-function providerSnapshot(snapshot: PackageSnapshot, skills: PluginPackage["skills"], commands: CommandDefinition[], selected?: CommandDefinition, configs: Map<string, Record<string, string>> = new Map()): PackageSnapshot {
+function providerSnapshot(snapshot: PackageSnapshot, skills: PluginPackage["skills"], commands: CommandDefinition[], selected?: CommandDefinition, configs: Map<string, { config: Record<string, string>; locations: Record<string, string> }> = new Map()): PackageSnapshot {
   const filtered = filterSkillSnapshot(snapshot, skills);
   const selectedPath = selected?.path?.toLowerCase();
   const hiddenPaths = new Set(commands.filter((command) => command !== selected && command.path).map((command) => command.path!.toLowerCase()));
@@ -225,8 +227,8 @@ function providerSnapshot(snapshot: PackageSnapshot, skills: PluginPackage["skil
     if (hideManifests && ["plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json"].includes(name)) return false;
     return true;
   }).map((file) => {
-    const config = configs.get(file.path); if (!config) return file;
-    const data = Buffer.from(expandSkillSettings(new TextDecoder("utf-8", { fatal: true }).decode(file.data), config), "utf8");
+    const resolved = configs.get(file.path); if (!resolved) return file;
+    const data = Buffer.from(expandSkillSettings(new TextDecoder("utf-8", { fatal: true }).decode(file.data), resolved.config, resolved.locations), "utf8");
     if (data.length > 128 * 1024) throw new Error("Expanded plugin skill is too large.");
     return { ...file, data, digest: createHash("sha256").update(data).digest("hex") };
   });
@@ -399,7 +401,7 @@ export class PluginPackageStore {
   }
 
   /** Materialize verified per-run copies; this does not start plugin code. */
-  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama", settings?: Parameters<typeof findPluginCommand>[4]): Promise<{ skillSettings: Array<{ package: string; skill: string; settings: Array<{ name: string; value: string }> }>; packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }>; directory: string; providerDirectory?: string; prompt: string; invoked: SelectedSkill[]; verifyProviders(): Promise<void>; dispose(): Promise<void> }> {
+  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama", settings?: Parameters<typeof findPluginCommand>[4], project = process.cwd()): Promise<{ skillSettings: Array<{ package: string; skill: string; settings: Array<{ name: string; value: string }>; locations?: Array<{ name: string; value: string }> }>; packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }>; directory: string; providerDirectory?: string; prompt: string; invoked: SelectedSkill[]; verifyProviders(): Promise<void>; dispose(): Promise<void> }> {
     const references = skillReferences(input);
     const enabled = (await this.list()).filter((pkg) => pkg.enabled);
     if (!enabled.length) throw new Error("No plugin packages are enabled. Import and enable one in Settings → Plugins.");
@@ -417,7 +419,7 @@ export class PluginPackageStore {
       const dataRootInfo = await lstat(dataRoot);
       if (!dataRootInfo.isDirectory() || dataRootInfo.isSymbolicLink() || normalize(await realpath(dataRoot)) !== normalize(dataRoot)) throw new Error("Plugin data storage is unavailable or redirected.");
       const packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }> = [];
-      const providerDirectory = path.join(directory, "provider"); const providerFingerprints = new Map<string, string>(); const invoked: SelectedSkill[] = []; const skillSettings: Array<{ package: string; skill: string; settings: Array<{ name: string; value: string }> }> = [];
+      const providerDirectory = path.join(directory, "provider"); const providerFingerprints = new Map<string, string>(); const invoked: SelectedSkill[] = []; const skillSettings: Array<{ package: string; skill: string; settings: Array<{ name: string; value: string }>; locations?: Array<{ name: string; value: string }> }> = [];
       for (const pkg of verified) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"), { allowNoSkills: true });
         if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before launch.`);
@@ -474,12 +476,15 @@ export class PluginPackageStore {
         const commandReference = looksLikePluginCommand(input) ? references.find((reference) => reference.namespace?.toLowerCase() === pkg.name.toLowerCase()) : undefined;
         const selectedCommand = commandReference ? resolved.commands.find((command) => command.name.toLowerCase() === commandReference.name.toLowerCase()) : undefined;
         const providerRoot = path.join(providerDirectory, pkg.id);
-        const configs = new Map<string, Record<string, string>>();
+        const configs = new Map<string, { config: Record<string, string>; locations: Record<string, string> }>();
         for (const skill of selected) {
           const file = snapshot.files.find((item) => item.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
           const body = skillBody(new TextDecoder("utf-8", { fatal: true }).decode(file.data));
           const resolvedSettings = instructionSettings(body, resolved.pluginFields ?? [], settings?.values({ id: pkg.id, fingerprint: pkg.fingerprint }) ?? {}, settings?.paths ?? {});
-          if (resolvedSettings.review.length) { configs.set(skill.path, resolvedSettings.config); skillSettings.push({ package: pkg.name, skill: skill.name, settings: resolvedSettings.review }); }
+          const locations: Record<string, string> = { CLAUDE_PLUGIN_ROOT: providerRoot, CODEX_PLUGIN_ROOT: providerRoot, PLUGIN_ROOT: providerRoot, CLAUDE_PLUGIN_DATA: dataDir, CODEX_PLUGIN_DATA: dataDir, PLUGIN_DATA: dataDir, CLAUDE_PROJECT_DIR: project, CLAUDE_SKILL_DIR: path.dirname(path.join(providerRoot, ...skill.path.split("/"))) };
+          const names = [...new Set([...body.matchAll(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|CODEX_PLUGIN_DATA|PLUGIN_DATA|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR)\}/g)].map((match) => match[1]!))];
+          const reviewLocations = names.map((name) => ({ name, value: locations[name]! }));
+          if (resolvedSettings.review.length || reviewLocations.length) { configs.set(skill.path, { config: resolvedSettings.config, locations }); skillSettings.push({ package: pkg.name, skill: skill.name, settings: resolvedSettings.review, ...(reviewLocations.length ? { locations: reviewLocations } : {}) }); }
         }
         if (selected.length || selectedCommand) {
           const filtered = providerSnapshot(snapshot, selected, resolved.commands, selectedCommand, configs); providerFingerprints.set(pkg.id, filtered.fingerprint);
@@ -489,7 +494,7 @@ export class PluginPackageStore {
         }
         for (const skill of matched) {
           const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
-          invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), config: configs.get(skill.path) });
+          invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), config: configs.get(skill.path)?.config });
         }
         packages.push({ pkg, root, ...(providerFingerprints.has(pkg.id) ? { providerRoot } : {}), dataDir, servers, commands: resolved.commands, skills: selected, pluginFields: resolved.pluginFields });
       }

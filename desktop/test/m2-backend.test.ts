@@ -639,11 +639,11 @@ test("plugin skill settings are reviewed before provider access and secrets stay
   await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture", userConfig: {
     audience: { type: "string", title: "Audience", description: "Who", required: true }, token: { type: "string", title: "Token", description: "Secret", sensitive: true }
   } }));
-  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: Demo\n---\nFor ${user_config.audience}; ${user_config.token}. $ARGUMENTS\n");
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: Demo\n---\nFor ${user_config.audience}; ${user_config.token}. Data ${CLAUDE_PLUGIN_DATA}. $ARGUMENTS\n");
   const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
   const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "/fixture:demo ECHO_PROMPT", usePlugins: true };
   const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /declined/); assert.ok(!denied.events.some((event) => event.kind === "message"));
-  assert.match(copyContent, /For reviewers; \[sensitive setting withheld\]/); assert.doesNotMatch(copyContent, /synthetic-secret/); assert.match(reviews[0]!.detail, /pluginSkillSettings/); assert.doesNotMatch(reviews[0]!.detail, /synthetic-secret/);
+  assert.match(copyContent, /For reviewers; \[sensitive setting withheld\]/); assert.doesNotMatch(copyContent, /synthetic-secret/); assert.match(reviews[0]!.detail, /pluginSkillSettings/); assert.match(reviews[0]!.detail, /CLAUDE_PLUGIN_DATA/); assert.match(reviews[0]!.detail, /persistent plugin data/); assert.doesNotMatch(reviews[0]!.detail, /synthetic-secret/);
   allow = true; const run = await finishRun(service, (await service.startRun(request)).id); assert.equal(run.status, "completed", run.error);
   const sent = run.events.find((event) => event.kind === "message")!.text; assert.match(sent, /For reviewers; \[sensitive setting withheld\]/); assert.doesNotMatch(sent, /synthetic-secret/);
 });
