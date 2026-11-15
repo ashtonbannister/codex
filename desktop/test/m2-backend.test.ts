@@ -44,7 +44,7 @@ if(process.argv.includes('--version')){console.log('fake-cli 1');process.exit(0)
 if(process.argv.includes('--help')){console.log('--json --sandbox --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools');process.exit(0)}
 if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture-1',configRequirements:{requirements:null}}));process.exit(0)}
 let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',value=>input+=value);
-process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('PLUGIN_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_plugins.url='));if(!arg||!input.includes('fixture-plugin-skill'))throw Error('missing plugin config or skill');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_PLUGIN_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:list.result.tools[0].name,arguments:{message:'synthetic'}});if(result.result.isError||result.result.content[0].text!=='server request denied')throw Error('plugin MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PLUGIN_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('DESKTOP_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_desktop.url='));if(!arg)throw Error('missing MCP config');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_DESKTOP_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:'desktop',arguments:{action:'list'}});if(list.result.tools[0].name!=='desktop'||result.result.isError)throw Error('MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'DESKTOP_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
+process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('SKILL_ONLY_TEST')){if(!input.includes('only-skill')||process.argv.some(x=>x.startsWith('mcp_servers.nova_plugins.url=')))throw Error('incorrect skill-only context');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'SKILL_ONLY_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('PLUGIN_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_plugins.url='));if(!arg||!input.includes('fixture-plugin-skill'))throw Error('missing plugin config or skill');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_PLUGIN_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:list.result.tools[0].name,arguments:{message:'synthetic'}});if(result.result.isError||result.result.content[0].text!=='server request denied')throw Error('plugin MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PLUGIN_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('DESKTOP_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_desktop.url='));if(!arg)throw Error('missing MCP config');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_DESKTOP_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:'desktop',arguments:{action:'list'}});if(list.result.tools[0].name!=='desktop'||result.result.isError)throw Error('MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'DESKTOP_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
 `;
 
 async function fixture(t: { after(fn: () => Promise<void>): void }, desktop?: () => Promise<DesktopControlSession>, approvePlugin?: PluginApproval) {
@@ -496,7 +496,65 @@ test("plugin opt-in starts reviewed servers and passes approved tools and skills
   assert.equal(run.status, "completed", run.error);
   assert.equal(run.usePlugins, true);
   assert.ok(run.events.some((event) => event.text === "PLUGIN_MCP_OK"));
-  assert.deepEqual(approvals, ["start", "discover", "call"]);
+  assert.deepEqual(approvals, ["skills", "start", "discover", "call"]);
+});
+
+test("skill-only plugins require per-provider approval and never start a plugin server", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; let allow = false;
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return allow; });
+  const source = path.join(root, "skill-plugin"); await mkdir(path.join(source, "skills", "only"), { recursive: true });
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "only-plugin" }));
+  await writeFile(path.join(source, "skills", "only", "SKILL.md"), "---\nname: only-skill\ndescription: Fixture detail\n---\nRead support.md.\n");
+  await writeFile(path.join(source, "skills", "only", "support.md"), "private synthetic content");
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "SKILL_ONLY_TEST", usePlugins: true };
+  const context = await service.previewContext(request); assert.match(context.prompt, /only-skill/); assert.doesNotMatch(context.prompt, /nova_plugins/);
+  const denied = await finishRun(service, (await service.startRun(request)).id);
+  assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /sharing was declined/); assert.ok(!denied.events.some((event) => event.text === "SKILL_ONLY_OK"));
+  assert.equal(reviews.length, 1); assert.equal(reviews[0]!.action, "skills"); assert.match(reviews[0]!.detail, /only-skill|Fixture detail/); assert.match(reviews[0]!.detail, /Codex/); assert.match(reviews[0]!.detail, /read and potentially transmit/);
+  allow = true; const run = await finishRun(service, (await service.startRun(request)).id);
+  assert.equal(run.status, "completed", run.error); assert.ok(run.events.some((event) => event.text === "SKILL_ONLY_OK"));
+  assert.deepEqual(reviews.map((review) => review.action), ["skills", "skills"]);
+  assert.ok(run.contextSummary?.warnings.some((warning) => warning.includes("skill names")));
+});
+
+test("skill approval identifies Claude and the actual local model endpoint", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = [];
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return false; });
+  const source = path.join(root, "skills-only"); await mkdir(path.join(source, "skills", "demo"), { recursive: true });
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" }));
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-skill\ndescription: Synthetic\n---\nInstructions\n");
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  let inferenceRequests = 0;
+  const server = createServer((req, res) => { if (req.url === "/v1/models") res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ data: [{ id: "fixture-model" }] })); else { inferenceRequests++; res.writeHead(500).end(); } });
+  server.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(async () => { const done = new Promise<void>((resolve) => server.close(() => resolve())); server.closeAllConnections(); await done; });
+  const address = server.address(); assert.ok(address && typeof address !== "string"); const endpoint = `http://127.0.0.1:${address.port}`;
+  const current = (await service.snapshot()).state.settings; await service.updateSettings({ ...current, localProvider: "custom", localProtocol: "chat-completions", localBaseUrl: `${endpoint}/v1`, localModel: "fixture-model" });
+  for (const provider of ["claude", "ollama"] as const) { const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider, mode: "plan", prompt: "SKILL_ONLY_TEST", usePlugins: true })).id); assert.equal(run.status, "failed"); assert.match(run.error ?? "", /declined/); }
+  assert.equal(reviews.length, 2); assert.match(reviews[0]!.detail, /Claude Code/); assert.match(reviews[1]!.detail, /Local model/); assert.ok(reviews[1]!.detail.includes(endpoint)); assert.match(reviews[1]!.detail, /fixture-model/); assert.equal(inferenceRequests, 0);
+});
+
+test("declined or modified plugin skills never reach the provider or start a server", async (t) => {
+  let mode: "deny" | "change" = "deny"; const actions: string[] = [];
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => {
+    actions.push(request.action);
+    if (request.action === "skills" && mode === "change") {
+      const reviewed = JSON.parse(request.detail) as { skills: Array<{ path: string }> };
+      await writeFile(reviewed.skills[0]!.path, "changed after review");
+    }
+    return mode !== "deny";
+  });
+  const source = path.join(root, "mixed"); await mkdir(source);
+  const markerPath = path.join(root, "server-started");
+  await copyFile(path.resolve("test/fixtures/mcp-server.mjs"), path.join(source, "server.mjs"));
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: only-skill\ndescription: Fixture detail\n---\nSynthetic instructions.\n");
+  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: ["${CODEX_PLUGIN_ROOT}/server.mjs"], env: { NOVA_SYNTH_MARKER: markerPath } } } }));
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "SKILL_ONLY_TEST", usePlugins: true };
+  const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /declined/);
+  await assert.rejects(readFile(markerPath), { code: "ENOENT" }); assert.deepEqual(actions, ["skills"]);
+  mode = "change"; const changed = await finishRun(service, (await service.startRun(request)).id); assert.equal(changed.status, "failed"); assert.match(changed.error ?? "", /changed after review/i);
+  await assert.rejects(readFile(markerPath), { code: "ENOENT" }); assert.deepEqual(actions, ["skills", "skills", "start"]);
 });
 
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {

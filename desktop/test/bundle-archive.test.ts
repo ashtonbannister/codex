@@ -175,3 +175,14 @@ test("embedded archives must exist, be safe and remain unchanged between review 
   await writeFile(archive, zip([{ name: "manifest.json", data: manifest() }, { name: "server/index.mjs", data: Buffer.from("changed") }]));
   await assert.rejects(store.install(source, preview.fingerprint), /changed/);
 });
+
+
+test("skill-only plugin archives import without requiring an MCP server", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-skills-archive-")); t.after(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+  const archive = path.join(root, "skills.plugin");
+  await writeFile(archive, zip([{ name: "plugin/plugin.json", data: Buffer.from(JSON.stringify({ name: "skills-only" })) }, { name: "plugin/skills/demo/SKILL.md", data: Buffer.from("---\nname: archived-skill\ndescription: Fixture\n---\nRead guide.md.\n") }, { name: "plugin/skills/demo/guide.md", data: Buffer.from("Synthetic supporting file") }]));
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(archive); assert.deepEqual(preview.servers, []); assert.equal(preview.skills[0]!.name, "archived-skill");
+  const pkg = await store.install(archive, preview.fingerprint); await store.setEnabled(pkg.id, true); const copies = await store.prepareRun();
+  assert.match(copies.prompt, /archived-skill/); assert.doesNotMatch(copies.prompt, /nova_plugins/); assert.equal(await readFile(path.join(copies.packages[0]!.root, "skills", "demo", "guide.md"), "utf8"), "Synthetic supporting file");
+  await copies.dispose();
+});

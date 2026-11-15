@@ -164,6 +164,17 @@ test("plugins are imported disabled and opted in per run", async ({ page }) => {
   expect(requests[0]?.usePlugins).toBe(true);
 });
 
+test("skill-only plugin details can be reviewed and enabled", async ({ page }) => {
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true, skillOnlyPlugin: true }); await page.goto("/");
+  await page.getByRole("button", { name: /^Settings/ }).click(); const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Plugins" }).click(); await dialog.getByRole("button", { name: "Import plugin package…" }).click();
+  await expect(dialog.getByText("0 servers · 1 skill", { exact: false })).toBeVisible();
+  await dialog.getByText("Plugin skills", { exact: true }).click(); await expect(dialog.getByText("demo-skill — Synthetic instructions")).toBeVisible();
+  await dialog.getByRole("checkbox", { name: "Fixture plugin" }).check(); await expect(dialog.getByRole("checkbox", { name: "Fixture plugin" })).toBeChecked();
+  await expect(dialog.getByText(/review which plugin skills may be shared/i)).toBeVisible();
+  await page.screenshot({ path: "test-results/skill-only-plugin.png" });
+});
+
 test("remote plugin credentials can be saved and removed without displaying them", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await installFakeDesktopBridge(page, { noProjects: true, complete: true }); await page.goto("/");

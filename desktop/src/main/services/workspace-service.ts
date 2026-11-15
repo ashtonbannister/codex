@@ -74,7 +74,7 @@ import {
   readCodexHistory as readCopiedHistory,
 } from "./codex-readonly";
 import { ensureNovaCodexHome } from "./nova-runtime";
-import { SkillPackageStore } from "./skill-packages";
+import { SkillPackageStore, snapshotSkillPackage } from "./skill-packages";
 import type { DesktopControlSession } from "./desktop-control";
 import { startDesktopMcp } from "./desktop-mcp";
 
@@ -1478,7 +1478,7 @@ export class WorkspaceService {
       preview.prompt += await new PluginPackageStore(this.dataDir).prompt();
       preview.characters = preview.prompt.length;
       preview.estimatedTokens = Math.ceil(preview.characters / 4);
-      preview.warnings.push("Plugin servers require startup and per-tool approval. Their skill paths in this preview differ from the disposable run copies.");
+      preview.warnings.push("Plugin skills require approval before sharing with the selected provider. Selected servers require startup and per-tool approval. Skill paths in this preview differ from the disposable run copies.");
     }
     if (request.desktopControl) {
       preview.prompt += NOVA_DESKTOP_SKILL;
@@ -1974,9 +1974,9 @@ export class WorkspaceService {
           providerStatus?.detail ||
             "Provider unavailable. Save Settings to refresh CLI detection.",
         );
-      if (request.provider === "claude" && (request.desktopControl || request.usePlugins) && !providerStatus.supportsDesktopMcp)
+      if (request.provider === "claude" && request.desktopControl && !providerStatus.supportsDesktopMcp)
         throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for these tools.");
-      if (request.provider === "claude" && (request.desktopControl || request.usePlugins) && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? ""))
+      if (request.provider === "claude" && request.desktopControl && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? ""))
         throw new Error("Claude Code safe mode is enforced by the current environment and disables selected MCP tools. Remove that setting only if you intend to allow them.");
       let thread = request.threadId
         ? this.state.threads.find((entry) => entry.id === request.threadId)
@@ -2171,7 +2171,7 @@ export class WorkspaceService {
               kind: "status",
               text:
                 request.usePlugins
-                  ? "Plugin startup and every plugin tool call require your approval." + (request.desktopControl ? " Desktop actions also require approval." : "")
+                  ? "Plugin skill sharing, server startup, and every plugin tool call require your approval when applicable." + (request.desktopControl ? " Desktop actions also require approval." : "")
                   : request.desktopControl
                     ? "Desktop control is enabled for this run. Each window observation and action requires your approval."
                     : request.mode === "build"
@@ -2192,14 +2192,31 @@ export class WorkspaceService {
           try {
             if (request.usePlugins) {
               pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun();
-              plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd, this.pluginCredential, this.pluginOAuth, this.bundleSettings);
+              const skillReview = pluginCopies.packages.flatMap(({ pkg, root }) => pkg.skills.map((skill) => ({ plugin: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")) })));
+              if (skillReview.length) {
+                controller.signal.throwIfAborted();
+                const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: model || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: model || "Provider default" };
+                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, note: "Approving shares these skill names, descriptions and paths with the selected provider. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each selected skill and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+                if (detail.length > 64_000) throw new Error("The plugin skill list is too large to review. Disable a package and retry.");
+                if (!await this.approvePlugin!({ action: "skills", title: `Share these plugin skills with ${selectedProvider.name}?`, detail })) throw new Error("Plugin skill sharing was declined.");
+                controller.signal.throwIfAborted();
+              }
+              if (pluginCopies.packages.some((entry) => entry.servers.length)) {
+                if (request.provider === "claude" && !providerStatus?.supportsDesktopMcp) throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for plugin tools.");
+                if (request.provider === "claude" && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? "")) throw new Error("Claude Code safe mode is enforced by the current environment and disables selected MCP tools.");
+                plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd, this.pluginCredential, this.pluginOAuth, this.bundleSettings);
+              }
+              for (const entry of pluginCopies.packages) {
+                if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after skill sharing was reviewed.`);
+              }
+              controller.signal.throwIfAborted();
               context.prompt += pluginCopies.prompt;
             }
             if (request.desktopControl) {
               desktop = await startDesktopMcp(await this.createDesktopSession!(), controller.signal);
               context.prompt += NOVA_DESKTOP_SKILL;
             }
-            if (preparedSkills.prompt || desktop || plugins) {
+            if (preparedSkills.prompt || desktop || pluginCopies) {
               context.characters = context.prompt.length;
               context.estimatedTokens = Math.ceil(context.characters / 4);
               await this.exclusive(async () => {
@@ -2208,6 +2225,7 @@ export class WorkspaceService {
                   run.contextSummary.estimatedTokens = context.estimatedTokens;
                   if (preparedSkills.prompt) run.contextSummary.warnings.push("Enabled imported skill names, descriptions, and paths were supplied to the provider.");
                   if (desktop) run.contextSummary.warnings.push("Desktop observations and actions require separate user approval and may share window content with this provider.");
+                  if (pluginCopies?.packages.some((entry) => entry.pkg.skills.length)) run.contextSummary.warnings.push("Plugin skill names, descriptions, and paths were approved for sharing with the selected provider.");
                   if (plugins) run.contextSummary.warnings.push("Plugin programs run under your user account; each tool call requires approval and may share data with the selected provider.");
                 }
                 await this.persist();

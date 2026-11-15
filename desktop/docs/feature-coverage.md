@@ -1,4 +1,4 @@
-# Nova Workbench feature coverage — 0.5.14
+# Nova Workbench feature coverage — 0.5.15
 
 This records what this application implements, not everything present in a vendor's desktop app. **Implemented** means there is a working code path and an explicit failure path; it does not mean a live account, installed model, or proprietary UI has been tested on the user's machine. Consult the matching commit's GitHub Actions results for automated evidence.
 
@@ -31,6 +31,7 @@ This records what this application implements, not everything present in a vendo
 | Windows desktop control | Per-run opt-in; window selection, inspection, screenshot, and supported UI actions through a private MCP server with approval for every request | Codex, compatible Claude Code, and local agents; actual model and server vision/tool support varies; general plugin tools are not enabled |
 | Local plugin MCP tools | Reviewed package copies; selected stdio servers start after per-run approval, the discovered catalog is reviewed before sharing, and each tool call requires approval, and declared skills and persistent data are available | Server programs run under the user account; remote bundle URLs, hooks and host-specific services remain unsupported |
 | Local MCP bundles | Reviewed local MCPB/DXT, embedded bundles and compatible ZIP/.plugin imports; server-scoped encrypted settings, platform and supported runtime checks | 0.1–0.3 Node, Python and binary manifests; 2,000 entries and 64 MiB compressed/expanded; UV and remote bundle URLs unsupported |
+| Skills-only plugins | Disabled-by-default package imports, disposable run copies and a per-run skill-sharing review for the chosen provider | The provider may read copied package files after approval; plugins with unsupported components report them separately |
 | Skill package imports | Explicit folder review/import; complete bounded copies with per-run disposable copies, catalog sent to Codex, Claude and local workers | Links and oversized packages are refused; only imported skills are offered; plugin servers/tools and dependencies are not installed |
 | Thinking strength | Codex advertised levels, Claude CLI effort, and local reasoning request | Availability and actual model behavior depend on the provider/server; local servers can ignore the request |
 | Existing Codex reference files | Explicit preview/import of allowlisted Markdown memories, instructions, skill references and plans with import fingerprints | Independent copies, not background freshness reads; references do not install skills/plugins or migrate private memory/automation databases |

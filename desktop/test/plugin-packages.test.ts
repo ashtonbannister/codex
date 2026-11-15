@@ -153,3 +153,26 @@ test("portable plugin uses mcp.json and its root overlay rather than a legacy fa
   assert.equal(preview.name, "portable"); assert.deepEqual(preview.servers.map((server) => server.name), ["docs"]); assert.equal(preview.servers[0]!.transport, "http");
   assert.match(preview.warnings.join(" "), /hooks/);
 });
+
+
+test("skill-only plugins import disabled, preserve files and do not advertise an MCP server", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-skill-plugin-")); t.after(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+  const source = path.join(root, "source"); await mkdir(path.join(source, "skills", "demo"), { recursive: true });
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "skills-only", $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", extensions: { "com.openai": { hooks: "./hooks/hooks.json" } } }));
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: Synthetic instructions\n---\nRead guide.md.\n");
+  await writeFile(path.join(source, "skills", "demo", "guide.md"), "Synthetic supporting material");
+  const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.deepEqual(preview.servers, []); assert.equal(preview.skills[0]!.name, "demo"); assert.match(preview.warnings.join(" "), /hooks/);
+  const pkg = await store.install(source, preview.fingerprint); assert.equal(pkg.enabled, false); await store.setEnabled(pkg.id, true);
+  const copies = await store.prepareRun(); assert.deepEqual(copies.packages[0]!.servers, []); assert.match(copies.prompt, /demo/); assert.doesNotMatch(copies.prompt, /nova_plugins/);
+  assert.equal(await readFile(path.join(copies.packages[0]!.root, "skills", "demo", "guide.md"), "utf8"), "Synthetic supporting material");
+  await copies.dispose(); await store.setEnabled(pkg.id, false);
+});
+
+test("a mixed plugin can keep its skills enabled while its last server is disabled", async (t) => {
+  const f = await fixture(t); await mkdir(path.join(f.source, "skills", "demo"), { recursive: true });
+  await writeFile(path.join(f.source, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: Fixture\n---\nInstructions.\n");
+  const preview = await f.store.preview(f.source); const pkg = await f.store.install(f.source, preview.fingerprint); await f.store.setEnabled(pkg.id, true);
+  await f.store.setServerEnabled(pkg.id, "fixture", false); const copies = await f.store.prepareRun();
+  assert.deepEqual(copies.packages[0]!.servers, []); assert.match(copies.prompt, /demo/); assert.doesNotMatch(copies.prompt, /nova_plugins/); await copies.dispose();
+});
