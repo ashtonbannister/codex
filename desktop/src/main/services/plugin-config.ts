@@ -14,7 +14,8 @@ export interface PluginServerConfig {
   headers?: Record<string, string>;
   literalHeaders?: Record<string, string>;
   bearerTokenEnvVar?: string;
-  authMode?: "none" | "bearer";
+  authMode?: "none" | "bearer" | "oauth" | "mixed";
+  oauthSettings?: import("./plugin-oauth").OAuthSettings;
   env: Record<string, string>;
   envVars: string[];
   enabledTools?: string[];
@@ -99,7 +100,8 @@ export function parsePluginMcp(value: unknown, options: { allowEmpty?: boolean }
     let headers: Record<string, string> | undefined;
     let literalHeaders: Record<string, string> | undefined;
     let bearerTokenEnvVar: string | undefined;
-    let authMode: "none" | "bearer" | undefined;
+    let authMode: "none" | "bearer" | "oauth" | "mixed" | undefined;
+    let oauthSettings: import("./plugin-oauth").OAuthSettings | undefined;
     if (type !== "stdio") {
       let endpoint: URL;
       try { endpoint = new URL(url!); } catch { throw new Error("Invalid plugin URL."); }
@@ -134,11 +136,25 @@ export function parsePluginMcp(value: unknown, options: { allowEmpty?: boolean }
           const fields = Object.keys(auth);
           if (auth.type === "none" && fields.every((field) => field === "type")) authMode = "none";
           else if (type !== "stdio" && auth.type === "api_key" && auth.headerScheme === "bearer" && fields.every((field) => field === "type" || field === "headerScheme")) authMode = "bearer";
-          else unsupported.push("This server requires an unsupported authentication configuration.");
+          else if (type !== "stdio" && (auth.type === "oauth" || auth.type === "mixed")) {
+            const allowed = new Set(["type", "client", "baseScopes", "defaultScopes"]);
+            if (fields.some((field) => !allowed.has(field))) unsupported.push("This server uses unsupported OAuth endpoint or identity overrides.");
+            let clientId: string | undefined;
+            if (auth.client !== undefined) {
+              const client = record(auth.client, "OAuth client");
+              if (client.mode === "provided" && typeof client.clientId === "string" && client.clientId.length > 0 && client.clientId.length <= 2048 && !/[\0\r\n]/.test(client.clientId) && (client.tokenEndpointAuthMethod === undefined || client.tokenEndpointAuthMethod === "none") && Object.keys(client).every((key) => ["mode", "clientId", "tokenEndpointAuthMethod"].includes(key))) clientId = client.clientId;
+              else if (!(client.mode === "dcr" && Object.keys(client).every((key) => key === "mode"))) unsupported.push("This server requires an unsupported OAuth client registration method.");
+            }
+            const scopeParts = [...list(auth.baseScopes, "OAuth base scopes", 100), ...list(auth.defaultScopes, "OAuth default scopes", 100)];
+            if (scopeParts.some((scope) => /\s/.test(scope))) throw new Error("Invalid OAuth scope.");
+            oauthSettings = { ...(clientId ? { clientId } : {}), ...((auth.baseScopes !== undefined || auth.defaultScopes !== undefined) ? { scopes: [...new Set(scopeParts)] } : {}) };
+            authMode = auth.type;
+          } else unsupported.push("This server requires an unsupported authentication configuration.");
         }
       }
     }
     if (authMode === "none" && (bearerTokenEnvVar || [...Object.keys(headers ?? {}), ...Object.keys(literalHeaders ?? {})].some((key) => key.toLowerCase() === "authorization"))) unsupported.push("The declared unauthenticated server has conflicting authorization settings.");
+    if ((authMode === "oauth" || authMode === "mixed") && (bearerTokenEnvVar || [...Object.keys(headers ?? {}), ...Object.keys(literalHeaders ?? {})].some((key) => key.toLowerCase() === "authorization"))) unsupported.push("The OAuth server has conflicting authorization settings.");
     if (value.oauth !== undefined || value.oauth_resource !== undefined || value.scopes !== undefined || value.auth !== undefined) unsupported.push("This server requires provider-specific authentication.");
     if (value.env_http_headers !== undefined || value.headersHelper !== undefined || value.http_headers_helper !== undefined || value.bearer_token !== undefined) unsupported.push("HTTP authentication or headers require explicit connection setup.");
     if (value.environment_id !== undefined && value.environment_id !== "local") unsupported.push("This server targets an external execution environment.");
@@ -157,7 +173,7 @@ export function parsePluginMcp(value: unknown, options: { allowEmpty?: boolean }
     const known = new Set(["type", "command", "args", "cwd", "url", "extensions", "env", "env_vars", "enabled", "required", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools", "omit_tools_from", "default_tools_approval_mode", "tools", "supports_parallel_tool_calls", "tool_input_schema_max_bytes", "startup_readiness", "oauth", "oauth_resource", "scopes", "auth", "http_headers", "env_http_headers", "headers", "headersHelper", "http_headers_helper", "bearer_token", "bearer_token_env_var", "environment_id", "timeout", "alwaysLoad"]);
     const unknown = Object.keys(value).filter((key) => !known.has(key));
     if (unknown.length) unsupported.push("This server has unrecognized settings that Nova cannot safely honor.");
-    return { name, transport: type as PluginServerConfig["transport"], enabled: value.enabled !== false, ...(command ? { command } : {}), args, ...(cwd ? { cwd } : {}), ...(url ? { url } : {}), ...(headers ? { headers } : {}), ...(literalHeaders ? { literalHeaders } : {}), ...(bearerTokenEnvVar ? { bearerTokenEnvVar } : {}), ...(authMode ? { authMode } : {}), env, envVars: [...new Set(envVars)], ...(enabledTools ? { enabledTools } : {}), disabledTools, omitToolsFrom, ...(startupTimeoutMs ? { startupTimeoutMs } : {}), ...(toolTimeoutMs ? { toolTimeoutMs } : {}), unsupported: [...new Set(unsupported)] };
+    return { name, transport: type as PluginServerConfig["transport"], enabled: value.enabled !== false, ...(command ? { command } : {}), args, ...(cwd ? { cwd } : {}), ...(url ? { url } : {}), ...(headers ? { headers } : {}), ...(literalHeaders ? { literalHeaders } : {}), ...(bearerTokenEnvVar ? { bearerTokenEnvVar } : {}), ...(authMode ? { authMode } : {}), ...(oauthSettings ? { oauthSettings } : {}), env, envVars: [...new Set(envVars)], ...(enabledTools ? { enabledTools } : {}), disabledTools, omitToolsFrom, ...(startupTimeoutMs ? { startupTimeoutMs } : {}), ...(toolTimeoutMs ? { toolTimeoutMs } : {}), unsupported: [...new Set(unsupported)] };
   });
 }
 
@@ -175,7 +191,28 @@ export function requiredEnvironmentNames(server: PluginServerConfig): string[] {
 export function pluginServerSummary(server: PluginServerConfig): import("../../shared/plugins").PluginServerSummary {
   const remote = server.transport !== "stdio" && server.url;
   return { name: server.name, transport: server.transport, enabled: server.enabled, environmentNames: requiredEnvironmentNames(server), unsupported: server.unsupported,
-    ...(remote ? { endpointOrigin: new URL(server.url!).origin, supportsCredential: server.authMode !== "none" && !server.bearerTokenEnvVar && ![...Object.keys(server.headers ?? {}), ...Object.keys(server.literalHeaders ?? {})].some((name) => name.toLowerCase() === "authorization") && !server.unsupported.length } : {}) };
+    ...(remote ? { endpointOrigin: new URL(server.url!).origin, supportsCredential: !["none", "oauth", "mixed"].includes(server.authMode ?? "") && !server.bearerTokenEnvVar && ![...Object.keys(server.headers ?? {}), ...Object.keys(server.literalHeaders ?? {})].some((name) => name.toLowerCase() === "authorization") && !server.unsupported.length, supportsOAuth: !["none", "bearer"].includes(server.authMode ?? "") && !server.bearerTokenEnvVar && ![...Object.keys(server.headers ?? {}), ...Object.keys(server.literalHeaders ?? {})].some((name) => name.toLowerCase() === "authorization") && !server.unsupported.length } : {}) };
+}
+
+/** Resolve only explicitly configured headers; values stay in the main process. */
+export function prepareRemotePluginHeaders(server: PluginServerConfig, inherited: NodeJS.ProcessEnv): Record<string, string> {
+  const lookup = (name: string): string | undefined => {
+    const key = Object.keys(inherited).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
+    return key ? inherited[key] : undefined;
+  };
+  const headers: Record<string, string> = { ...server.literalHeaders };
+  for (const [key, value] of Object.entries(server.headers ?? {})) {
+    headers[key] = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+      const resolved = lookup(name); if (resolved === undefined) throw new Error(`The plugin requires the environment variable ${name}.`); return resolved;
+    });
+    if (/\$\{|[\0\r\n]/.test(headers[key]!) || headers[key]!.length > 8192) throw new Error("Invalid remote plugin header value.");
+  }
+  if (server.bearerTokenEnvVar) {
+    const name = server.bearerTokenEnvVar; const value = lookup(name);
+    if (!value || !/^[\x21-\x7e]{1,4096}$/.test(value)) throw new Error(`The plugin requires a valid bearer token in the environment variable ${name}.`);
+    headers.Authorization = `Bearer ${value}`;
+  }
+  return headers;
 }
 
 /** Resolve the known npm npx shim directly through Node instead of a Windows shell. */

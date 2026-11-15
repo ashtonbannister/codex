@@ -1,4 +1,4 @@
-# Nova Workbench feature coverage — 0.5.11
+# Nova Workbench feature coverage — 0.5.12
 
 This records what this application implements, not everything present in a vendor's desktop app. **Implemented** means there is a working code path and an explicit failure path; it does not mean a live account, installed model, or proprietary UI has been tested on the user's machine. Consult the matching commit's GitHub Actions results for automated evidence.
 
@@ -29,7 +29,7 @@ This records what this application implements, not everything present in a vendo
 | Local Responses models | Configurable Ollama/LM Studio/custom loopback API, metadata-only model discovery, Codex harness against Responses-native server | Discovery does not prove a model is loaded/capable; no model download or hosted fallback |
 | Local Chat Completions models | Per-run loopback translation for streaming text and supported tool calls | Inline tool images are forwarded to vision-capable models; other media/attachments, encrypted reasoning/native response IDs, background jobs, hosted tools and structured-output formats remain unsupported |
 | Windows desktop control | Per-run opt-in; window selection, inspection, screenshot, and supported UI actions through a private MCP server with approval for every request | Codex, compatible Claude Code, and local agents; actual model and server vision/tool support varies; general plugin tools are not enabled |
-| Local plugin MCP tools | Reviewed package copies; selected stdio servers start after per-run approval, the discovered catalog is reviewed before sharing, and each tool call requires approval, and declared skills and persistent data are available | Server programs run under the user account; OAuth, bundles, hooks and host-specific services remain unsupported |
+| Local plugin MCP tools | Reviewed package copies; selected stdio servers start after per-run approval, the discovered catalog is reviewed before sharing, and each tool call requires approval, and declared skills and persistent data are available | Server programs run under the user account; bundles, hooks and host-specific services remain unsupported |
 | Skill package imports | Explicit folder review/import; complete bounded copies with per-run disposable copies, catalog sent to Codex, Claude and local workers | Links and oversized packages are refused; only imported skills are offered; plugin servers/tools and dependencies are not installed |
 | Thinking strength | Codex advertised levels, Claude CLI effort, and local reasoning request | Availability and actual model behavior depend on the provider/server; local servers can ignore the request |
 | Existing Codex reference files | Explicit preview/import of allowlisted Markdown memories, instructions, skill references and plans with import fingerprints | Independent copies, not background freshness reads; references do not install skills/plugins or migrate private memory/automation databases |
@@ -42,7 +42,7 @@ These are application gaps, not promises that every vendor exposes an interchang
 
 | Capability | Current status |
 | --- | --- |
-| Remote plugin MCP tools | Portable mcp.json and imported HTTP and legacy SSE servers support literal headers, bearer environment variables, or Windows-encrypted bearer tokens, HTTPS or loopback HTTP, and per-run connection, catalog and call reviews | Interactive OAuth and host-specific connectors are not implemented; cancellation cannot guarantee remote work stops |
+| Remote plugin MCP tools | Portable mcp.json and imported HTTP and legacy SSE servers support literal headers, bearer environment variables, or Windows-encrypted bearer tokens, HTTPS or loopback HTTP, and per-run connection, catalog and call reviews | OAuth supports discovery, dynamic registration or a provided public client, PKCE and encrypted grants; confidential clients, endpoint overrides and host-specific connectors remain unsupported. Cancellation cannot guarantee remote work stops |
 | General provider approval center | Not implemented; Nova's desktop and imported local-plugin gateways separately ask for approval on every request |
 | Autonomous multi-agent teams, delegation and automatic model routing | Not implemented |
 | Scheduled/background automations, goals, queues and proactive tasks | Not implemented; existing native state is inventory-only |

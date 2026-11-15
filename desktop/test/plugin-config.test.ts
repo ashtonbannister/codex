@@ -114,7 +114,12 @@ test("parses portable streamable HTTP, declared auth, and Codex literal headers 
   assert.deepEqual(pluginServerSummary(parsed[0]!).environmentNames, ["DEMO_TOKEN"]);
   assert.equal(pluginServerSummary(parsed[0]!).supportsCredential, false);
   assert.equal(pluginServerSummary(parsed[1]!).supportsCredential, false);
-  assert.match(parsed[2]!.unsupported.join(" "), /authentication/);
+  assert.deepEqual(parsed[2]!.unsupported, []); assert.equal(parsed[2]!.authMode, "oauth"); assert.equal(pluginServerSummary(parsed[2]!).supportsOAuth, true);
+  const [unsupported] = parsePluginMcp({ mcpServers: { server: { url: "https://example.invalid/mcp", extensions: { "com.openai": { auth: { type: "oauth", tokenUrl: "https://other.invalid/token" } } } } } });
+  assert.match(unsupported!.unsupported.join(" "), /overrides/);
+  const [provided] = parsePluginMcp({ mcpServers: { server: { url: "https://example.invalid/mcp", extensions: { "com.openai": { auth: { type: "oauth", client: { mode: "provided", clientId: "public-client", tokenEndpointAuthMethod: "none" }, baseScopes: ["read"], defaultScopes: ["profile"] } } } } } });
+  assert.deepEqual(provided!.oauthSettings, { clientId: "public-client", scopes: ["read", "profile"] });
+  assert.deepEqual(provided!.unsupported, []);
   assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url: "https://example.invalid", bearer_token_env_var: "TOKEN", http_headers: { authorization: "literal" } } } }), /conflicting/);
   assert.throws(() => parsePluginMcp({ mcpServers: { bad: { url: "https://example.invalid", headers: { "X-Token": "a" }, http_headers: { "x-token": "b" } } } }), /Duplicate/);
 });

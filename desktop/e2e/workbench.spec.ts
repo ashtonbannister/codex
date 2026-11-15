@@ -179,6 +179,11 @@ test("remote plugin credentials can be saved and removed without displaying them
   await expect(dialog).not.toContainText("synthetic-credential");
   await dialog.getByRole("button", { name: "Remove token" }).click();
   await expect(dialog.getByText("No token saved.")).toBeVisible();
+  await dialog.getByRole("button", { name: "Connect account" }).click();
+  await expect(dialog.getByText("Plugin account connected.")).toBeVisible();
+  await expect(token).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Disconnect account" }).click();
+  await expect(dialog.getByText("Connect an account through the provider's sign-in page.")).toBeVisible();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0); expect(errors).toEqual([]);
   await page.screenshot({ path: "test-results/plugin-credentials.png" });
 });

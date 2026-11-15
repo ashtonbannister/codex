@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from
 import path from "node:path";
 import { removeOwnedTree } from "./owned-tree";
 import type { PluginPackage } from "../../shared/plugins";
-import { parsePluginMcp, pluginServerSummary, type PluginServerConfig } from "./plugin-config";
+import { parsePluginMcp, pluginServerSummary, prepareRemotePluginHeaders, type PluginServerConfig } from "./plugin-config";
 import { snapshotSkillPackage, type PackageSnapshot } from "./skill-packages";
 
 const idPattern = /^[0-9a-f-]{36}$/;
@@ -167,7 +167,7 @@ export class PluginPackageStore {
       try { return await this.readPackage(id, true); }
       catch {
         const pkg = await this.readPackage(id, false);
-        return { ...pkg, servers: pkg.servers.map((server) => ({ ...server, supportsCredential: false, unsupported: [...new Set([...server.unsupported, "Package verification failed; import a fresh copy."])] })) };
+        return { ...pkg, servers: pkg.servers.map((server) => ({ ...server, supportsCredential: false, supportsOAuth: false, unsupported: [...new Set([...server.unsupported, "Package verification failed; import a fresh copy."])] })) };
       }
     }));
   }
@@ -227,6 +227,15 @@ export class PluginPackageStore {
     } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   }
 
+  async oauthConnection(id: string, name: string): Promise<{ identity: { id: string; fingerprint: string; server: string }; endpoint: string; settings: import("./plugin-oauth").OAuthSettings; resourceHeaders: Record<string, string> }> {
+    await this.ensureRoot();
+    const pkg = await this.readPackage(id, true);
+    const snapshot = await snapshotSkillPackage(path.join(this.root, id, "files"), { allowNoSkills: true });
+    if (snapshot.fingerprint !== pkg.fingerprint) throw new Error("The plugin changed before sign-in.");
+    const server = parsePluginPackage(snapshot, pkg.name).servers.find((entry) => entry.name === name);
+    if (!server || !server.enabled || !server.url || !pluginServerSummary(server).supportsOAuth) throw new Error("This server does not support Nova sign-in.");
+    return { identity: { id: pkg.id, fingerprint: pkg.fingerprint, server: name }, endpoint: server.url, settings: server.oauthSettings ?? {}, resourceHeaders: prepareRemotePluginHeaders(server, process.env) };
+  }
   async credentialIdentity(id: string, name: string, remove = false): Promise<{ id: string; fingerprint: string; server: string }> {
     await this.ensureRoot();
     const pkg = await this.readPackage(id, !remove);

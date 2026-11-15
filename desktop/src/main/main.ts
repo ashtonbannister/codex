@@ -25,6 +25,8 @@ import type {
 import { WorkspaceService } from "./services/workspace-service";
 import { LocalKeyStore } from "./services/local-key-store";
 import { PluginCredentialStore } from "./services/plugin-credentials";
+import { PluginOAuthStore } from "./services/plugin-oauth-store";
+import { signInPluginOAuth, pluginOAuthToken, type OAuthReview } from "./services/plugin-oauth";
 import { SkillPackageStore } from "./services/skill-packages";
 import { PluginPackageStore } from "./services/plugin-packages";
 import { DesktopControlSession, windowsAutomationRunner } from "./services/desktop-control";
@@ -149,6 +151,7 @@ const PASSIVE_DURING_AUTH = new Set([
   "provider:help",
   "provider:login-state",
   "provider:login-cancel",
+  "plugins:oauth-cancel",
   "workspace:recovery",
   "workspace:acknowledge-recovery",
   "run:cancel",
@@ -171,6 +174,8 @@ const ACCOUNT_OPERATIONS = new Set([
   "plugins:enabled",
   "plugins:server",
   "plugins:credential",
+  "plugins:oauth-start",
+  "plugins:oauth-remove",
   "provider:login-start",
 ]);
 
@@ -225,16 +230,44 @@ function handle(
 
 let localKeyStore: LocalKeyStore;
 let pluginCredentials: PluginCredentialStore;
+let pluginOAuthStore: PluginOAuthStore;
+let pluginOAuthController: AbortController | undefined;
 const localKey = (connection: ReturnType<typeof validateLocalConnection>) => localKeyStore.get(connection);
 
 function registerHandlers(service: WorkspaceService) {
   const plugins = new PluginPackageStore(path.join(app.getPath("userData"), "workspace"));
-  handle("plugins:list", async () => (await plugins.list()).map((pkg) => ({ ...pkg, servers: pkg.servers.map((server) => ({ ...server, credentialStored: pluginCredentials.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }) })) })));
+  handle("plugins:list", async () => (await plugins.list()).map((pkg) => ({ ...pkg, servers: pkg.servers.map((server) => ({ ...server, credentialStored: pluginCredentials.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }), oauthConnected: pluginOAuthStore.has({ id: pkg.id, fingerprint: pkg.fingerprint, server: server.name }) })) })));
   handle("plugins:credential", async (payload) => {
     const input = objectPayload(payload);
     if (typeof input.token !== "string") throw new Error("Invalid plugin credential.");
     const identity = await plugins.credentialIdentity(identifier(input.id), identifier(input.name), input.token === "");
+    if (input.token && pluginOAuthStore.has(identity)) throw new Error("Disconnect the existing plugin sign-in before saving a bearer token.");
     await pluginCredentials.set(identity, input.token);
+  });
+  const reviewPluginOAuth: OAuthReview = async (request) => {
+    if (!window || window.isDestroyed() || quitting) return false;
+    const result = await dialog.showMessageBox(window, { type: "question", buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, title: "Plugin sign-in", message: request.title, detail: confirmationValue(request.detail) });
+    return result.response === 1;
+  };
+  handle("plugins:oauth-cancel", async () => { pluginOAuthController?.abort(); });
+  handle("plugins:oauth-remove", async (payload) => {
+    const input = objectPayload(payload); const identity = await plugins.credentialIdentity(identifier(input.id), identifier(input.name), true);
+    await pluginOAuthStore.set(identity);
+  });
+  handle("plugins:oauth-start", async (payload) => {
+    if (pluginOAuthController) throw new Error("Another plugin sign-in is active.");
+    const controller = new AbortController(); pluginOAuthController = controller;
+    try {
+      const input = objectPayload(payload); const id = identifier(input.id), name = identifier(input.name);
+      const connection = await plugins.oauthConnection(id, name);
+      if (pluginCredentials.has(connection.identity)) throw new Error("Remove the saved bearer token before connecting a plugin account.");
+      if (!await reviewPluginOAuth({ title: "Connect this plugin?", detail: `Nova will contact ${new URL(connection.endpoint).origin} to discover its sign-in provider. The connection sends these configured header names: ${Object.keys(connection.resourceHeaders).join(", ") || "none"}. Authorization can grant access to your data. Review every destination and requested permission.` })) throw new Error("Plugin sign-in was declined.");
+      controller.signal.throwIfAborted();
+      await signInPluginOAuth({ ...connection, store: pluginOAuthStore, signal: controller.signal, review: reviewPluginOAuth, open: (url) => shell.openExternal(url), beforeSave: async () => {
+        const current = await plugins.oauthConnection(id, name);
+        if (JSON.stringify(current) !== JSON.stringify(connection)) throw new Error("The plugin changed during sign-in. Import it again before retrying.");
+      } });
+    } finally { if (pluginOAuthController === controller) pluginOAuthController = undefined; }
   });
   handle("plugins:import", async () => {
     const selected = await dialog.showOpenDialog(window!, { title: "Choose a plugin package folder", buttonLabel: "Review plugin", properties: ["openDirectory"] });
@@ -870,6 +903,8 @@ if (!app.requestSingleInstanceLock()) {
       await localKeyStore.load();
       pluginCredentials = new PluginCredentialStore(dataDir, safeStorage);
       await pluginCredentials.load();
+      pluginOAuthStore = new PluginOAuthStore(dataDir, safeStorage);
+      await pluginOAuthStore.load();
       workspace = new WorkspaceService(
         dataDir,
         broadcast,
@@ -903,6 +938,10 @@ if (!app.requestSingleInstanceLock()) {
           return result.response === 1;
         },
         (identity) => pluginCredentials.get(identity),
+        {
+          has: (identity) => pluginOAuthStore.has(identity),
+          token: (identity, endpoint, settings, signal, approve) => pluginOAuthToken({ identity, endpoint, settings, signal, store: pluginOAuthStore, review: (request) => approve({ action: "start", ...request }) }),
+        },
       );
       await workspace.initialize();
       registerHandlers(workspace);
@@ -925,6 +964,7 @@ if (!app.requestSingleInstanceLock()) {
     if (quitting || !workspace) return;
     event.preventDefault();
     quitting = true;
+    pluginOAuthController?.abort();
     if (broadcastTimer) clearTimeout(broadcastTimer);
     void (async () => {
       try { await providerAuth?.shutdown(); }

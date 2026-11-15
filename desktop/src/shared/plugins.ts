@@ -7,6 +7,8 @@ export interface PluginServerSummary {
   endpointOrigin?: string;
   supportsCredential?: boolean;
   credentialStored?: boolean;
+  supportsOAuth?: boolean;
+  oauthConnected?: boolean;
 }
 export interface PluginPackage {
   id: string;

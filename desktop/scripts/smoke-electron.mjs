@@ -87,6 +87,14 @@ const launch = async () => {
 
 try {
   const page = await launch();
+  if (process.platform === "win32") {
+    const protectedValue = await application.evaluate(({ safeStorage }) => {
+      if (!safeStorage.isEncryptionAvailable()) return false;
+      const encrypted = safeStorage.encryptString("synthetic-plugin-grant");
+      return !encrypted.includes(Buffer.from("synthetic-plugin-grant")) && safeStorage.decryptString(encrypted) === "synthetic-plugin-grant";
+    });
+    assert.equal(protectedValue, true, "Windows encryption must protect and recover a synthetic plugin grant");
+  }
   const snapshot = await page.evaluate(() => window.workbench.getSnapshot());
   assert.equal(snapshot.state.projects.length, 0);
   assert.equal(snapshot.state.runs.length, 0);

@@ -3,7 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { PluginPackage } from "../../shared/plugins";
 import { snapshotSkillPackage } from "./skill-packages";
-import { preparePluginLaunch, requiredEnvironmentNames, type PluginServerConfig } from "./plugin-config";
+import { preparePluginLaunch, prepareRemotePluginHeaders, requiredEnvironmentNames, type PluginServerConfig } from "./plugin-config";
 import { McpProcessError, McpStdioClient, type ImportedMcpTool } from "./mcp-stdio";
 import { startLocalMcp } from "./mcp-http";
 import { McpRemoteClient } from "./mcp-remote";
@@ -53,39 +53,27 @@ const summary = (launch: Launch) => ({
 });
 
 /** Start only reviewed servers and gate every tool call independently. */
-export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined): Promise<{
+export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }): Promise<{
   url: string; token: string; dispose(): Promise<void>;
 }> {
   signal.throwIfAborted();
   const launches: Launch[] = [];
-  const remotes: Array<{ pkg: PluginPackage; server: PluginServerConfig; root: string; endpoint: URL; headers: Record<string, string> }> = [];
+  const remotes: Array<{ pkg: PluginPackage; server: PluginServerConfig; root: string; endpoint: URL; headers: Record<string, string>; oauthAvailable: boolean }> = [];
   for (const entry of packages) for (const server of entry.servers) {
     if (server.transport !== "stdio") {
       if (!server.enabled || server.unsupported.length || !server.url) throw new Error("This remote plugin cannot be started with its current settings.");
       const endpoint = new URL(server.url);
-      const headers: Record<string, string> = { ...server.literalHeaders };
-      for (const [key, value] of Object.entries(server.headers ?? {})) {
-        headers[key] = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
-          const envKey = Object.keys(process.env).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
-          if (!envKey || process.env[envKey] === undefined) throw new Error(`The plugin requires the environment variable ${name}.`);
-          return process.env[envKey]!;
-        });
-        if (/\$\{|[\0\r\n]/.test(headers[key]!) || headers[key]!.length > 8192) throw new Error("Invalid remote plugin header value.");
-      }
-      if (server.bearerTokenEnvVar) {
-        const name = server.bearerTokenEnvVar;
-        const envKey = Object.keys(process.env).find((candidate) => process.platform === "win32" ? candidate.toUpperCase() === name.toUpperCase() : candidate === name);
-        const value = envKey ? process.env[envKey] : undefined;
-        if (!value || !/^[\x21-\x7e]{1,4096}$/.test(value)) throw new Error(`The plugin requires a valid bearer token in the environment variable ${name}.`);
-        headers.Authorization = `Bearer ${value}`;
-      }
+      const headers = prepareRemotePluginHeaders(server, process.env);
       const savedToken = credential({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, server: server.name });
       if (savedToken) {
         if (Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This server already configures an Authorization header.");
         headers.Authorization = `Bearer ${savedToken}`;
       }
+      const oauthAvailable = !!oauth?.has({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint, server: server.name });
+      if (oauthAvailable && Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This plugin has conflicting saved authentication methods.");
+      if (server.authMode === "oauth" && !oauthAvailable) throw new Error("Sign in to this plugin in Settings → Plugins before starting a run.");
       if (server.authMode === "bearer" && !Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) throw new Error("This plugin requires a bearer token. Save one in Settings → Plugins.");
-      remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers });
+      remotes.push({ pkg: entry.pkg, server, root: entry.root, endpoint, headers, oauthAvailable });
       continue;
     }
     const prepared = await preparePluginLaunch(server, entry.root, process.env, { dataDir: entry.dataDir, projectDir });
@@ -105,7 +93,7 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
     launches.push({ pkg: entry.pkg, server, root: entry.root, dataDir: entry.dataDir, projectDir, prepared, fileIdentities, directoryIdentities });
   }
   if (!launches.length && !remotes.length) throw new Error("No enabled plugin servers are available.");
-  const startDetail = printable({ servers: [...launches.map(summary), ...remotes.map(({ pkg, server, endpoint, headers }) => ({ plugin: pkg.name, server: server.name, transport: server.transport, endpoint: `${endpoint.origin}${endpoint.pathname}${endpoint.search ? "?[query hidden]" : ""}`, headerNames: Object.keys(headers), environmentNames: requiredEnvironmentNames(server) }))], note: "Local programs run with your user account and can access files or networks on startup. Remote connections send configured headers and may receive information during connection and tool calls. Remote services may continue processing after cancellation. Each tool call is reviewed. Header values and URL queries are hidden." });
+  const startDetail = printable({ servers: [...launches.map(summary), ...remotes.map(({ pkg, server, endpoint, headers, oauthAvailable }) => ({ oauthSignedIn: oauthAvailable, plugin: pkg.name, server: server.name, transport: server.transport, endpoint: `${endpoint.origin}${endpoint.pathname}${endpoint.search ? "?[query hidden]" : ""}`, headerNames: Object.keys(headers), environmentNames: requiredEnvironmentNames(server) }))], note: "Local programs run with your user account and can access files or networks on startup. Remote connections send configured headers and may receive information during connection and tool calls. Remote services may continue processing after cancellation. Each tool call is reviewed. Header values and URL queries are hidden." });
   if (!(await approve({ action: "start", title: "Start selected plugin servers?", detail: startDetail }))) throw new Error("Plugin startup was declined.");
   signal.throwIfAborted();
   // Revalidate reviewed package bytes and executable identities after the dialog.
@@ -171,6 +159,11 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
       signal.throwIfAborted();
       const snapshot = await snapshotSkillPackage(remote.root, { allowNoSkills: true });
       if (snapshot.fingerprint !== remote.pkg.fingerprint) throw new Error("A plugin package changed before its server connected.");
+      if (remote.oauthAvailable) {
+        const token = await oauth!.token({ id: remote.pkg.id, fingerprint: remote.pkg.fingerprint, server: remote.server.name }, remote.endpoint.href, remote.server.oauthSettings ?? {}, signal, approve);
+        if (!token) throw new Error("Plugin sign-in is unavailable. Sign in again in Settings → Plugins.");
+        remote.headers.Authorization = `Bearer ${token}`;
+      }
       const client = new McpRemoteClient(remote.endpoint, remote.server.transport as "http" | "sse", remote.headers, signal);
       clients.push(client);
       const timeout = remote.server.startupTimeoutMs ?? 30_000;
