@@ -10,6 +10,8 @@ export interface SkillDescriptor {
   forkAgent?: string;
   forkAgentPath?: string;
   forkAgentReadOnly?: boolean;
+  forkAgentTools?: string[];
+  forkAgentDisallowedTools?: string[];
   forkAgentModel?: string;
   forkModelInherit?: boolean;
   allowedProviders?: Array<"codex" | "claude" | "ollama">;

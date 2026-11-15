@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { SkillPackageStore } from "../src/main/services/skill-packages";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
+import { providerArguments } from "../src/main/services/providers";
 import { renderExplicitSkill } from "../src/main/services/skill-selection";
 
 test("custom fork agents use verified package files and enforce supported tool limits", async (t) => {
@@ -28,7 +29,7 @@ test("plugin agent declarations select only the declared files and reject unsupp
   const store = new PluginPackageStore(path.join(root, "data")); const preview = await store.preview(source); assert.equal(preview.skills[0]!.forkAgentPath, "custom/reviewer.md");
   const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true); const run = await store.prepareRun("/fixture:review ECHO_PROMPT", "codex");
   assert.equal(run.invoked[0]!.agentPrompt, "Selected instructions.\n"); await run.verifyProviders(); await run.dispose();
-  await writeFile(path.join(source, "custom", "reviewer.md"), "---\nname: reviewer\ndescription: Unsupported\ndisallowedTools: Bash\n---\nDo not run.\n");
+  await writeFile(path.join(source, "custom", "reviewer.md"), "---\nname: reviewer\ndescription: Unsupported\ndisallowedTools: mcp__github__*\n---\nDo not run.\n");
   const unsupported = await store.preview(source); assert.match(unsupported.skills[0]!.unsupported!.join(" "), /unavailable or unsupported/);
 });
 
@@ -37,7 +38,7 @@ test("agent overrides cannot silently discard restrictions and nested plugin age
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-agent-scope-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
   const source = path.join(root, "source"); await mkdir(path.join(source, "agents"), { recursive: true });
   await writeFile(path.join(source, "SKILL.md"), "---\nname: test\ndescription: Test\ncontext: fork\nagent: Explore\n---\nInspect.\n");
-  await writeFile(path.join(source, "agents", "custom.md"), "---\nname: Explore\ndescription: Restricted\ndisallowedTools: Bash\n---\nAgent instructions.\n");
+  await writeFile(path.join(source, "agents", "custom.md"), "---\nname: Explore\ndescription: Restricted\ndisallowedTools: mcp__github__*\n---\nAgent instructions.\n");
   const store = new SkillPackageStore(path.join(root, "data")); const blocked = await store.preview(source); assert.match(blocked.skills[0]!.unsupported!.join(" "), /unavailable or unsupported/);
   await writeFile(path.join(source, "agents", "custom.md"), "---\nname: Explore\ndescription: Override\n---\nCustom Explore instructions.\n");
   const allowed = await store.preview(source); assert.equal(allowed.skills[0]!.forkAgentPath, "agents/custom.md"); assert.deepEqual(allowed.skills[0]!.unsupported, []);
@@ -58,4 +59,24 @@ test("custom agent model overrides require Claude and skill-level inherit wins",
   await store.install(source, preview.fingerprint); const run = await store.prepareRun("/task", "codex"); await assert.rejects(renderExplicitSkill(run.invoked[0]!, root, "codex"), /requires Claude/); await run.dispose();
   await writeFile(path.join(source, "SKILL.md"), "---\nname: task\ndescription: Task\ncontext: fork\nagent: reviewer\nmodel: inherit\n---\nInspect.\n");
   const inherited = await store.preview(source); assert.equal(inherited.skills[0]!.forkAgentModel, undefined);
+});
+
+
+test("custom agent allowlists and denylists narrow Claude tools", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-agent-tools-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(path.join(source, "agents"), { recursive: true });
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: task\ndescription: Task\ncontext: fork\nagent: reviewer\n---\nInspect.\n");
+  const agentPath = path.join(source, "agents", "reviewer.md");
+  await writeFile(agentPath, "---\nname: reviewer\ndescription: Review\ntools: [Read, Grep, Edit]\ndisallowedTools: [Grep, Edit]\n---\nReview.\n");
+  const store = new SkillPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.deepEqual(preview.skills[0]!.forkAgentTools, ["Read", "Grep", "Edit"]); assert.deepEqual(preview.skills[0]!.forkAgentDisallowedTools, ["Grep", "Edit"]); assert.equal(preview.skills[0]!.forkAgentReadOnly, true);
+  await store.install(source, preview.fingerprint); const codex = await store.prepareRun("/task", "codex"); await assert.rejects(renderExplicitSkill(codex.invoked[0]!, root, "codex"), /requires Claude/); await codex.dispose();
+  await writeFile(agentPath, "---\nname: reviewer\ndescription: Review\ntools: [Read]\ndisallowedTools: [Read]\n---\nReview.\n"); assert.match((await store.preview(source)).skills[0]!.unsupported!.join(" "), /unavailable or unsupported/);
+});
+
+
+test("custom Claude tools cannot exceed the parent run mode", () => {
+  assert.throws(() => providerArguments("claude", process.cwd(), "plan", "", { claudeTools: ["Read", "Edit"] }), /no permitted tools/);
+  const args = providerArguments("claude", process.cwd(), "build", "", { claudeTools: ["Read", "Edit"] });
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Edit"); assert.equal(args[args.indexOf("--disallowedTools") + 1], "mcp__*");
 });

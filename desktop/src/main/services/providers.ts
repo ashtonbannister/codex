@@ -718,10 +718,13 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
-  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string; pluginMcpUrl?: string; pluginDirectory?: string } = {},
+  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string; pluginMcpUrl?: string; pluginDirectory?: string; claudeTools?: string[] } = {},
 ): string[] {
   if (provider === "claude") {
     const hasMcp = !!(options.desktopMcpUrl || options.pluginMcpUrl);
+    const baselineTools = mode === "plan" ? ["Read", "Grep", "Glob"] : ["Read", "Grep", "Glob", "Edit", "Write"];
+    const claudeTools = options.claudeTools ?? baselineTools;
+    if (!claudeTools.length || claudeTools.some((name) => !baselineTools.includes(name))) throw new Error("The custom agent has no permitted tools for this run.");
     const servers = {
       ...(options.desktopMcpUrl ? { nova_desktop: { type: "http", url: options.desktopMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_DESKTOP_TOKEN}" } } } : {}),
       ...(options.pluginMcpUrl ? { nova_plugins: { type: "http", url: options.pluginMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_PLUGIN_TOKEN}" } } } : {}),
@@ -740,7 +743,7 @@ export function providerArguments(
       "--permission-mode",
       mode === "plan" && !hasMcp ? "plan" : "acceptEdits",
       "--tools",
-      mode === "plan" ? "Read,Grep,Glob" : "Read,Grep,Glob,Edit,Write",
+      claudeTools.join(","),
       "--settings",
       JSON.stringify({ disableAllHooks: true }),
       ...((options.skillDirectory || options.pluginDirectory) ? ["--add-dir", ...[options.skillDirectory, options.pluginDirectory].filter((item): item is string => !!item)] : []),
