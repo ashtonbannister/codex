@@ -16,6 +16,7 @@ export interface BundleField {
   required: boolean;
   sensitive: boolean;
   multiple: boolean;
+  options?: string[];
   min?: number;
   max?: number;
   configured?: boolean;

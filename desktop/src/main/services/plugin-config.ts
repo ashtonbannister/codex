@@ -347,6 +347,6 @@ export async function preparePluginLaunch(server: PluginServerConfig, pluginRoot
     const value = match ? bundleValues[match[1]!] : undefined;
     return Array.isArray(value) ? value.map((item) => { if (/\$\{|[\0\r\n]/.test(item)) throw new Error("Invalid bundle path."); return item; }) : [expand(argument)];
   });
-  const bundleReview = server.isBundle ? (server.bundleFields ?? []).map((field) => ({ name: field.key, value: field.sensitive ? "[redacted]" as const : bundleValues[field.key]! })) : undefined;
+  const bundleReview = server.bundleFields?.length ? server.bundleFields.map((field) => ({ name: field.key, value: field.sensitive ? "[redacted]" as const : bundleValues[field.key]! })) : undefined;
   return { executable, args: [...executable.prefix, ...args], cwd: realCwd, env: { ...environment, ...executable.env }, ...(bundleReview ? { bundleReview } : {}) };
 }

@@ -75,7 +75,7 @@ function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name
   return { name, servers: [parsed!], skills: snapshot.skills, commands: [], warnings, ...(bundleFields.length ? { bundleFields: publicBundleFields(bundleFields) } : {}) };
 }
 
-export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; commands: CommandDefinition[]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
+export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; commands: CommandDefinition[]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"]; pluginFields?: BundleDefinition[] } {
   if (snapshot.files.some((file) => file.path.toLowerCase() === "manifest.json") && !snapshot.files.some((file) => ["plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json", ".mcp.json", "mcp.json"].includes(file.path.toLowerCase()))) return parseMcpBundle(snapshot, fallbackName);
   const allManifests = snapshot.files.filter((file) => [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"].includes(file.path.toLowerCase()));
   const hasRootManifest = snapshot.files.some((file) => file.path.toLowerCase() === "plugin.json");
@@ -89,6 +89,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   const defaultConfig = snapshot.files.some((file) => file.path.toLowerCase() === defaultFile) ? parsePluginMcp(readJson(snapshot, defaultFile), { allowEmpty: true }) : [];
   const variants: Array<Map<string, PluginServerConfig>> = [];
   const commandVariants: CommandDefinition[][] = [];
+  const configVariants: BundleDefinition[][] = [];
   const warnings = new Set<string>();
   if (portable && snapshot.files.some((file) => file.path.toLowerCase() === ".mcp.json")) warnings.add("The portable mcp.json is used; a legacy .mcp.json is loaded only if explicitly declared by the selected overlay.");
   const skillRoots = new Set<string>(["skills"]);
@@ -118,6 +119,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
     for (const field of ["hooks", "agents", "lspServers", "workflows", "outputStyles", "experimental", "apps"]) {
       if (manifest[field] !== undefined) warnings.add(`Plugin ${field} are not loaded by Nova.`);
     }
+    configVariants.push(parseBundleFields(manifest.userConfig, true));
     const commands = parsePluginCommands(snapshot, manifest.commands);
     if (manifest.commands !== undefined && snapshot.files.some((entry) => /^commands\/[^/]+\.md$/i.test(entry.path) && !commands.some((command) => command.path?.toLowerCase() === entry.path.toLowerCase()))) warnings.add("Some default commands are excluded by the manifest's command selection.");
     commandVariants.push(commands);
@@ -155,15 +157,22 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   const signature = (servers: Map<string, PluginServerConfig>) => JSON.stringify([...servers.entries()].sort(([a], [b]) => a.localeCompare(b)));
   if (variants.some((servers) => signature(servers) !== signature(variants[0]!))) throw new Error("Codex and Claude plugin manifests define different servers. Import a provider-specific package instead.");
   if (commandVariants.some((commands) => JSON.stringify(commands) !== JSON.stringify(commandVariants[0]))) throw new Error("Codex and Claude plugin manifests define different commands. Import a provider-specific package instead.");
+  if (configVariants.some((fields) => JSON.stringify(fields) !== JSON.stringify(configVariants[0]))) throw new Error("Plugin manifests define different settings. Import a provider-specific package instead.");
+  const pluginFields = configVariants[0] ?? [];
+  if (pluginFields.length) warnings.add("Plugin settings are available to local servers. Settings in skill or command content and remote server configuration are not supported.");
   const commands = commandVariants[0] ?? [];
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) for (const command of commands) command.unsupported.push("The plugin name cannot be used as a command namespace.");
   const servers = [...(variants[0]?.values() ?? [])];
+  for (const server of servers) {
+    if (server.transport === "stdio" && !server.bundleArchivePath) server.bundleFields = pluginFields;
+    else if (server.transport !== "stdio" && JSON.stringify(server).includes("${user_config.")) server.unsupported.push("Plugin settings in remote server configuration are not supported.");
+  }
   if (servers.length > 100) throw new Error("A plugin package cannot contain more than 100 MCP servers.");
   const skillKey = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
   const skills = snapshot.skills.filter((skill) => [...skillRoots].some((root) => root === "." || skillKey(skill.path) === skillKey(root) || skillKey(skill.path).startsWith(`${skillKey(root)}/`)));
   if (skills.length !== snapshot.skills.length) warnings.add(`${snapshot.skills.length - skills.length} skill definition(s) outside declared plugin skill paths were excluded.`);
   if (!servers.length && !skills.length && !commands.length) throw new Error("This package does not contain supported skills, commands or MCP servers.");
-  return { name, servers, skills, commands, warnings: [...warnings] };
+  return { name, servers, skills, commands, warnings: [...warnings], ...(pluginFields.length ? { pluginFields, bundleFields: publicBundleFields(pluginFields) } : {}) };
 }
 
 /** Keep uninvoked command instructions out of provider-visible copies. */
@@ -445,7 +454,7 @@ export class PluginPackageStore {
     const sourceRoot = path.join(this.root, id, "files");
     const resolved = await this.resolvePackage(snapshot, sourceRoot, pkg.name);
     const server = resolved.servers.find((entry) => entry.bundleFieldScope === scope && (entry.bundleFields ?? []).some((item) => item.key === field));
-    const definition = server?.bundleFields?.find((entry) => entry.key === field);
+    const definition = server?.bundleFields?.find((entry) => entry.key === field) ?? (!scope ? resolved.pluginFields?.find((entry) => entry.key === field) : undefined);
     if (!definition) throw new Error("Bundle setting not found.");
     return { id: pkg.id, fingerprint: pkg.fingerprint, ...(scope ? { server: scope } : {}), definition };
   }
