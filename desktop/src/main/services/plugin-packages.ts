@@ -9,6 +9,7 @@ import { commandSummaries, findPluginCommand, looksLikePluginCommand, parsePlugi
 import type { PluginPackage } from "../../shared/plugins";
 import { matchingSkillReference, skillReferences, visibleSkill, type SelectedSkill } from "./skill-selection";
 import { parsePluginMcp, pluginServerSummary, prepareRemotePluginHeaders, remoteHeaderSettings, type PluginServerConfig } from "./plugin-config";
+import { defaultAgentPaths, resolveCustomAgents, verifiedAgentPrompt } from "./skill-agents";
 import { filterSkillSnapshot, snapshotSkillPackage, type PackageSnapshot } from "./skill-packages";
 
 const idPattern = /^[0-9a-f-]{36}$/;
@@ -99,6 +100,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   const variants: Array<Map<string, PluginServerConfig>> = [];
   const commandVariants: CommandDefinition[][] = [];
   const configVariants: BundleDefinition[][] = [];
+  const agentVariants: string[][] = [];
   const warnings = new Set<string>();
   if (portable && snapshot.files.some((file) => file.path.toLowerCase() === ".mcp.json")) warnings.add("The portable mcp.json is used; a legacy .mcp.json is loaded only if explicitly declared by the selected overlay.");
   const skillRoots = new Set<string>(["skills"]);
@@ -125,7 +127,15 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
         else skillRoots.add(manifestPath(entry.replace(/\/$/, "")));
       }
     }
-    for (const field of ["hooks", "agents", "lspServers", "workflows", "outputStyles", "experimental", "apps"]) {
+    if (manifest.agents === undefined) agentVariants.push(defaultAgentPaths(snapshot.files, true));
+    else {
+      const entries = Array.isArray(manifest.agents) ? manifest.agents : [manifest.agents];
+      if (entries.length > 100 || entries.some((entry) => typeof entry !== "string")) throw new Error("Unsupported plugin agent paths.");
+      const selected = (entries as string[]).map(manifestPath);
+      if (selected.some((entry) => !/\.md$/i.test(entry) || !snapshot.files.some((file) => file.path.toLowerCase() === entry.toLowerCase()))) throw new Error("A declared plugin agent file is missing or invalid.");
+      agentVariants.push(selected);
+    }
+    for (const field of ["hooks", "lspServers", "workflows", "outputStyles", "experimental", "apps"]) {
       if (manifest[field] !== undefined) warnings.add(`Plugin ${field} are not loaded by Nova.`);
     }
     configVariants.push(parseBundleFields(manifest.userConfig, true));
@@ -160,13 +170,15 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
     }
     variants.push(servers);
   }
-  if (!manifests.length) { variants.push(new Map(defaultConfig.map((server) => [server.name, server]))); commandVariants.push(parsePluginCommands(snapshot, undefined)); }
+  if (!manifests.length) { variants.push(new Map(defaultConfig.map((server) => [server.name, server]))); commandVariants.push(parsePluginCommands(snapshot, undefined)); agentVariants.push(defaultAgentPaths(snapshot.files, true)); }
   if (snapshot.files.some((file) => /^hooks\/hooks\.json$/i.test(file.path))) warnings.add("Plugin hooks are not loaded by Nova.");
-  if (snapshot.files.some((file) => /^(?:agents|workflows)\//i.test(file.path))) warnings.add("Plugin agents and workflows are not loaded by Nova.");
+  if (snapshot.files.some((file) => /^workflows\//i.test(file.path))) warnings.add("Plugin workflows are not loaded by Nova.");
+  if (agentVariants.some((paths) => paths.length)) warnings.add("Supported custom agents are available only through explicitly invoked forked skills.");
   const signature = (servers: Map<string, PluginServerConfig>) => JSON.stringify([...servers.entries()].sort(([a], [b]) => a.localeCompare(b)));
   if (variants.some((servers) => signature(servers) !== signature(variants[0]!))) throw new Error("Codex and Claude plugin manifests define different servers. Import a provider-specific package instead.");
   if (commandVariants.some((commands) => JSON.stringify(commands) !== JSON.stringify(commandVariants[0]))) throw new Error("Codex and Claude plugin manifests define different commands. Import a provider-specific package instead.");
   if (configVariants.some((fields) => JSON.stringify(fields) !== JSON.stringify(configVariants[0]))) throw new Error("Plugin manifests define different settings. Import a provider-specific package instead.");
+  if (agentVariants.some((paths) => JSON.stringify(paths.map((entry) => entry.toLowerCase()).sort()) !== JSON.stringify(agentVariants[0]!.map((entry) => entry.toLowerCase()).sort()))) throw new Error("Plugin manifests define different agents. Import a provider-specific package instead.");
   const pluginFields = configVariants[0] ?? [];
   if (pluginFields.length) warnings.add("Plugin settings are available to local servers and reviewed instructions. Remote URLs and sensitive settings in remote headers are not supported. Sensitive values are withheld from instructions.");
   const commands = commandVariants[0] ?? [];
@@ -187,7 +199,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   }
   if (servers.length > 100) throw new Error("A plugin package cannot contain more than 100 MCP servers.");
   const skillKey = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
-  const skills = snapshot.skills.filter((skill) => [...skillRoots].some((root) => root === "." || skillKey(skill.path) === skillKey(root) || skillKey(skill.path).startsWith(`${skillKey(root)}/`))).map((skill) => {
+  const skills = resolveCustomAgents(snapshot.skills, snapshot.files, agentVariants[0] ?? [], name).filter((skill) => [...skillRoots].some((root) => root === "." || skillKey(skill.path) === skillKey(root) || skillKey(skill.path).startsWith(`${skillKey(root)}/`))).map((skill) => {
     if (!skill.unsupported?.includes("This skill requires plugin settings.")) return skill;
     const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("Plugin skill is missing.");
     const body = skillBody(new TextDecoder("utf-8", { fatal: true }).decode(file.data));
@@ -380,7 +392,7 @@ export class PluginPackageStore {
         const file = snapshot.files.find((item) => item.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
         const verifiedContent = new TextDecoder("utf-8", { fatal: true }).decode(file.data);
         const config = skill.unsupported?.length ? undefined : instructionSettings(skillBody(verifiedContent), parsed.pluginFields ?? [], settings?.values({ id: pkg.id, fingerprint: pkg.fingerprint }) ?? {}, settings?.paths ?? {}).config;
-        result.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: path.join(this.dataDir, "plugin-data", pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent, config });
+        result.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: path.join(this.dataDir, "plugin-data", pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent, agentPrompt: verifiedAgentPrompt(skill, snapshot.files), config });
       }
     }
     return result;
@@ -494,7 +506,7 @@ export class PluginPackageStore {
         }
         for (const skill of matched) {
           const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
-          invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), config: configs.get(skill.path)?.config });
+          invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), agentPrompt: verifiedAgentPrompt(skill, snapshot.files), config: configs.get(skill.path)?.config });
         }
         packages.push({ pkg, root, ...(providerFingerprints.has(pkg.id) ? { providerRoot } : {}), dataDir, servers, commands: resolved.commands, skills: selected, pluginFields: resolved.pluginFields });
       }

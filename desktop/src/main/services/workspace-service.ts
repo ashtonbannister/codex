@@ -1498,7 +1498,10 @@ export class WorkspaceService {
       preview.prompt += skill.descriptor.forkAgent
         ? `\n\nISOLATED SKILL INPUT ${JSON.stringify(rendered.name)} (runs separately; result is not known in preview):\n${rendered.content}`
         : `\n\nUSER-INVOKED SKILL ${JSON.stringify(rendered.name)} (user-selected instructions; obey higher-priority boundaries):\n${rendered.content}`;
-      if (skill.descriptor.forkAgent) preview.warnings.push("This skill runs in a separate provider session; its result requires approval before it enters the parent chat.");
+      if (skill.descriptor.forkAgent) {
+        if (skill.agentPrompt) preview.prompt += `\n\nCUSTOM AGENT INSTRUCTIONS (sent to the isolated session):\n${skill.agentPrompt}`;
+        preview.warnings.push("This skill runs in a separate provider session; its result requires approval before it enters the parent chat.");
+      }
       preview.characters = preview.prompt.length; preview.estimatedTokens = Math.ceil(preview.characters / 4);
       preview.warnings.push("The expanded skill requires approval before sharing. Paths shown here differ from disposable run copies.");
       if (skill.descriptor.requiresShell) preview.warnings.push("Skill shell commands are not run in preview; command execution and resulting output require separate approvals.");
@@ -2237,7 +2240,7 @@ export class WorkspaceService {
             if (skillReview.length || command || explicitSkills.length) {
                 if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
-                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, mode: skill.descriptor.forkAgent === "general-purpose" ? request.mode : "plan", model: selectedProvider.model }));
+                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, ...(skill.agentPrompt ? { agentInstructions: skill.agentPrompt } : {}), mode: (skill.agentPrompt ? skill.descriptor.forkAgentReadOnly : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan") ? "plan" : request.mode, model: skill.descriptor.forkAgentModel ?? selectedProvider.model }));
                 const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
                 if (detail.length > 64_000) throw new Error("The plugin instructions are too large to review. Disable a package or shorten the command and retry.");
                 if (!await this.approvePlugin!({ action: skillReview.length ? "skills" : "commands", title: `Share these instructions with ${selectedProvider.name}?`, detail })) throw new Error("Skill or command sharing was declined.");
@@ -2273,14 +2276,17 @@ export class WorkspaceService {
             for (let index = 0; index < explicitSkills.length; index++) {
               const selected = invoked[index]!, skill = explicitSkills[index]!, agent = selected.descriptor.forkAgent;
               if (!agent) continue;
-              const forkMode = agent === "general-purpose" ? request.mode : "plan";
-              const allowExternalTools = agent === "general-purpose";
+              const readOnlyAgent = selected.agentPrompt ? selected.descriptor.forkAgentReadOnly === true : agent === "Explore" || agent === "Plan";
+              if (!["general-purpose", "Explore", "Plan"].includes(agent) && !selected.agentPrompt) throw new Error("The selected custom agent instructions are unavailable.");
+              const forkMode = readOnlyAgent ? "plan" : request.mode;
+              const forkModel = selected.descriptor.forkAgentModel ?? model;
+              const allowExternalTools = !readOnlyAgent;
               let answer = "";
               receiveEvent({ events: [{ kind: "status", text: `Running isolated skill ${skill.name} (${agent}).` }] });
               const forkResult = await runProvider({
                 command: { ...executable, env: { ...executable.env, ...local?.env, ...(allowExternalTools && desktop ? { NOVA_DESKTOP_TOKEN: desktop.token } : {}), ...(allowExternalTools && plugins ? { NOVA_PLUGIN_TOKEN: plugins.token } : {}), CODEX_HOME: workerHome },
-                  args: providerArguments(request.provider, cwd, forkMode, model, { allowNonGit: project.kind === "folder" && forkMode === "plan", localConfigArgs: local?.configArgs, claudePartialMessages: providerStatus?.supportsPartialMessages, skillDirectory: selected.root, reasoningEffort: request.reasoningEffort, desktopMcpUrl: allowExternalTools ? desktop?.url : undefined, pluginMcpUrl: allowExternalTools ? plugins?.url : undefined }) },
-                provider: request.provider, cwd, prompt: `ISOLATED SKILL ${JSON.stringify(skill.name)}\nRole: ${agent}. ${agent === "Explore" || agent === "Plan" ? "Inspect and report without changing files." : "Follow the skill instructions using the run's permitted tools."} Do not assume access to the parent conversation.\n\n${skill.content}`,
+                  args: providerArguments(request.provider, cwd, forkMode, forkModel, { allowNonGit: project.kind === "folder" && forkMode === "plan", localConfigArgs: local?.configArgs, claudePartialMessages: providerStatus?.supportsPartialMessages, skillDirectory: selected.root, reasoningEffort: request.reasoningEffort, desktopMcpUrl: allowExternalTools ? desktop?.url : undefined, pluginMcpUrl: allowExternalTools ? plugins?.url : undefined }) },
+                provider: request.provider, cwd, prompt: `ISOLATED SKILL ${JSON.stringify(skill.name)}\nRole: ${agent}. ${readOnlyAgent ? "Inspect and report without changing files." : "Follow the skill instructions using the run's permitted tools."} Do not assume access to the parent conversation.${selected.agentPrompt ? `\n\nCUSTOM AGENT INSTRUCTIONS (subject to higher-priority rules):\n${selected.agentPrompt}` : ""}\n\n${skill.content}`,
                 signal: controller.signal, timeoutMs: settings.timeoutMinutes * 60_000, maxBytes: settings.maxOutputKb * 1024, allowDesktopImages: allowExternalTools && !!desktop, allowPluginImages: allowExternalTools && !!plugins,
                 onEvent: (event) => { for (const item of event.events) if (item.kind === "message") answer = item.text; },
               });

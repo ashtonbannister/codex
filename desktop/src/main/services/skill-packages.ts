@@ -3,6 +3,7 @@ import { JSON_SCHEMA, load } from "js-yaml";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { defaultAgentPaths, resolveCustomAgents, unresolvedCustomAgent, verifiedAgentPrompt } from "./skill-agents";
 import { parseNamedArguments } from "./skill-arguments";
 import { removeOwnedTree } from "./owned-tree";
 import { withBundleArchive } from "./bundle-archive";
@@ -46,10 +47,11 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   const name = typeof header.name === "string" && header.name.trim() ? header.name.trim().slice(0, 800) : path.posix.basename(path.posix.dirname(relative)) || "skill";
   const description = typeof header.description === "string" ? header.description.replace(/\s+/g, " ").trim().slice(0, 800) : "";
   const unsupported: string[] = [], warnings: string[] = [];
-  let forkAgent: "general-purpose" | "Explore" | "Plan" | undefined;
+  let forkAgent: string | undefined;
   if (header.context === "fork") {
-    if (header.agent === undefined || header.agent === "general-purpose" || header.agent === "Explore" || header.agent === "Plan") forkAgent = (header.agent ?? "general-purpose") as typeof forkAgent;
-    else unsupported.push("This skill requests an unsupported custom fork agent.");
+    if (header.agent === undefined) forkAgent = "general-purpose";
+    else if (typeof header.agent === "string" && /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/.test(header.agent)) { forkAgent = header.agent; if (!["general-purpose", "Explore", "Plan"].includes(forkAgent)) unsupported.push(unresolvedCustomAgent); }
+    else unsupported.push("This skill requests an invalid fork agent.");
     try { flag("background", true); } catch { unsupported.push("Invalid fork background setting."); }
     warnings.push("Forked skills require explicit invocation and run in a separate provider session.");
   } else if (header.context !== undefined || header.agent !== undefined || header.background !== undefined) unsupported.push("This skill requests an unsupported context or agent.");
@@ -67,7 +69,7 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
   const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent, userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */
@@ -160,7 +162,7 @@ export async function snapshotSkillPackage(selected: string, options: { allowNoS
   }
   if (!skills.length && !options.allowNoSkills) throw new Error("No SKILL.md file was found in this folder. Select a skill folder or a package containing skills.");
   const fingerprint = createHash("sha256").update(JSON.stringify(files.map(({ path: file, digest, data }) => [file, data.length, digest]))).digest("hex");
-  return { files, skills, bytes, fingerprint };
+  return { files, skills: resolveCustomAgents(skills, files, defaultAgentPaths(files)), bytes, fingerprint };
 }
 
 export class SkillPackageStore {
@@ -284,7 +286,7 @@ export class SkillPackageStore {
       if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Skill package ${pkg.name} changed before preview.`);
       for (const skill of matched) {
         const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected skill is unavailable.");
-        result.push({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: root, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data) });
+        result.push({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: root, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), agentPrompt: verifiedAgentPrompt(skill, snapshot.files) });
       }
     }
     return result;
@@ -301,11 +303,11 @@ export class SkillPackageStore {
     const directory = path.join(runs, randomUUID());
     await mkdir(directory, { mode: 0o700 });
     try {
-      const fingerprints = new Map<string, string>(); const verifiedContents = new Map<string, string>();
+      const fingerprints = new Map<string, string>(); const verifiedContents = new Map<string, string>(); const agentPrompts = new Map<string, string>();
       for (const { pkg, selected, matched } of packages) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"));
         if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Imported skill package ${pkg.name} changed before launch.`);
-        for (const skill of matched) { const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected skill is unavailable."); verifiedContents.set(`${pkg.id}\0${skill.path}`, new TextDecoder("utf-8", { fatal: true }).decode(file.data)); }
+        for (const skill of matched) { const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected skill is unavailable."); verifiedContents.set(`${pkg.id}\0${skill.path}`, new TextDecoder("utf-8", { fatal: true }).decode(file.data)); const prompt = verifiedAgentPrompt(skill, snapshot.files); if (prompt) agentPrompts.set(`${pkg.id}\0${skill.path}`, prompt); }
         if (!selected.length) continue;
         const filtered = filterSkillSnapshot(snapshot, selected); fingerprints.set(pkg.id, filtered.fingerprint);
         for (const entry of filtered.files) {
@@ -315,7 +317,7 @@ export class SkillPackageStore {
         }
       }
       const review = this.entries(packages, (pkg) => path.join(directory, pkg.id));
-      const invoked: SelectedSkill[] = packages.flatMap(({ pkg, matched }) => matched.map((skill) => ({ source: "imported skill" as const, package: pkg.name, name: skill.name, description: skill.description, path: path.join(directory, pkg.id, ...skill.path.split("/")), root: path.join(directory, pkg.id), data: path.join(directory, pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: verifiedContents.get(`${pkg.id}\0${skill.path}`) })));
+      const invoked: SelectedSkill[] = packages.flatMap(({ pkg, matched }) => matched.map((skill) => ({ source: "imported skill" as const, package: pkg.name, name: skill.name, description: skill.description, path: path.join(directory, pkg.id, ...skill.path.split("/")), root: path.join(directory, pkg.id), data: path.join(directory, pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "imported skill", references), verifiedContent: verifiedContents.get(`${pkg.id}\0${skill.path}`), agentPrompt: agentPrompts.get(`${pkg.id}\0${skill.path}`) })));
       return {
         prompt: this.catalog(this.entries(packages.map((entry) => ({ ...entry, selected: entry.selected.filter((skill) => !skill.forkAgent) })), (pkg) => path.join(directory, pkg.id))), review, invoked,
         directory,
