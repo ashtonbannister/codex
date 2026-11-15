@@ -24,6 +24,7 @@ const bridge: WorkbenchAPI = {
   disconnectPluginOAuth: (id, name) => ipcRenderer.invoke("plugins:oauth-remove", { id, name }),
   listSkillPackages: () => ipcRenderer.invoke("skills:list"),
   importSkillPackage: () => ipcRenderer.invoke("skills:import"),
+  importSkillArchive: () => ipcRenderer.invoke("skills:import-archive"),
   setSkillPackageEnabled: (id, enabled) => ipcRenderer.invoke("skills:enabled", { id, enabled }),
   getAccountStatus: (provider) => ipcRenderer.invoke("provider:account-status", provider),
   startProviderLogin: (provider) => ipcRenderer.invoke("provider:login-start", provider),

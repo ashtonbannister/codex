@@ -192,6 +192,7 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
     async disconnectPluginOAuth() {},
     async listSkillPackages() { return []; },
     async importSkillPackage() { return null; },
+    async importSkillArchive() { return null; },
     async setSkillPackageEnabled() {},
     ...createPreviewLibrary(state, publish),
     async getAccountStatus(provider) {

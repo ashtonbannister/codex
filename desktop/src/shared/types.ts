@@ -36,7 +36,7 @@ export type ProviderId = "codex" | "claude" | "ollama";
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
-export const APP_VERSION = "0.5.15";
+export const APP_VERSION = "0.5.16";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -347,6 +347,7 @@ export interface WorkbenchAPI {
   disconnectPluginOAuth(id: string, name: string): Promise<void>;
   listSkillPackages(): Promise<import("./skills").SkillPackage[]>;
   importSkillPackage(): Promise<import("./skills").SkillPackage | null>;
+  importSkillArchive(): Promise<import("./skills").SkillPackage | null>;
   setSkillPackageEnabled(id: string, enabled: boolean): Promise<void>;
   getAccountStatus(provider: "codex" | "claude"): Promise<ProviderAccountStatus>;
   startProviderLogin(provider: "codex" | "claude"): Promise<ProviderLoginStatus>;

@@ -14,7 +14,7 @@ const validComponent = (part: string) => part.length > 0 && part.length <= 255 &
 
 /** Extract a reviewed local bundle into a fresh private staging directory without executing it. */
 export async function withBundleArchive<T>(selected: string, dataDir: string, use: (folder: string) => Promise<T>, expectedDigest?: string): Promise<T> {
-  if (!path.isAbsolute(selected) || !/\.(?:mcpb|dxt|zip|plugin)$/i.test(selected)) throw new Error("Choose a local MCP bundle archive.");
+  if (!path.isAbsolute(selected) || !/\.(?:mcpb|dxt|zip|plugin|skill)$/i.test(selected)) throw new Error("Choose a supported local archive.");
   const before = await lstat(selected);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink > 1 || before.size > MAX_ARCHIVE) throw new Error("The selected archive is linked, unavailable or too large.");
   const handle = await open(selected, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
@@ -57,7 +57,7 @@ export async function withBundleArchive<T>(selected: string, dataDir: string, us
       if (!files.size) throw new Error("The archive is empty.");
     } finally { zip.close(); }
     let packageRoot = folder;
-    if (/\.(?:zip|plugin)$/i.test(selected)) {
+    if (/\.(?:zip|plugin|skill)$/i.test(selected)) {
       const entries = await readdir(folder, { withFileTypes: true });
       if (entries.length === 1 && entries[0]!.isDirectory()) packageRoot = path.join(folder, entries[0]!.name);
     }

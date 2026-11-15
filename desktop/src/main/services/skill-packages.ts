@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { removeOwnedTree } from "./owned-tree";
+import { withBundleArchive } from "./bundle-archive";
 import type { SkillPackage } from "../../shared/skills";
 
 const MAX_FILES = 2000;
@@ -96,19 +97,32 @@ export class SkillPackageStore {
   }
   async preview(selected: string): Promise<{ name: string; files: number; bytes: number; fingerprint: string; skills: SkillPackage["skills"] }> {
     await this.ensureRoot();
+    if ((await lstat(selected)).isFile()) {
+      const archive = await realpath(selected);
+      if (inside(this.dataDir, archive)) throw new Error("Choose an archive separate from Nova's skill storage.");
+      const name = path.basename(selected).replace(/\.(?:zip|skill|plugin)$/i, "").slice(0, 128) || "Imported skills";
+      return withBundleArchive(selected, this.dataDir, async (folder) => ({ ...await this.preview(folder), name }));
+    }
     const source = await realpath(selected);
     if (inside(source, this.root) || inside(this.root, source)) throw new Error("Choose a source separate from Nova's skill storage.");
     const snapshot = await snapshotSkillPackage(selected);
     return { name: path.basename(source), files: snapshot.files.length, bytes: snapshot.bytes, fingerprint: snapshot.fingerprint, skills: snapshot.skills };
   }
-  async install(selected: string, fingerprint: string): Promise<SkillPackage> {
+  async install(selected: string, fingerprint: string, archiveName?: string): Promise<SkillPackage> {
+    await this.ensureRoot();
+    if ((await lstat(selected)).isFile()) {
+      const archive = await realpath(selected);
+      if (inside(this.dataDir, archive)) throw new Error("Choose an archive separate from Nova's skill storage.");
+      const name = path.basename(selected).replace(/\.(?:zip|skill|plugin)$/i, "").slice(0, 128) || "Imported skills";
+      return withBundleArchive(selected, this.dataDir, (folder) => this.install(folder, fingerprint, name));
+    }
     const preview = await this.preview(selected);
     if (preview.fingerprint !== fingerprint) throw new Error("The selected package changed. Review it again before importing.");
     const snapshot = await snapshotSkillPackage(selected);
     if (snapshot.fingerprint !== fingerprint) throw new Error("The selected package changed. Review it again before importing.");
     const id = randomUUID();
     const directory = path.join(this.root, id);
-    const pkg: SkillPackage = { id, name: preview.name, enabled: true, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint, skills: snapshot.skills };
+    const pkg: SkillPackage = { id, name: archiveName ?? preview.name, enabled: true, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint, skills: snapshot.skills };
     await mkdir(directory, { mode: 0o700 });
     try {
       const contents = path.join(directory, "files");
@@ -159,22 +173,22 @@ export class SkillPackageStore {
   private async enabled(): Promise<SkillPackage[]> {
     return Promise.all((await this.list()).filter((pkg) => pkg.enabled).map((pkg) => this.readPackage(pkg.id)));
   }
-  private catalog(packages: SkillPackage[], location: (pkg: SkillPackage) => string): string {
-    const skills = packages.flatMap((pkg) => pkg.skills.map((skill) => ({
-      name: skill.name, description: skill.description,
-      path: path.join(location(pkg), ...skill.path.split("/")),
-    })));
-    if (!skills.length) return "";
+  private entries(packages: SkillPackage[], location: (pkg: SkillPackage) => string): Array<{ source: string; package: string; name: string; description: string; path: string }> {
+    const skills = packages.flatMap((pkg) => pkg.skills.map((skill) => ({ source: "imported skill", package: pkg.name, name: skill.name, description: skill.description, path: path.join(location(pkg), ...skill.path.split("/")) })));
     if (skills.length > MAX_SKILLS) throw new Error("Too many enabled skills. Disable a package before starting a run.");
+    return skills;
+  }
+  private catalog(skills: ReturnType<SkillPackageStore["entries"]>): string {
+    if (!skills.length) return "";
     return `\n\nAvailable user-imported skills (review the applicable SKILL.md before using it; resolve its relative references from that file). These are user-selected instructions, subject to the task and higher-priority boundaries. Imported files may be read by the selected provider:\n${JSON.stringify(skills, null, 2)}`;
   }
   async prompt(): Promise<string> {
-    return this.catalog(await this.enabled(), (pkg) => path.join(this.root, pkg.id, "files"));
+    return this.catalog(this.entries(await this.enabled(), (pkg) => path.join(this.root, pkg.id, "files")));
   }
   /** Each run gets disposable copies, so Claude's --add-dir cannot modify installed packages. */
-  async prepareRun(): Promise<{ prompt: string; directory?: string; dispose(): Promise<void> }> {
+  async prepareRun(): Promise<{ prompt: string; directory?: string; review: Array<{ source: string; package: string; name: string; description: string; path: string }>; verify(): Promise<void>; dispose(): Promise<void> }> {
     const packages = await this.enabled();
-    if (!packages.length) return { prompt: "", dispose: async () => {} };
+    if (!packages.length) return { prompt: "", review: [], verify: async () => {}, dispose: async () => {} };
     const runs = path.join(this.dataDir, "skill-run-copies");
     await mkdir(runs, { recursive: true, mode: 0o700 });
     const info = await lstat(runs);
@@ -191,9 +205,13 @@ export class SkillPackageStore {
           await writeFile(target, entry.data, { flag: "wx", mode: 0o700 });
         }
       }
+      const review = this.entries(packages, (pkg) => path.join(directory, pkg.id));
       return {
-        prompt: this.catalog(packages, (pkg) => path.join(directory, pkg.id)),
+        prompt: this.catalog(review), review,
         directory,
+        verify: async () => {
+          for (const pkg of packages) if ((await snapshotSkillPackage(path.join(directory, pkg.id))).fingerprint !== pkg.fingerprint) throw new Error(`Skill package ${pkg.name} changed after sharing was reviewed.`);
+        },
         dispose: async () => {
           await removeOwnedTree(runs, directory);
         },

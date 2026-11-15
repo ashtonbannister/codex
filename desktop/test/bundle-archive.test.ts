@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { crc32, deflateRawSync } from "node:zlib";
 import { PluginPackageStore } from "../src/main/services/plugin-packages";
+import { SkillPackageStore } from "../src/main/services/skill-packages";
 import { startPluginMcp } from "../src/main/services/plugin-mcp";
 import { preparePluginLaunch } from "../src/main/services/plugin-config";
 import { BundleConfigStore } from "../src/main/services/bundle-config-store";
@@ -185,4 +186,17 @@ test("skill-only plugin archives import without requiring an MCP server", async 
   const pkg = await store.install(archive, preview.fingerprint); await store.setEnabled(pkg.id, true); const copies = await store.prepareRun();
   assert.match(copies.prompt, /archived-skill/); assert.doesNotMatch(copies.prompt, /nova_plugins/); assert.equal(await readFile(path.join(copies.packages[0]!.root, "skills", "demo", "guide.md"), "utf8"), "Synthetic supporting file");
   await copies.dispose();
+});
+
+
+test("imports a reviewed .skill archive with support files and rejects changed archives", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-skills-zip-")); t.after(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+  const archive = path.join(root, "synthetic.skill"); const skill = Buffer.from("---\nname: archive-skill\ndescription: Synthetic instructions\n---\nRead guide.md.\n");
+  await writeFile(archive, zip([{ name: "demo/SKILL.md", data: skill }, { name: "demo/guide.md", data: Buffer.from("Synthetic support") }]));
+  const store = new SkillPackageStore(path.join(root, "data")); const preview = await store.preview(archive); assert.equal(preview.name, "synthetic"); assert.equal(preview.skills[0]!.name, "archive-skill");
+  const pkg = await store.install(archive, preview.fingerprint); assert.equal(pkg.name, "synthetic"); const copies = await store.prepareRun();
+  assert.equal(await readFile(path.join(copies.directory!, pkg.id, "guide.md"), "utf8"), "Synthetic support"); await copies.verify(); await copies.dispose();
+  await writeFile(archive, zip([{ name: "demo/SKILL.md", data: Buffer.concat([skill, Buffer.from("changed")]) }]));
+  await assert.rejects(store.install(archive, preview.fingerprint), /changed/);
+  await writeFile(archive, zip([{ name: "../escape", data: Buffer.from("x") }])); await assert.rejects(store.preview(archive));
 });

@@ -137,6 +137,16 @@ test("skill packages can be imported and disabled in settings", async ({ page })
   await expect(enabled).not.toBeChecked();
 });
 
+test("skill archives show their contents and sharing review in Settings", async ({ page }) => {
+  await installFakeDesktopBridge(page); await page.goto("/"); await page.getByRole("button", { name: /^Settings/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Workbench settings" }); await dialog.getByRole("tab", { name: "Skills" }).click();
+  await dialog.getByRole("button", { name: "Import skill archive…" }).click();
+  await expect(dialog.getByText("archive-skill — Synthetic archive skill")).toBeVisible();
+  await expect(dialog.getByRole("checkbox", { name: "Archive skills" })).toBeChecked();
+  await expect(dialog.getByText(/asks before sharing enabled skill instructions/i)).toBeVisible();
+  await page.screenshot({ path: "test-results/skill-archive.png" });
+});
+
 test("plugins are imported disabled and opted in per run", async ({ page }) => {
   await installFakeDesktopBridge(page, { noProjects: true, complete: true });
   await page.goto("/");

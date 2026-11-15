@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.15
+# Codex import and runtime boundaries — v0.5.16
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 
@@ -95,3 +95,5 @@ Automated checks use synthetic source folders, disposable repositories, fake pro
 Windows acceptance must still observe the exact packaged build alongside the OEM Codex app, confirm responsiveness and no unintended source access, test independent Codex sign-in, read-only active/archived copies, every intended provider, and normal recovery. The user's reported severe OEM slowdown has not been reproduced as a measured FPS test here. Code isolation and unchanged-source assertions are relevant evidence, not proof of all real-machine behavior.
 
 Protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [Claude Code CLI](https://code.claude.com/docs/en/cli-reference), and [Claude project memory](https://code.claude.com/docs/en/memory). Nova's read-only rollout support is a bounded compatibility reader, not a guarantee that every future private storage format is stable.
+
+Imported skill folders and supported local archives use disposable copies. Before each run, Nova presents the enabled imported and plugin skills together for approval with the selected provider and model; the provider may read the copied package files after approval. Declining or changing the reviewed copies stops the run before those skills are shared.

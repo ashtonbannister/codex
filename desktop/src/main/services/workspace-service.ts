@@ -683,7 +683,7 @@ export class WorkspaceService {
     context.prompt += skills;
     context.characters = context.prompt.length;
     context.estimatedTokens = Math.ceil(context.characters / 4);
-    context.warnings.push("Enabled imported skill names and descriptions are sent to the selected provider. Launch uses a disposable copy, so the paths in this preview differ from the run. Skill files can be read when needed.");
+    context.warnings.push("Enabled imported skills require approval before sharing with the selected provider. Launch uses a disposable copy, so the paths in this preview differ from the run. Skill files can be read when needed.");
   }
 
   constructor(
@@ -2182,7 +2182,6 @@ export class WorkspaceService {
           });
           if (this.closing) controller.abort();
           const preparedSkills = await new SkillPackageStore(this.dataDir).prepareRun();
-          context.prompt += preparedSkills.prompt;
           let desktop: Awaited<ReturnType<typeof startDesktopMcp>> | undefined;
           let pluginCopies: Awaited<ReturnType<PluginPackageStore["prepareRun"]>> | undefined;
           let plugins: Awaited<ReturnType<typeof startPluginMcp>> | undefined;
@@ -2190,17 +2189,21 @@ export class WorkspaceService {
           let result: Awaited<ReturnType<typeof runProvider>> | undefined;
           let uncertainCleanup = false;
           try {
-            if (request.usePlugins) {
-              pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun();
-              const skillReview = pluginCopies.packages.flatMap(({ pkg, root }) => pkg.skills.map((skill) => ({ plugin: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")) })));
-              if (skillReview.length) {
+            if (request.usePlugins) pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun();
+            const pluginSkillReview = pluginCopies?.packages.flatMap(({ pkg, root }) => pkg.skills.map((skill) => ({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")) }))) ?? [];
+            const skillReview = [...preparedSkills.review, ...pluginSkillReview];
+            if (skillReview.length) {
+                if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
                 const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: model || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: model || "Provider default" };
                 const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, note: "Approving shares these skill names, descriptions and paths with the selected provider. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each selected skill and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
-                if (detail.length > 64_000) throw new Error("The plugin skill list is too large to review. Disable a package and retry.");
-                if (!await this.approvePlugin!({ action: "skills", title: `Share these plugin skills with ${selectedProvider.name}?`, detail })) throw new Error("Plugin skill sharing was declined.");
+                if (detail.length > 64_000) throw new Error("The skill list is too large to review. Disable a package and retry.");
+                if (!await this.approvePlugin!({ action: "skills", title: `Share these skills with ${selectedProvider.name}?`, detail })) throw new Error("Skill sharing was declined.");
                 controller.signal.throwIfAborted();
               }
+            await preparedSkills.verify();
+            for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after skill sharing was reviewed.`);
+            if (pluginCopies) {
               if (pluginCopies.packages.some((entry) => entry.servers.length)) {
                 if (request.provider === "claude" && !providerStatus?.supportsDesktopMcp) throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for plugin tools.");
                 if (request.provider === "claude" && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? "")) throw new Error("Claude Code safe mode is enforced by the current environment and disables selected MCP tools.");
@@ -2212,6 +2215,8 @@ export class WorkspaceService {
               controller.signal.throwIfAborted();
               context.prompt += pluginCopies.prompt;
             }
+            await preparedSkills.verify();
+            context.prompt += preparedSkills.prompt;
             if (request.desktopControl) {
               desktop = await startDesktopMcp(await this.createDesktopSession!(), controller.signal);
               context.prompt += NOVA_DESKTOP_SKILL;
@@ -2223,7 +2228,7 @@ export class WorkspaceService {
                 if (run.contextSummary) {
                   run.contextSummary.characters = context.characters;
                   run.contextSummary.estimatedTokens = context.estimatedTokens;
-                  if (preparedSkills.prompt) run.contextSummary.warnings.push("Enabled imported skill names, descriptions, and paths were supplied to the provider.");
+                  if (preparedSkills.prompt) run.contextSummary.warnings.push("Imported skill names, descriptions, and paths were approved for sharing with the selected provider.");
                   if (desktop) run.contextSummary.warnings.push("Desktop observations and actions require separate user approval and may share window content with this provider.");
                   if (pluginCopies?.packages.some((entry) => entry.pkg.skills.length)) run.contextSummary.warnings.push("Plugin skill names, descriptions, and paths were approved for sharing with the selected provider.");
                   if (plugins) run.contextSummary.warnings.push("Plugin programs run under your user account; each tool call requires approval and may share data with the selected provider.");

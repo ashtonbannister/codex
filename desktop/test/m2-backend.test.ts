@@ -437,7 +437,8 @@ test("context preview is exactly the prompt launched, with honest persisted esti
 });
 
 test("enabled skills are included in a run through isolated copies", async (t) => {
-  const { service, project, root, dataDir } = await fixture(t);
+  const approvals: string[] = [];
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { approvals.push(request.action); return true; });
   const source = path.join(root, "sample-skill");
   await mkdir(source);
   await writeFile(path.join(source, "SKILL.md"), "---\nname: sample-skill\ndescription: Fixture instructions\n---\nUse the guide.\n");
@@ -454,7 +455,7 @@ test("enabled skills are included in a run through isolated copies", async (t) =
   const sent = run.events.find((event) => event.kind === "message")!.text;
   assert.match(sent, /sample-skill/);
   assert.match(sent, /skill-run-copies/);
-  assert.equal(run.contextSummary?.characters, sent.length);
+  assert.equal(run.contextSummary?.characters, sent.length); assert.deepEqual(approvals, ["skills"]);
 });
 
 test("desktop opt-in connects a per-run approved MCP tool to the provider", async (t) => {
@@ -497,6 +498,42 @@ test("plugin opt-in starts reviewed servers and passes approved tools and skills
   assert.equal(run.usePlugins, true);
   assert.ok(run.events.some((event) => event.text === "PLUGIN_MCP_OK"));
   assert.deepEqual(approvals, ["skills", "start", "discover", "call"]);
+});
+
+test("imported and plugin skills require one combined provider review", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; let allow = false;
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return allow; });
+  const direct = path.join(root, "direct"); await mkdir(direct); await writeFile(path.join(direct, "SKILL.md"), "---\nname: direct-skill\ndescription: Direct instructions\n---\nSynthetic\n");
+  const directStore = new SkillPackageStore(dataDir); const directPreview = await directStore.preview(direct); await directStore.install(direct, directPreview.fingerprint);
+  const source = path.join(root, "plugin"); await mkdir(path.join(source, "skills", "demo"), { recursive: true });
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture-plugin" }));
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: plugin-skill\ndescription: Plugin instructions\n---\nSynthetic\n");
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "ECHO_PROMPT", usePlugins: true };
+  const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /sharing was declined/i);
+  assert.equal(reviews.length, 1); const listed = JSON.parse(reviews[0]!.detail) as { provider: { name: string }; skills: Array<{ name: string; source: string }> };
+  assert.equal(listed.provider.name, "Codex"); assert.deepEqual(listed.skills.map((entry) => entry.name).sort(), ["direct-skill", "plugin-skill"]); assert.deepEqual(listed.skills.map((entry) => entry.source).sort(), ["imported skill", "plugin"]);
+  allow = true; const run = await finishRun(service, (await service.startRun(request)).id); assert.equal(run.status, "completed", run.error);
+  const sent = run.events.find((event) => event.kind === "message")!.text; assert.match(sent, /direct-skill/); assert.match(sent, /plugin-skill/); assert.deepEqual(reviews.map((review) => review.action), ["skills", "skills"]);
+});
+
+test("an imported skill changed after approval is not sent", async (t) => {
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => {
+    if (request.action === "skills") { const review = JSON.parse(request.detail) as { skills: Array<{ path: string }> }; await writeFile(review.skills[0]!.path, "changed"); }
+    return true;
+  });
+  const source = path.join(root, "direct"); await mkdir(source); await writeFile(path.join(source, "SKILL.md"), "---\nname: direct-skill\ndescription: Fixture\n---\nSynthetic\n");
+  const store = new SkillPackageStore(dataDir); const preview = await store.preview(source); await store.install(source, preview.fingerprint);
+  const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "codex", mode: "plan", prompt: "ECHO_PROMPT" })).id);
+  assert.equal(run.status, "failed"); assert.match(run.error ?? "", /changed after sharing was reviewed/i); assert.ok(!run.events.some((event) => event.kind === "message"));
+});
+
+test("imported skills fail closed when sharing approval is unavailable", async (t) => {
+  const { service, project, root, dataDir } = await fixture(t); const source = path.join(root, "direct"); await mkdir(source);
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: direct-skill\ndescription: Fixture\n---\nSynthetic\n");
+  const store = new SkillPackageStore(dataDir); const preview = await store.preview(source); await store.install(source, preview.fingerprint);
+  const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "codex", mode: "plan", prompt: "ECHO_PROMPT" })).id);
+  assert.equal(run.status, "failed"); assert.match(run.error ?? "", /approval is unavailable/i); assert.ok(!run.events.some((event) => event.kind === "message"));
 });
 
 test("skill-only plugins require per-provider approval and never start a plugin server", async (t) => {
@@ -553,8 +590,8 @@ test("declined or modified plugin skills never reach the provider or start a ser
   const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "SKILL_ONLY_TEST", usePlugins: true };
   const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /declined/);
   await assert.rejects(readFile(markerPath), { code: "ENOENT" }); assert.deepEqual(actions, ["skills"]);
-  mode = "change"; const changed = await finishRun(service, (await service.startRun(request)).id); assert.equal(changed.status, "failed"); assert.match(changed.error ?? "", /changed after review/i);
-  await assert.rejects(readFile(markerPath), { code: "ENOENT" }); assert.deepEqual(actions, ["skills", "skills", "start"]);
+  mode = "change"; const changed = await finishRun(service, (await service.startRun(request)).id); assert.equal(changed.status, "failed"); assert.match(changed.error ?? "", /changed after .*review/i);
+  await assert.rejects(readFile(markerPath), { code: "ENOENT" }); assert.deepEqual(actions, ["skills", "skills"]);
 });
 
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {

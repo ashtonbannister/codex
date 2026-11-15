@@ -171,6 +171,7 @@ const ACCOUNT_OPERATIONS = new Set([
   "provider:account-status",
   "provider:codex-models",
   "skills:import",
+  "skills:import-archive",
   "skills:enabled",
   "plugins:import",
   "plugins:import-bundle",
@@ -326,23 +327,24 @@ function registerHandlers(service: WorkspaceService) {
   });
   const skills = new SkillPackageStore(path.join(app.getPath("userData"), "workspace"));
   handle("skills:list", () => skills.list());
-  handle("skills:import", async () => {
-    const selected = await dialog.showOpenDialog(window!, {
-      title: "Choose a skill or plugin package folder",
-      buttonLabel: "Review package",
-      properties: ["openDirectory"],
-    });
-    if (selected.canceled || !selected.filePaths[0]) return null;
-    const source = selected.filePaths[0];
+  const importSkills = async (source: string) => {
     const preview = await skills.preview(source);
     const result = await dialog.showMessageBox(window!, {
       type: "question", buttons: ["Cancel", "Import skills"], defaultId: 0, cancelId: 0,
       title: "Import this skill package?",
       message: `Import ${confirmationValue(preview.name)} with ${preview.skills.length} skill(s)?`,
-      detail: `Source: ${confirmationValue(source)}\n${preview.files} files · ${preview.bytes.toLocaleString()} bytes\n\nSkills:\n${preview.skills.slice(0, 30).map((item) => `• ${confirmationValue(item.name)} — ${confirmationValue(item.path)}`).join("\n")}${preview.skills.length > 30 ? "\n…additional skills" : ""}\n\nAll files in this folder are copied into Nova. Enabled skill names, descriptions, and paths are supplied to the selected agent; the agent can read the copied instructions and supporting files. Skill instructions may request commands or external tools and should be trusted. MCP servers and plugin tools are not installed or enabled by this action. The source is not changed.`,
+      detail: `Source: ${confirmationValue(source)}\n${preview.files} files · ${preview.bytes.toLocaleString()} bytes\n\nSkills:\n${preview.skills.slice(0, 30).map((item) => `• ${confirmationValue(item.name)} — ${confirmationValue(item.path)}`).join("\n")}${preview.skills.length > 30 ? "\n…additional skills" : ""}\n\nAll files in this package are copied into Nova. For each run, Nova asks before sharing the enabled skill names, descriptions and paths with the selected provider; the provider can read the copied instructions and supporting files. Skill instructions may request commands or external tools and should be trusted. MCP servers and plugin tools are not installed or enabled by this action. The source is not changed.`,
     });
     if (result.response !== 1) return null;
     return skills.install(source, preview.fingerprint);
+  };
+  handle("skills:import", async () => {
+    const selected = await dialog.showOpenDialog(window!, { title: "Choose a skill or plugin package folder", buttonLabel: "Review package", properties: ["openDirectory"] });
+    return selected.canceled || !selected.filePaths[0] ? null : importSkills(selected.filePaths[0]);
+  });
+  handle("skills:import-archive", async () => {
+    const selected = await dialog.showOpenDialog(window!, { title: "Choose a skill archive", buttonLabel: "Review skills", properties: ["openFile"], filters: [{ name: "Skill archives", extensions: ["skill", "zip", "plugin"] }] });
+    return selected.canceled || !selected.filePaths[0] ? null : importSkills(selected.filePaths[0]);
   });
   handle("skills:enabled", async (payload) => {
     const input = objectPayload(payload);

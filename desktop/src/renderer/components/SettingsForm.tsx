@@ -246,9 +246,10 @@ function SkillPackagesPanel({ workActive }: { workActive: boolean }) {
     finally { setBusy(false); }
   };
   return <section><h3>Imported skills</h3>
-    <p className="field-hint">Choose a skill folder or a package containing skills. Nova copies the folder and makes enabled skill instructions available to Codex, Claude Code, and local agents. Choose a package root if skills use files outside their own folder.</p>
+    <p className="field-hint">Choose a skill folder or archive containing skills. Nova copies the package and asks before sharing enabled skill instructions with Codex, Claude Code, or a local agent for each run. Choose a package root if skills use files outside their own folder.</p>
     <p className="panel-note">Only import packages you trust. Skill instructions can direct agents to use their available tools. This imports skills and supporting files; plugin MCP servers and tools are not enabled yet.</p>
-    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importSkillPackage(); if (imported) setNotice(`Imported ${imported.name}.`); })}>Import skill package…</button>
+    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importSkillPackage(); if (imported) setNotice(`Imported ${imported.name}.`); })}>Import skill package…</button>{" "}
+    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importSkillArchive(); if (imported) setNotice(`Imported ${imported.name}.`); })}>Import skill archive…</button>
     {workActive && <p className="field-hint">Stop active runs and checks before changing imported skills.</p>}
     {notice && <p role="status" className="field-hint">{notice}</p>}
     {error && <p role="alert" className="form-error">{error}</p>}
