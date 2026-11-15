@@ -185,6 +185,8 @@ export function validateRunRequest(
     throw new Error("Claude Code does not support that thinking strength.");
   if (input.desktopControl !== undefined && typeof input.desktopControl !== "boolean")
     throw new Error("Invalid desktop-control setting.");
+  if (input.usePlugins !== undefined && typeof input.usePlugins !== "boolean")
+    throw new Error("Invalid plugin setting.");
   if (input.mode !== "plan" && input.mode !== "build")
     throw new Error("Choose Plan or Build mode.");
   return {
@@ -198,6 +200,7 @@ export function validateRunRequest(
     model: modelName(input.model),
     reasoningEffort: input.reasoningEffort as RunRequest["reasoningEffort"],
     desktopControl: input.desktopControl as boolean | undefined,
+    usePlugins: input.usePlugins as boolean | undefined,
     prompt: text(input.prompt, "Prompt", 32_000, allowEmptyPrompt),
   };
 }

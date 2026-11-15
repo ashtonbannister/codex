@@ -22,6 +22,7 @@ import { normalizeProviderLine } from "../src/main/services/provider-events";
 import {
   providerArguments,
   claudeDesktopImageBytes,
+  desktopImageBytes,
   resolveExecutable,
   runProvider,
 } from "../src/main/services/providers";
@@ -630,6 +631,21 @@ test("Claude image accounting only excludes matched desktop screenshot results",
   assert.equal(pending.size, 0);
   claudeDesktopImageBytes(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "two", name: "mcp__nova_desktop__desktop", input: { action: "inspect" } }] } }), pending);
   assert.equal(pending.size, 0);
+});
+
+test("plugin image accounting requires the opted-in Nova plugin server", () => {
+  const alias = "p_0123456789abcdef_echo";
+  const event = JSON.stringify({ type: "item.completed", item: { type: "mcp_tool_call", server: "nova_plugins", tool: alias, result: { content: [{ type: "image", mimeType: "image/png", data: "AAAA" }] } } });
+  assert.equal(desktopImageBytes(event, false, false), 0);
+  assert.equal(desktopImageBytes(event, true, false), 4);
+  const calls = new Set<string>();
+  const assistant = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "plugin-call", name: `mcp__nova_plugins__${alias}`, input: {} }] } });
+  claudeDesktopImageBytes(assistant, calls, false, false);
+  assert.equal(calls.size, 0);
+  claudeDesktopImageBytes(assistant, calls, true, false);
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+  const result = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "plugin-call", content: [image] }] }, tool_use_result: [image] });
+  assert.equal(claudeDesktopImageBytes(result, calls, true, false), 8);
 });
 
 test("desktop image payloads are separately bounded without exempting other tool output", async (t) => {

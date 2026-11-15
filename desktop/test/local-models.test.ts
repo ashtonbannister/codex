@@ -108,6 +108,12 @@ test("Responses translation preserves text, namespace/custom tools and tool-resu
   assert.throws(() => responsesToChat({ model: "other", input: "x" }, "tiny"), /different/);
 });
 
+test("local bridge accepts a large approved plugin tool catalog", () => {
+  const tools = Array.from({ length: 474 }, (_, i) => ({ type: "function", name: `plugin_tool_${i}`, parameters: { type: "object", properties: {} } }));
+  const converted = responsesToChat({ model: "tiny", input: "Hello", tools }, "tiny");
+  assert.equal((converted.body.tools as unknown[]).length, 474);
+});
+
 test("local bridge forwards inline tool images after all parallel tool results", () => {
   const converted = responsesToChat({ model: "tiny", input: [
     { role: "user", content: "Look" },

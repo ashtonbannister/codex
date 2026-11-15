@@ -105,6 +105,7 @@ export function App() {
   const [codexModelsError, setCodexModelsError] = useState("");
   const [modelsRefresh, setModelsRefresh] = useState(0);
   const [desktopControl, setDesktopControl] = useState(false);
+  const [usePlugins, setUsePlugins] = useState(false);
   const [surface, setSurface] = useState<"workspace" | "library">("workspace");
   const [libraryResource, setLibraryResource] = useState<
     CodexMemorySource | undefined
@@ -175,11 +176,12 @@ export function App() {
             model: configuredModel || undefined,
             reasoningEffort,
             desktopControl,
+            usePlugins,
             mode,
             prompt: draft.trim(),
           }
         : null,
-    [projectId, threadId, provider, configuredModel, reasoningEffort, desktopControl, mode, draft],
+    [projectId, threadId, provider, configuredModel, reasoningEffort, desktopControl, usePlugins, mode, draft],
   );
   const memoryVersion = activeMemories
     .map((entry) => `${entry.id}:${entry.updatedAt}:${entry.filePath ?? ""}`)
@@ -406,10 +408,11 @@ export function App() {
     try {
       const chatProject = projectId ? null : await api.ensureChatWorkspace();
       const request = contextRequest ?? {
-        projectId: chatProject!.id, provider, model: configuredModel || undefined, reasoningEffort, desktopControl, mode: "plan" as const, prompt: draft.trim(),
+        projectId: chatProject!.id, provider, model: configuredModel || undefined, reasoningEffort, desktopControl, usePlugins, mode: "plan" as const, prompt: draft.trim(),
       };
       const run = await api.startRun(request);
       setDesktopControl(false);
+      setUsePlugins(false);
       if (chatProject) setProjectId(chatProject.id);
       composerDraft.clearSubmitted(submittedKey, submittedDraft, run.threadId);
       if (composerDraft.currentKey.current === submittedKey) {
@@ -1074,6 +1077,7 @@ export function App() {
                       {availableEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                     </select>
                     <label title="Allow this run to request window observations and actions; each request requires approval"><input type="checkbox" checked={desktopControl} onChange={(event) => setDesktopControl(event.target.checked)} /> Desktop</label>
+                    <label title="Start enabled plugins after review; each plugin call requires approval"><input type="checkbox" checked={usePlugins} onChange={(event) => setUsePlugins(event.target.checked)} /> Plugins</label>
                     {provider === "codex" && codexModelsError && <span role="alert" title={codexModelsError}>Model list unavailable: {codexModelsError} Refresh to retry.</span>}
                     <div className="composer-right">
                       <div

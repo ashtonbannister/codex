@@ -137,6 +137,33 @@ test("skill packages can be imported and disabled in settings", async ({ page })
   await expect(enabled).not.toBeChecked();
 });
 
+test("plugins are imported disabled and opted in per run", async ({ page }) => {
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Plugins" }).click();
+  await dialog.getByRole("button", { name: "Import plugin package…" }).click();
+  const enabled = dialog.getByRole("checkbox", { name: "Fixture plugin" });
+  await expect(enabled).not.toBeChecked();
+  const server = dialog.getByRole("checkbox", { name: /fixture · stdio/ });
+  await expect(server).toBeChecked();
+  await server.uncheck();
+  await expect(server).not.toBeChecked();
+  await server.check();
+  await enabled.check();
+  await expect(enabled).toBeChecked();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  const use = page.getByRole("checkbox", { name: "Plugins" });
+  await expect(use).not.toBeChecked();
+  await use.check();
+  await page.getByRole("textbox", { name: "Message your coding agent" }).fill("Use the plugin");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(use).not.toBeChecked();
+  const requests = await page.evaluate(() => (window as unknown as { __workbenchTest: { requests: RunRequest[] } }).__workbenchTest.requests);
+  expect(requests[0]?.usePlugins).toBe(true);
+});
+
 test("settings enforce timeout bounds and apply appearance", async ({
   page,
 }) => {

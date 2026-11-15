@@ -36,7 +36,7 @@ export type ProviderId = "codex" | "claude" | "ollama";
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
-export const APP_VERSION = "0.5.7";
+export const APP_VERSION = "0.5.8";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -95,6 +95,7 @@ export interface Run {
   model: string;
   reasoningEffort?: ReasoningEffort;
   desktopControl?: boolean;
+  usePlugins?: boolean;
   mode: RunMode;
   prompt: string;
   status: RunStatus;
@@ -199,6 +200,7 @@ export interface RunRequest {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   desktopControl?: boolean;
+  usePlugins?: boolean;
   mode: RunMode;
   prompt: string;
 }
@@ -332,6 +334,10 @@ export interface DiffSnapshot {
 
 /** Narrow, validated bridge. The renderer never receives Node, IPC, or credentials. */
 export interface WorkbenchAPI {
+  listPluginPackages(): Promise<import("./plugins").PluginPackage[]>;
+  importPluginPackage(): Promise<import("./plugins").PluginPackage | null>;
+  setPluginPackageEnabled(id: string, enabled: boolean): Promise<void>;
+  setPluginServerEnabled(id: string, name: string, enabled: boolean): Promise<void>;
   listSkillPackages(): Promise<import("./skills").SkillPackage[]>;
   importSkillPackage(): Promise<import("./skills").SkillPackage | null>;
   setSkillPackageEnabled(id: string, enabled: boolean): Promise<void>;

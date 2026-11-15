@@ -12,7 +12,7 @@ interface ChatMessage {
   tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
 }
 const REQUEST_LIMIT = 16 * 1024 * 1024;
-const TOOL_LIMIT = 256;
+const TOOL_LIMIT = 1024;
 const object = (value: unknown): Json => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected a JSON object in the local model protocol.");

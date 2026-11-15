@@ -1,4 +1,4 @@
-# Codex import and runtime boundaries — v0.5.7
+# Codex import and runtime boundaries — v0.5.8
 
 Nova is an independent development-alpha workbench. Version 0.5.4 replaces the shared OEM-home integration with two separate paths: a private Nova Codex runtime and explicit read-only imports. It does not claim full proprietary desktop parity or that the reported OEM Windows FPS problem has been reproduced and measured. See [feature coverage](feature-coverage.md) for the implemented scope.
 
@@ -43,6 +43,10 @@ Account work is owned and bounded. Main-process gating prevents conflicting Nova
 Independent import folders support Plan. Build still requires an explicitly opened, committed Git project and an isolated Nova-owned worktree; importing a conversation does not grant write access to its recorded source checkout.
 
 The Context inspector shows bounded reference selection and omissions. Every provider has its own context limits and behavior; copying text does not preserve private reasoning, native tools/state, images/attachments, or unlimited history. Earlier imported/native-linked threads keep their visible text and provenance, but future execution is detached from their OEM native session and source working folder.
+
+## Imported local plugins
+
+Settings → Plugins imports a reviewed folder into a disabled Nova-owned copy. Supported local stdio MCP servers may be selected and enabled; the Plugins checkbox opts a single run into them. Nova presents the resolved executable, configured arguments (with sensitive-looking values redacted), working/data directories, and environment names for startup approval. Nova asks before sharing discovered tool names, descriptions, and schemas with the selected provider, and each tool call is reviewed separately. Server processes run under the user's account, outside the agent worktree sandbox, and may access files or networks before a tool call. Selected packages receive disposable code copies and separate persistent plugin-data directories. Their declared skills can be read by the selected provider. Plugin source folders are not modified. Remote HTTP/SSE, OAuth, host-only connectors, MCP bundles, hooks, and other unsupported components remain unavailable and are identified in the package details.
 
 ## Desktop control
 

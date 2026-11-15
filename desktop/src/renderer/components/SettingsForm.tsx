@@ -6,14 +6,15 @@ import { LOCAL_DEFAULTS } from "../../shared/local-models";
 import type { ProviderStatus, Settings } from "../../shared/types";
 import type { RecoveryItem } from "../../shared/workspace-actions";
 import type { SkillPackage } from "../../shared/skills";
+import type { PluginPackage } from "../../shared/plugins";
 import { api, isPreview } from "../bridge";
 import { AccountConnections } from "./AccountConnections";
 import { errorText, Modal, ProviderMark } from "./primitives";
 
-type Section = "general" | "agents" | "local" | "skills" | "storage" | "recovery";
+type Section = "general" | "agents" | "local" | "skills" | "plugins" | "storage" | "recovery";
 const sections: { id: Section; label: string }[] = [
   { id: "general", label: "General" }, { id: "agents", label: "Agents" },
-  { id: "local", label: "Local models" }, { id: "skills", label: "Skills" }, { id: "storage", label: "Storage" },
+  { id: "local", label: "Local models" }, { id: "skills", label: "Skills" }, { id: "plugins", label: "Plugins" }, { id: "storage", label: "Storage" },
   { id: "recovery", label: "Recovery" },
 ];
 const backendNames = { ollama: "Ollama", lmstudio: "LM Studio", custom: "Custom endpoint" };
@@ -138,6 +139,7 @@ export function SettingsForm({ settings, providers, workActive = false, initialS
           {isPreview && <p className="panel-note">Preview model lists are synthetic. No local server is contacted.</p>}
         </section>}
         {section === "skills" && <SkillPackagesPanel workActive={workActive} />}
+        {section === "plugins" && <PluginPackagesPanel workActive={workActive} />}
         {section === "storage" && <section><h3>Local storage</h3>
           <div className="field"><label htmlFor="settings-codex-home">Codex import source <small>optional · read-only</small></label><div className="directory-field"><input id="settings-codex-home" aria-label="Codex import source" value={values.codexHome ?? ""} onChange={(event) => setValues({ ...values, codexHome: event.target.value })} placeholder="Use the existing default .codex folder for imports" /><button type="button" className="secondary-button" aria-label="Choose Codex import source folder" disabled={busy} onClick={() => void pick("codex-home")}>{choosing === "codex-home" ? <LoaderCircle size={14} className="spin" /> : "Browse"}</button></div><small>This is only a source for explicit read/copy/import actions. Changing it does not change Nova’s Codex runtime home or account. Nova never starts workers here, writes back, or copies credentials/configuration.</small></div>
           <p className="panel-note">Nova’s Codex runtime home is app-owned and separate from the import source. Sign in once under Agents to use Codex in Nova; your OEM Codex sign-in and working folders stay separate.</p>
@@ -151,6 +153,36 @@ export function SettingsForm({ settings, providers, workActive = false, initialS
       <div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy || workActive} type="submit">{saving && <LoaderCircle className="spin" size={15} />}Save settings</button></div>
     </form>
   </Modal>;
+}
+
+function PluginPackagesPanel({ workActive }: { workActive: boolean }) {
+  const [packages, setPackages] = useState<PluginPackage[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const refresh = async () => setPackages(await api.listPluginPackages());
+  useEffect(() => { let alive = true; void api.listPluginPackages().then((items) => { if (alive) setPackages(items); }).catch((reason) => { if (alive) setError(errorText(reason)); }); return () => { alive = false; }; }, []);
+  const perform = async (operation: () => Promise<void>) => {
+    setBusy(true); setError(""); setNotice("");
+    try { await operation(); await refresh(); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  return <section><h3>Imported plugins</h3>
+    <p className="field-hint">Import a Codex or Claude plugin folder containing MCP server definitions. Nova copies the selected folder and keeps the package disabled until you enable it.</p>
+    <p className="panel-note">Plugin servers run as your user and can access files or networks on startup. Review their startup and discovered tool catalog for each run, then approve each tool call. Remote and host-specific servers may need a connection Nova does not yet support.</p>
+    <button type="button" className="secondary-button" disabled={busy || workActive} onClick={() => void perform(async () => { const imported = await api.importPluginPackage(); if (imported) setNotice(`Imported ${imported.name}; it is disabled.`); })}>Import plugin package…</button>
+    {workActive && <p className="field-hint">Stop active runs and checks before changing plugins.</p>}
+    {notice && <p role="status" className="field-hint">{notice}</p>}
+    {error && <p role="alert" className="form-error">{error}</p>}
+    {!packages.length && <p className="field-hint">No plugin packages imported.</p>}
+    {packages.map((pkg) => <div className="runtime-detail" key={pkg.id}>
+      <label><input type="checkbox" checked={pkg.enabled} disabled={busy || workActive} onChange={(event) => void perform(() => api.setPluginPackageEnabled(pkg.id, event.target.checked))} /> <strong>{pkg.name}</strong></label>
+      <p className="field-hint">{pkg.servers.length} server{pkg.servers.length === 1 ? "" : "s"} · {pkg.skills.length} skill{pkg.skills.length === 1 ? "" : "s"} · {pkg.files} files</p>
+      <ul>{pkg.servers.map((server) => <li key={server.name}><label><input type="checkbox" checked={server.enabled && !pkg.disabledServers.includes(server.name)} disabled={busy || workActive || !server.enabled || !!server.unsupported.length} onChange={(event) => void perform(() => api.setPluginServerEnabled(pkg.id, server.name, event.target.checked))} /> {server.name} · {server.transport}</label>{server.enabled ? "" : " · disabled in source"}{server.unsupported.length ? ` · unavailable: ${server.unsupported.join(" ")}` : ""}{server.environmentNames.length ? ` · environment: ${server.environmentNames.join(", ")}` : ""}</li>)}</ul>
+      {pkg.warnings.map((warning) => <p className="field-hint" key={warning}>{warning}</p>)}
+    </div>)}
+  </section>;
 }
 
 function SkillPackagesPanel({ workActive }: { workActive: boolean }) {

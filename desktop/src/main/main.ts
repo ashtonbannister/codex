@@ -25,6 +25,7 @@ import type {
 import { WorkspaceService } from "./services/workspace-service";
 import { LocalKeyStore } from "./services/local-key-store";
 import { SkillPackageStore } from "./services/skill-packages";
+import { PluginPackageStore } from "./services/plugin-packages";
 import { DesktopControlSession, windowsAutomationRunner } from "./services/desktop-control";
 import { lstat } from "node:fs/promises";
 import {
@@ -165,6 +166,9 @@ const ACCOUNT_OPERATIONS = new Set([
   "provider:codex-models",
   "skills:import",
   "skills:enabled",
+  "plugins:import",
+  "plugins:enabled",
+  "plugins:server",
   "provider:login-start",
 ]);
 
@@ -221,6 +225,30 @@ let localKeyStore: LocalKeyStore;
 const localKey = (connection: ReturnType<typeof validateLocalConnection>) => localKeyStore.get(connection);
 
 function registerHandlers(service: WorkspaceService) {
+  const plugins = new PluginPackageStore(path.join(app.getPath("userData"), "workspace"));
+  handle("plugins:list", () => plugins.list());
+  handle("plugins:import", async () => {
+    const selected = await dialog.showOpenDialog(window!, { title: "Choose a plugin package folder", buttonLabel: "Review plugin", properties: ["openDirectory"] });
+    if (selected.canceled || !selected.filePaths[0]) return null;
+    const source = selected.filePaths[0];
+    const preview = await plugins.preview(source);
+    const lines = preview.servers.map((server) => `${confirmationValue(server.name)} — ${server.transport}${server.enabled ? "" : " (disabled in source)"}${server.unsupported.length ? ` — unavailable: ${server.unsupported.join(" ")}` : ""}; environment names: ${server.environmentNames.map(confirmationValue).join(", ") || "none"}`);
+    const result = await dialog.showMessageBox(window!, {
+      type: "question", buttons: ["Cancel", "Import disabled"], defaultId: 0, cancelId: 0,
+      title: "Import this plugin package?", message: `Import ${confirmationValue(preview.name)}?`,
+      detail: `Source: ${confirmationValue(source)}\n${preview.files} files · ${preview.bytes.toLocaleString()} bytes · ${preview.skills.length} skill(s)\n\n${lines.join("\n")}${preview.warnings.length ? `\n\nNot loaded: ${preview.warnings.join(" ")}` : ""}\n\nThe selected folder is copied into Nova and may include private configuration. It starts disabled. Enabling and selecting Plugins for a run still requires a separate startup review before any plugin code runs, the discovered tool catalog requires approval before it is shared, and each tool call requires approval. Plugin programs run with your user account and may access files or networks at startup. Only import packages you trust.`,
+    });
+    if (result.response !== 1) return null;
+    return plugins.install(source, preview.fingerprint);
+  });
+  handle("plugins:enabled", async (payload) => {
+    const input = objectPayload(payload);
+    await plugins.setEnabled(identifier(input.id), input.enabled as boolean);
+  });
+  handle("plugins:server", async (payload) => {
+    const input = objectPayload(payload);
+    await plugins.setServerEnabled(identifier(input.id), identifier(input.name), input.enabled as boolean);
+  });
   const skills = new SkillPackageStore(path.join(app.getPath("userData"), "workspace"));
   handle("skills:list", () => skills.list());
   handle("skills:import", async () => {
@@ -853,6 +881,15 @@ if (!app.requestSingleInstanceLock()) {
             });
             return result.response === 1;
           }, path.join(dataDir, "desktop-captures"));
+        },
+        async (request) => {
+          if (!window || window.isDestroyed() || quitting) return false;
+          const result = await dialog.showMessageBox(window, {
+            type: "question", buttons: ["Deny", "Allow once"], defaultId: 0, cancelId: 0,
+            title: "Nova plugin permission", message: request.title,
+            detail: `${request.detail}\n\nApprove only after reviewing the plugin and requested action.`,
+          });
+          return result.response === 1;
         },
       );
       await workspace.initialize();

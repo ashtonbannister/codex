@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import {
+  copyFile,
   mkdtemp,
   mkdir,
   readFile,
@@ -22,6 +23,8 @@ import {
 } from "../src/shared/types";
 import { buildRunContext } from "../src/main/services/context";
 import { SkillPackageStore } from "../src/main/services/skill-packages";
+import { PluginPackageStore } from "../src/main/services/plugin-packages";
+import type { PluginApproval } from "../src/main/services/plugin-mcp";
 import { DesktopControlSession } from "../src/main/services/desktop-control";
 import {
   captureMemoryFingerprint,
@@ -41,10 +44,10 @@ if(process.argv.includes('--version')){console.log('fake-cli 1');process.exit(0)
 if(process.argv.includes('--help')){console.log('--json --sandbox --ignore-user-config --safe-mode --restricted --permission-prompts --output-format --tools');process.exit(0)}
 if(process.argv.includes('--print-startup-config')){console.log(JSON.stringify({appServerVersion:'fixture-1',configRequirements:{requirements:null}}));process.exit(0)}
 let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',value=>input+=value);
-process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('DESKTOP_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_desktop.url='));if(!arg)throw Error('missing MCP config');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_DESKTOP_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:'desktop',arguments:{action:'list'}});if(list.result.tools[0].name!=='desktop'||result.result.isError)throw Error('MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'DESKTOP_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
+process.stdin.on('end',async()=>{const request=input.split('CURRENT USER REQUEST:').at(-1);console.log(JSON.stringify({type:'thread.started',thread_id:'fake-session'}));if(request.includes('PLUGIN_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_plugins.url='));if(!arg||!input.includes('fixture-plugin-skill'))throw Error('missing plugin config or skill');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_PLUGIN_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:list.result.tools[0].name,arguments:{message:'synthetic'}});if(result.result.isError||result.result.content[0].text!=='server request denied')throw Error('plugin MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PLUGIN_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('DESKTOP_MCP_TEST')){const arg=process.argv.find(x=>x.startsWith('mcp_servers.nova_desktop.url='));if(!arg)throw Error('missing MCP config');const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const req=async(method,params)=>{const res=await fetch(base,{method:'POST',headers:{Authorization:'Bearer '+process.env.NOVA_DESKTOP_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});return res.json()};const list=await req('tools/list',{});const result=await req('tools/call',{name:'desktop',arguments:{action:'list'}});if(list.result.tools[0].name!=='desktop'||result.result.isError)throw Error('MCP failed');console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'DESKTOP_MCP_OK'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('STREAM_THINKING_TEST')){const arg=process.argv.find(x=>x.startsWith('model_providers.nova_local.base_url='));const base=JSON.parse(arg.slice(arg.indexOf('=')+1));const res=await fetch(base+'/responses',{method:'POST',headers:{Authorization:process.env.NOVA_LOCAL_BRIDGE_AUTH},body:JSON.stringify({model:'tiny',input:'hello'})});await res.text();console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Final answer'}}));console.log(JSON.stringify({type:'turn.completed'}));return;}if(request.includes('WAIT_FOR_CANCEL')){setInterval(()=>{},1000);return}if(request.includes('NUL_ERROR')){console.log(JSON.stringify({type:'turn.failed',error:{message:'failure'+String.fromCharCode(0)+'details'}}));return}if(request.includes('NUL_OUTPUT')){const raw='visible'+String.fromCharCode(0)+'output';console.log(JSON.stringify({type:'thread.started',thread_id:'session'+String.fromCharCode(0)+'x'.repeat(300)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:raw}}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'fixture',aggregated_output:raw,exit_code:0}}));}else console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:request.includes('ECHO_PROMPT')?input:'Done'}}));console.log(JSON.stringify({type:'turn.completed'}))});
 `;
 
-async function fixture(t: { after(fn: () => Promise<void>): void }, desktop?: () => Promise<DesktopControlSession>) {
+async function fixture(t: { after(fn: () => Promise<void>): void }, desktop?: () => Promise<DesktopControlSession>, approvePlugin?: PluginApproval) {
   const root = await mkdtemp(path.join(os.tmpdir(), "nova-m2-"));
   const repo = path.join(root, "project");
   await mkdir(repo);
@@ -71,7 +74,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, desktop?: ()
   const executable = path.join(root, "fake-cli.mjs");
   await writeFile(executable, fakeCli);
   const dataDir = path.join(root, "state");
-  const service = new WorkspaceService(dataDir, () => undefined, undefined, desktop);
+  const service = new WorkspaceService(dataDir, () => undefined, undefined, desktop, approvePlugin);
   t.after(async () => {
     await service.dispose();
     await rm(root, { recursive: true, force: true });
@@ -474,6 +477,26 @@ test("only one Nova run can own desktop control at a time", async (t) => {
   await assert.rejects(service.startRun(request), /Another Nova run is using desktop control/);
   await service.cancelRun(running.id);
   assert.equal((await finishRun(service, running.id)).status, "cancelled");
+});
+
+test("plugin opt-in starts reviewed servers and passes approved tools and skills to the provider", async (t) => {
+  const approvals: string[] = [];
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { approvals.push(request.action); return true; });
+  const source = path.join(root, "fixture-plugin"); await mkdir(source);
+  await copyFile(path.resolve("test/fixtures/mcp-server.mjs"), path.join(source, "server.mjs"));
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: fixture-plugin-skill\ndescription: Synthetic skill\n---\nUse the fixture.\n");
+  await writeFile(path.join(source, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: ["${CODEX_PLUGIN_ROOT}/server.mjs"], enabled_tools: ["echo"] } } }));
+  const store = new PluginPackageStore(dataDir);
+  const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint);
+  await store.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "PLUGIN_MCP_TEST", usePlugins: true };
+  const context = await service.previewContext(request);
+  assert.match(context.prompt, /fixture-plugin-skill/);
+  const run = await finishRun(service, (await service.startRun(request)).id);
+  assert.equal(run.status, "completed", run.error);
+  assert.equal(run.usePlugins, true);
+  assert.ok(run.events.some((event) => event.text === "PLUGIN_MCP_OK"));
+  assert.deepEqual(approvals, ["start", "discover", "call"]);
 });
 
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {

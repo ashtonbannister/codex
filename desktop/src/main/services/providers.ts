@@ -711,30 +711,36 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
-  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string } = {},
+  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string; pluginMcpUrl?: string; pluginDirectory?: string } = {},
 ): string[] {
   if (provider === "claude") {
+    const hasMcp = !!(options.desktopMcpUrl || options.pluginMcpUrl);
+    const servers = {
+      ...(options.desktopMcpUrl ? { nova_desktop: { type: "http", url: options.desktopMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_DESKTOP_TOKEN}" } } } : {}),
+      ...(options.pluginMcpUrl ? { nova_plugins: { type: "http", url: options.pluginMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_PLUGIN_TOKEN}" } } } : {}),
+    };
+    const allowedTools = [options.desktopMcpUrl ? "mcp__nova_desktop__desktop" : "", options.pluginMcpUrl ? "mcp__nova_plugins__*" : ""].filter(Boolean);
     return [
       "-p",
       "--output-format",
       "stream-json",
       "--verbose",
       ...(options.claudePartialMessages ? ["--include-partial-messages"] : []),
-      ...(options.desktopMcpUrl ? ["--setting-sources", "", "--disable-slash-commands"] : ["--safe-mode"]),
+      ...(hasMcp ? ["--setting-sources", "", "--disable-slash-commands"] : ["--safe-mode"]),
       "--restricted",
       "--permission-prompts",
       "none",
       "--permission-mode",
-      mode === "plan" && !options.desktopMcpUrl ? "plan" : "acceptEdits",
+      mode === "plan" && !hasMcp ? "plan" : "acceptEdits",
       "--tools",
       mode === "plan" ? "Read,Grep,Glob" : "Read,Grep,Glob,Edit,Write",
       "--settings",
       JSON.stringify({ disableAllHooks: true }),
-      ...(options.skillDirectory ? ["--add-dir", options.skillDirectory] : []),
+      ...((options.skillDirectory || options.pluginDirectory) ? ["--add-dir", ...[options.skillDirectory, options.pluginDirectory].filter((item): item is string => !!item)] : []),
       "--strict-mcp-config",
       "--mcp-config",
-      JSON.stringify({ mcpServers: options.desktopMcpUrl ? { nova_desktop: { type: "http", url: options.desktopMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_DESKTOP_TOKEN}" } } } : {} }),
-      ...(options.desktopMcpUrl ? ["--allowedTools", "mcp__nova_desktop__desktop"] : ["--disallowedTools", "mcp__*"]),
+      JSON.stringify({ mcpServers: servers }),
+      ...(hasMcp ? ["--allowedTools", allowedTools.join(",")] : ["--disallowedTools", "mcp__*"]),
       ...(model ? ["--model", model] : []),
       ...(options.reasoningEffort ? ["--effort", options.reasoningEffort] : []),
     ];
@@ -770,6 +776,11 @@ export function providerArguments(
       "--config", `mcp_servers.nova_desktop.url=${JSON.stringify(options.desktopMcpUrl)}`,
       "--config", 'mcp_servers.nova_desktop.bearer_token_env_var="NOVA_DESKTOP_TOKEN"',
       "--config", 'mcp_servers.nova_desktop.default_tools_approval_mode="approve"',
+    ] : []),
+    ...(options.pluginMcpUrl ? [
+      "--config", `mcp_servers.nova_plugins.url=${JSON.stringify(options.pluginMcpUrl)}`,
+      "--config", 'mcp_servers.nova_plugins.bearer_token_env_var="NOVA_PLUGIN_TOKEN"',
+      "--config", 'mcp_servers.nova_plugins.default_tools_approval_mode="approve"',
     ] : []),
     "--config",
     'web_search="disabled"',
@@ -807,11 +818,12 @@ export function providerArguments(
 // separate hard cap without exempting other MCP servers or arbitrary output.
 const MAX_DESKTOP_FRAME = 12 * 1024 * 1024;
 const MAX_DESKTOP_IMAGES = 128 * 1024 * 1024;
-export function desktopImageBytes(line: string): number {
+export function desktopImageBytes(line: string, allowPlugins = false, allowDesktop = true): number {
   try {
     const event = JSON.parse(line);
     const item = event?.item;
-    if (event?.type !== "item.completed" || item?.type !== "mcp_tool_call" || item.server !== "nova_desktop" || item.tool !== "desktop" || !Array.isArray(item.result?.content)) return 0;
+    const trusted = (allowDesktop && item?.server === "nova_desktop" && item?.tool === "desktop") || (allowPlugins && item?.server === "nova_plugins" && typeof item.tool === "string" && /^p_[a-f0-9]{16}_[A-Za-z0-9_-]{1,40}$/.test(item.tool));
+    if (event?.type !== "item.completed" || item?.type !== "mcp_tool_call" || !trusted || !Array.isArray(item.result?.content)) return 0;
     let count = 0;
     for (const part of item.result.content) {
       if (part?.type !== "image" || !["image/png", "image/jpeg", "image/webp"].includes(part.mimeType) || typeof part.data !== "string" || part.data.length > MAX_DESKTOP_FRAME || !/^[A-Za-z0-9+/]+={0,2}$/.test(part.data)) continue;
@@ -822,12 +834,13 @@ export function desktopImageBytes(line: string): number {
 }
 
 /** Track Claude tool-use IDs so only images from Nova's desktop screenshot tool are exempted. */
-export function claudeDesktopImageBytes(line: string, pending: Set<string>): number {
+export function claudeDesktopImageBytes(line: string, pending: Set<string>, allowPlugins = false, allowDesktop = true): number {
   try {
     const event = JSON.parse(line);
     if (event?.type === "assistant" && Array.isArray(event.message?.content)) {
       for (const part of event.message.content) {
-        if (part?.type === "tool_use" && part.name === "mcp__nova_desktop__desktop" && part.input?.action === "screenshot" && typeof part.id === "string" && part.id.length <= 256 && pending.size < 2000) pending.add(part.id);
+        const trusted = (allowDesktop && part?.name === "mcp__nova_desktop__desktop" && part.input?.action === "screenshot") || (allowPlugins && typeof part?.name === "string" && /^mcp__nova_plugins__p_[a-f0-9]{16}_[A-Za-z0-9_-]{1,40}$/.test(part.name));
+        if (part?.type === "tool_use" && trusted && typeof part.id === "string" && part.id.length <= 256 && pending.size < 2000) pending.add(part.id);
       }
       return 0;
     }
@@ -860,6 +873,7 @@ export async function runProvider(options: {
   timeoutMs: number;
   maxBytes: number;
   allowDesktopImages?: boolean;
+  allowPluginImages?: boolean;
   signal: AbortSignal;
   onEvent: (event: NormalizedEvent) => void;
 }): Promise<ProcessResult> {
@@ -941,15 +955,15 @@ export async function runProvider(options: {
         options.onEvent(event);
     };
     const accountDesktopLine = (line: string, newline: boolean) => {
-      const images = options.provider === "claude" ? claudeDesktopImageBytes(line, claudeDesktopCalls) : desktopImageBytes(line);
+      const images = options.provider === "claude" ? claudeDesktopImageBytes(line, claudeDesktopCalls, !!options.allowPluginImages, !!options.allowDesktopImages) : desktopImageBytes(line, !!options.allowPluginImages, !!options.allowDesktopImages);
       desktopImages += images;
       bytes += Buffer.byteLength(line, "utf8") + (newline ? 1 : 0) - images;
-      if (desktopImages > MAX_DESKTOP_IMAGES) { fail("Desktop screenshots exceeded the per-run image limit."); return; }
+      if (desktopImages > MAX_DESKTOP_IMAGES) { fail("Tool images exceeded the per-run image limit."); return; }
       if (bytes > options.maxBytes) { fail("Agent output exceeded this run's configured limit. The process was stopped; the worktree is preserved."); return; }
       emitLine(line);
     };
     const consume = (chunk: Buffer) => {
-      if (!options.allowDesktopImages) {
+      if (!options.allowDesktopImages && !options.allowPluginImages) {
         bytes += chunk.length;
         if (bytes > options.maxBytes) {
           fail("Agent output exceeded this run's configured limit. The process was stopped; the worktree is preserved.");
@@ -961,11 +975,11 @@ export async function runProvider(options: {
       while ((index = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
-        if (options.allowDesktopImages) accountDesktopLine(line, true);
+        if (options.allowDesktopImages || options.allowPluginImages) accountDesktopLine(line, true);
         else emitLine(line);
         if (failure) return;
       }
-      const maxLine = options.allowDesktopImages ? options.maxBytes + MAX_DESKTOP_FRAME * (options.provider === "claude" ? 2 : 1) + 64 * 1024 : options.maxBytes;
+      const maxLine = options.allowDesktopImages || options.allowPluginImages ? options.maxBytes + MAX_DESKTOP_FRAME * (options.provider === "claude" ? 2 : 1) + 64 * 1024 : options.maxBytes;
       if (Buffer.byteLength(buffer, "utf8") > maxLine) fail("Agent emitted an oversized JSON event.");
     };
     child.stdout.on("data", consume);
@@ -1003,7 +1017,7 @@ export async function runProvider(options: {
       options.signal.removeEventListener("abort", abort);
       buffer += decoder.end();
       if (buffer && bytes <= options.maxBytes) {
-        if (options.allowDesktopImages) accountDesktopLine(buffer, false);
+        if (options.allowDesktopImages || options.allowPluginImages) accountDesktopLine(buffer, false);
         else emitLine(buffer);
       }
       const cancelled = options.signal.aborted && !terminationUnconfirmed;

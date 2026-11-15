@@ -56,7 +56,7 @@ test("refuses changed source and changed imported content, while allowing disabl
 
 test("rejects links in imported packages", async (t) => {
   const f = await fixture(t);
-  try { await symlink(path.join(f.source, "docs", "guide.md"), path.join(f.source, "link.md"), "file"); }
+  try { await symlink(path.join(f.source, "docs"), path.join(f.source, "linked-dir"), process.platform === "win32" ? "junction" : "dir"); }
   catch (error) { if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) { t.skip("Symlinks unavailable"); return; } throw error; }
   await assert.rejects(f.store.preview(f.source), /link/);
 });

@@ -79,6 +79,9 @@ import type { DesktopControlSession } from "./desktop-control";
 import { startDesktopMcp } from "./desktop-mcp";
 
 import { NOVA_DESKTOP_SKILL } from "./desktop-skill";
+import { PluginPackageStore } from "./plugin-packages";
+import { startPluginMcp, type PluginApproval } from "./plugin-mcp";
+import { McpProcessError } from "./mcp-stdio";
 import {
   createIsolatedWorktree,
   getWorkspaceDiff,
@@ -688,6 +691,7 @@ export class WorkspaceService {
     private readonly onChange: (state: WorkspaceState) => void,
     private readonly localKey: (connection: ReturnType<typeof connectionFromSettings>) => string | undefined = () => undefined,
     private readonly createDesktopSession?: () => Promise<DesktopControlSession>,
+    private readonly approvePlugin?: PluginApproval,
   ) {
     this.statePath = path.join(dataDir, "workspace.json");
   }
@@ -1467,6 +1471,12 @@ export class WorkspaceService {
       usesOriginalCheckout ? project.path : cwd,
     );
     await this.addSkills(preview);
+    if (request.usePlugins) {
+      preview.prompt += await new PluginPackageStore(this.dataDir).prompt();
+      preview.characters = preview.prompt.length;
+      preview.estimatedTokens = Math.ceil(preview.characters / 4);
+      preview.warnings.push("Plugin servers require startup and per-tool approval. Their skill paths in this preview differ from the disposable run copies.");
+    }
     if (request.desktopControl) {
       preview.prompt += NOVA_DESKTOP_SKILL;
       preview.characters = preview.prompt.length;
@@ -1933,6 +1943,7 @@ export class WorkspaceService {
     this.ready();
     const request = validateRunRequest(value);
     if (request.desktopControl && !this.createDesktopSession) throw new Error("Desktop control is unavailable in this environment.");
+    if (request.usePlugins && !this.approvePlugin) throw new Error("Plugin execution is unavailable in this environment.");
     return this.exclusive(async () => {
       this.ready();
       if (this.state.accountRecovery || this.state.accountOperation)
@@ -1960,10 +1971,10 @@ export class WorkspaceService {
           providerStatus?.detail ||
             "Provider unavailable. Save Settings to refresh CLI detection.",
         );
-      if (request.provider === "claude" && request.desktopControl && !providerStatus.supportsDesktopMcp)
-        throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for desktop control.");
-      if (request.provider === "claude" && request.desktopControl && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? ""))
-        throw new Error("Claude Code safe mode is enforced by the current environment and disables desktop MCP. Remove that setting only if you intend to allow desktop control.");
+      if (request.provider === "claude" && (request.desktopControl || request.usePlugins) && !providerStatus.supportsDesktopMcp)
+        throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for these tools.");
+      if (request.provider === "claude" && (request.desktopControl || request.usePlugins) && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? ""))
+        throw new Error("Claude Code safe mode is enforced by the current environment and disables selected MCP tools. Remove that setting only if you intend to allow them.");
       let thread = request.threadId
         ? this.state.threads.find((entry) => entry.id === request.threadId)
         : undefined;
@@ -2005,6 +2016,10 @@ export class WorkspaceService {
         );
       if (request.desktopControl && this.state.runs.some((run) => run.desktopControl && ACTIVE.has(run.status)))
         throw new Error("Another Nova run is using desktop control. Finish or stop it first.");
+      if (request.usePlugins && this.state.runs.some((run) => run.usePlugins && ACTIVE.has(run.status)))
+        throw new Error("Another Nova run is using plugins. Finish or stop it first.");
+      if (request.usePlugins && this.state.runs.some((run) => run.usePlugins && run.terminationUnconfirmed && !run.recoveryAcknowledgedAt))
+        throw new Error("Plugin process cleanup is unconfirmed. Inspect the affected processes and review Settings → Recovery before starting plugins again.");
       const created = !thread;
       thread ??= {
         id: randomUUID(),
@@ -2066,6 +2081,7 @@ export class WorkspaceService {
         model,
         reasoningEffort: request.reasoningEffort,
         desktopControl: request.desktopControl || undefined,
+        usePlugins: request.usePlugins || undefined,
         mode: request.mode,
         prompt: request.prompt,
         status: "queued",
@@ -2151,9 +2167,11 @@ export class WorkspaceService {
             this.addEvent(run, {
               kind: "status",
               text:
-                request.desktopControl
-                  ? "Desktop control is enabled for this run. Each window observation and action requires your approval."
-                  : request.mode === "build"
+                request.usePlugins
+                  ? "Plugin startup and every plugin tool call require your approval." + (request.desktopControl ? " Desktop actions also require approval." : "")
+                  : request.desktopControl
+                    ? "Desktop control is enabled for this run. Each window observation and action requires your approval."
+                    : request.mode === "build"
                     ? "Working in an isolated branch. No automatic merge, commit, or verification."
                     : "Planning with read-only tools. No project writes requested.",
             });
@@ -2163,14 +2181,22 @@ export class WorkspaceService {
           const preparedSkills = await new SkillPackageStore(this.dataDir).prepareRun();
           context.prompt += preparedSkills.prompt;
           let desktop: Awaited<ReturnType<typeof startDesktopMcp>> | undefined;
+          let pluginCopies: Awaited<ReturnType<PluginPackageStore["prepareRun"]>> | undefined;
+          let plugins: Awaited<ReturnType<typeof startPluginMcp>> | undefined;
           let local: Awaited<ReturnType<typeof prepareLocalProvider>> | undefined;
-          let result: Awaited<ReturnType<typeof runProvider>>;
+          let result: Awaited<ReturnType<typeof runProvider>> | undefined;
+          let uncertainCleanup = false;
           try {
+            if (request.usePlugins) {
+              pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun();
+              plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd);
+              context.prompt += pluginCopies.prompt;
+            }
             if (request.desktopControl) {
               desktop = await startDesktopMcp(await this.createDesktopSession!(), controller.signal);
               context.prompt += NOVA_DESKTOP_SKILL;
             }
-            if (preparedSkills.prompt || desktop) {
+            if (preparedSkills.prompt || desktop || plugins) {
               context.characters = context.prompt.length;
               context.estimatedTokens = Math.ceil(context.characters / 4);
               await this.exclusive(async () => {
@@ -2179,6 +2205,7 @@ export class WorkspaceService {
                   run.contextSummary.estimatedTokens = context.estimatedTokens;
                   if (preparedSkills.prompt) run.contextSummary.warnings.push("Enabled imported skill names, descriptions, and paths were supplied to the provider.");
                   if (desktop) run.contextSummary.warnings.push("Desktop observations and actions require separate user approval and may share window content with this provider.");
+                  if (plugins) run.contextSummary.warnings.push("Plugin programs run under your user account; each tool call requires approval and may share data with the selected provider.");
                 }
                 await this.persist();
               });
@@ -2193,6 +2220,7 @@ export class WorkspaceService {
                       ...executable.env,
                       ...local?.env,
                       ...(desktop ? { NOVA_DESKTOP_TOKEN: desktop.token } : {}),
+                      ...(plugins ? { NOVA_PLUGIN_TOKEN: plugins.token } : {}),
                       CODEX_HOME: workerHome,
                     },
                     args: providerArguments(
@@ -2208,6 +2236,8 @@ export class WorkspaceService {
                         skillDirectory: preparedSkills.directory,
                         reasoningEffort: request.reasoningEffort,
                         desktopMcpUrl: desktop?.url,
+                        pluginMcpUrl: plugins?.url,
+                        pluginDirectory: pluginCopies?.directory,
                       },
                     ),
                   },
@@ -2218,6 +2248,7 @@ export class WorkspaceService {
                   timeoutMs: settings.timeoutMinutes * 60_000,
                   maxBytes: settings.maxOutputKb * 1024,
                   allowDesktopImages: !!desktop,
+                  allowPluginImages: !!plugins,
                   onEvent: (event) => {
                     if (event.thinkingDelta) {
                       receiveThinking(event.thinkingDelta);
@@ -2229,12 +2260,30 @@ export class WorkspaceService {
                     }
                   },
                 });
+          } catch (error) {
+            uncertainCleanup = !!(error && typeof error === "object" && "terminationUnconfirmed" in error && error.terminationUnconfirmed === true);
+            throw error;
           } finally {
-            await desktop?.dispose();
-            await local?.dispose();
+            let cleanupError: unknown;
+            try { await desktop?.dispose(); } catch (error) { cleanupError ??= error; }
+            try { await plugins?.dispose(); } catch (error) {
+              if (error instanceof McpProcessError && error.terminationUnconfirmed) { uncertainCleanup = true; cleanupError = error; }
+              else cleanupError ??= error;
+            }
+            try { await local?.dispose(); } catch (error) { cleanupError ??= error; }
+            if (pluginCopies && !uncertainCleanup && !result?.terminationUnconfirmed) {
+              try { await pluginCopies.dispose(); } catch (error) { cleanupError ??= error; }
+            }
+            if (!uncertainCleanup && !result?.terminationUnconfirmed) {
+              try { await preparedSkills.dispose(); } catch (error) { cleanupError ??= error; }
+            }
             flushThinking();
+            if (cleanupError) {
+              if (uncertainCleanup || result?.terminationUnconfirmed) throw new McpProcessError("A worker or plugin process could not be confirmed stopped. Inspect it and review Settings → Recovery.", true);
+              throw cleanupError;
+            }
           }
-          if (!result.terminationUnconfirmed) await preparedSkills.dispose();
+          if (!result) throw new Error("Provider did not return a result.");
           await this.exclusive(async () => {
             run.status = persistenceFailure
               ? "failed"
@@ -2270,6 +2319,7 @@ export class WorkspaceService {
                 ? "cancelled"
                 : "failed";
             run.finishedAt = now();
+            if (error && typeof error === "object" && "terminationUnconfirmed" in error && error.terminationUnconfirmed === true) run.terminationUnconfirmed = true;
             run.error = (
               persistenceFailure ||
               (error instanceof Error ? error.message : "Worker failed.")

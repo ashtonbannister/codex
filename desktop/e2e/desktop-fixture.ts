@@ -349,6 +349,7 @@ export async function installFakeDesktopBridge(
         platform: "mock-desktop",
       });
       const skillPackages: import("../src/shared/skills").SkillPackage[] = [];
+      const pluginPackages: import("../src/shared/plugins").PluginPackage[] = [];
       const bridge: WorkbenchAPI = {
         async getAccountStatus(provider) {
           calls.accountChecks.push(provider);
@@ -404,6 +405,10 @@ export async function installFakeDesktopBridge(
         },
         async openProviderHelp(provider) { calls.providerHelp.push(provider); },
         async setLocalServerKey() {},
+        async listPluginPackages() { return structuredClone(pluginPackages); },
+        async importPluginPackage() { const pkg = { id: "fixture-plugin", name: "Fixture plugin", enabled: false, skills: [], files: 2, bytes: 24, fingerprint: "a".repeat(64), servers: [{ name: "fixture", transport: "stdio", enabled: true, environmentNames: ["FIXTURE_TOKEN"], unsupported: [] }], disabledServers: [], warnings: [] }; pluginPackages.push(pkg); return structuredClone(pkg); },
+        async setPluginPackageEnabled(id, enabled) { const pkg = pluginPackages.find((item) => item.id === id); if (!pkg) throw new Error("Fixture plugin missing"); pkg.enabled = enabled; },
+        async setPluginServerEnabled(id, name, enabled) { const pkg = pluginPackages.find((item) => item.id === id); if (!pkg) throw new Error("Fixture plugin missing"); pkg.disabledServers = enabled ? pkg.disabledServers.filter((item) => item !== name) : [...pkg.disabledServers, name]; },
         async listSkillPackages() { return structuredClone(skillPackages); },
         async importSkillPackage() { const pkg = { id: "fixture-package", name: "Fixture skills", enabled: true, skills: [{ path: "sample/SKILL.md", name: "sample", description: "Fixture skill" }], files: 2, bytes: 24, fingerprint: "a".repeat(64) }; skillPackages.push(pkg); return structuredClone(pkg); },
         async setSkillPackageEnabled(id, enabled) { const pkg = skillPackages.find((item) => item.id === id); if (!pkg) throw new Error("Fixture package missing"); pkg.enabled = enabled; },
@@ -759,6 +764,7 @@ export async function installFakeDesktopBridge(
             model: request.model ?? "Provider default",
             reasoningEffort: request.reasoningEffort,
             desktopControl: request.desktopControl,
+            usePlugins: request.usePlugins,
             mode: request.mode,
             prompt: request.prompt,
             status: config.complete ? "completed" : "running",

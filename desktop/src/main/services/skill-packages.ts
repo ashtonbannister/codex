@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { removeOwnedTree } from "./owned-tree";
 import type { SkillPackage } from "../../shared/skills";
 
 const MAX_FILES = 2000;
@@ -9,8 +10,8 @@ const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_SKILLS = 200;
 const MAX_SKILL_BYTES = 128 * 1024;
 const idPattern = /^[0-9a-f-]{36}$/;
-type Entry = { path: string; data: Buffer; digest: string };
-type Snapshot = { files: Entry[]; skills: SkillPackage["skills"]; bytes: number; fingerprint: string };
+export type PackageFile = { path: string; data: Buffer; digest: string };
+export type PackageSnapshot = { files: PackageFile[]; skills: SkillPackage["skills"]; bytes: number; fingerprint: string };
 
 const normalize = (value: string) => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
 function inside(root: string, candidate: string): boolean {
@@ -30,12 +31,12 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
 }
 
 /** A bounded snapshot of the entire selected package; no links or special files are followed. */
-export async function snapshotSkillPackage(selected: string): Promise<Snapshot> {
+export async function snapshotSkillPackage(selected: string, options: { allowNoSkills?: boolean } = {}): Promise<PackageSnapshot> {
   if (!path.isAbsolute(selected)) throw new Error("Choose an absolute skill package folder.");
   const top = await lstat(selected);
   if (!top.isDirectory() || top.isSymbolicLink()) throw new Error("Choose a real folder, not a link.");
   const root = await realpath(selected);
-  const files: Entry[] = [];
+  const files: PackageFile[] = [];
   let bytes = 0;
   async function visit(dir: string, prefix: string, depth: number): Promise<void> {
     if (depth > 16) throw new Error("Skill package exceeds the 16-folder depth limit.");
@@ -78,7 +79,7 @@ export async function snapshotSkillPackage(selected: string): Promise<Snapshot> 
     if (content.includes("\0")) throw new Error(`Skill definition is not text: ${file.path}`);
     skills.push(metadata(content, file.path));
   }
-  if (!skills.length) throw new Error("No SKILL.md file was found in this folder. Select a skill folder or a package containing skills.");
+  if (!skills.length && !options.allowNoSkills) throw new Error("No SKILL.md file was found in this folder. Select a skill folder or a package containing skills.");
   const fingerprint = createHash("sha256").update(JSON.stringify(files.map(({ path: file, digest, data }) => [file, data.length, digest]))).digest("hex");
   return { files, skills, bytes, fingerprint };
 }
@@ -194,9 +195,7 @@ export class SkillPackageStore {
         prompt: this.catalog(packages, (pkg) => path.join(directory, pkg.id)),
         directory,
         dispose: async () => {
-          const current = await lstat(directory);
-          if (!current.isDirectory() || current.isSymbolicLink() || !inside(runs, await realpath(directory))) throw new Error("Skill run-copy location changed; it was preserved.");
-          await rm(directory, { recursive: true, force: true });
+          await removeOwnedTree(runs, directory);
         },
       };
     } catch (error) {
