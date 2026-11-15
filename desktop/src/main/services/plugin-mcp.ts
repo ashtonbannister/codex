@@ -12,7 +12,7 @@ import { McpRemoteClient } from "./mcp-remote";
 
 type Json = Record<string, unknown>;
 type PreparedPackage = { pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[] };
-export type PluginApproval = (request: { action: "skills" | "commands" | "skill-shell" | "skill-fork" | "start" | "discover" | "call"; title: string; detail: string }) => Promise<boolean>;
+export type PluginApproval = (request: { action: "skills" | "commands" | "skill-shell" | "skill-fork" | "skill-hook" | "start" | "discover" | "call"; title: string; detail: string }) => Promise<boolean>;
 interface Launch {
   pkg: PluginPackage; server: PluginServerConfig; root: string;
   dataDir: string;
@@ -56,7 +56,7 @@ const summary = (launch: Launch) => ({
 });
 
 /** Start only reviewed servers and gate every tool call independently. */
-export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }, bundle?: { values(identity: { id: string; fingerprint: string; server?: string }): Record<string, import("./bundle-config").BundleValue>; paths: Record<string, string> }): Promise<{
+export async function startPluginMcp(packages: PreparedPackage[], approve: PluginApproval, signal: AbortSignal, projectDir = process.cwd(), credential: (identity: { id: string; fingerprint: string; server: string }) => string | undefined = () => undefined, oauth?: { has(identity: { id: string; fingerprint: string; server: string }): boolean; token(identity: { id: string; fingerprint: string; server: string }, endpoint: string, settings: import("./plugin-oauth").OAuthSettings, signal: AbortSignal, approve: PluginApproval): Promise<string | undefined> }, bundle?: { values(identity: { id: string; fingerprint: string; server?: string }): Record<string, import("./bundle-config").BundleValue>; paths: Record<string, string> }, hook?: { beforeCall(input: { server: string; tool: string; alias: string; args: unknown }, signal: AbortSignal): Promise<void>; settle(): Promise<void> }): Promise<{
   url: string; token: string; dispose(): Promise<void>;
 }> {
   signal.throwIfAborted();
@@ -139,7 +139,9 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
   let definitionBytes = 0;
   const closeClients = async () => {
     const results = await Promise.all(clients.map(async (client) => { try { return await client.close(); } catch { return false; } }));
+    let hookFailure: unknown; try { await hook?.settle(); } catch (error) { hookFailure = error; }
     if (results.some((result) => !result)) throw new McpProcessError("A plugin server's termination could not be confirmed. Inspect its processes before continuing.", true);
+    if (hookFailure) throw hookFailure;
   };
   const registerTools = (pkg: PluginPackage, server: PluginServerConfig, client: McpStdioClient | McpRemoteClient, tools: ImportedMcpTool[]) => {
     for (const tool of tools) {
@@ -221,6 +223,8 @@ export async function startPluginMcp(packages: PreparedPackage[], approve: Plugi
         try {
           const detail = printable({ plugin: entry.pkg.name, server: entry.server.name, tool: entry.tool.name, arguments: redact(args), note: "Sensitive-looking values are redacted. Local plugin servers run with your user account; remote servers receive these arguments and may continue after cancellation." });
           if (!(await approve({ action: "call", title: `Run ${entry.tool.name}?`, detail }))) throw new Error("Plugin tool call was declined.");
+          requestSignal.throwIfAborted();
+          await hook?.beforeCall({ server: entry.server.name, tool: entry.tool.name, alias, args }, requestSignal);
           requestSignal.throwIfAborted();
           return await entry.client.call(entry.tool.name, args, requestSignal, entry.server.toolTimeoutMs);
         } finally { active = false; }

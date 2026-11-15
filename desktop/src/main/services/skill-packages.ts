@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defaultAgentPaths, resolveCustomAgents, unresolvedCustomAgent, verifiedAgentPrompt } from "./skill-agents";
+import { parseSkillMcpHooks } from "./skill-hook-config";
 import { parseSkillDisallowedTools } from "./skill-restrictions";
 import { parseNamedArguments } from "./skill-arguments";
 import { removeOwnedTree } from "./owned-tree";
@@ -61,7 +62,9 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
     if (typeof header.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(header.model)) { skillModel = header.model; warnings.push("This skill requests a Claude model override and requires explicit invocation."); }
     else unsupported.push("This skill requests an invalid model override.");
   }
-  if (header.hooks !== undefined) unsupported.push("Skill hooks are not supported.");
+  let mcpHooks: SkillPackage["skills"][number]["mcpHooks"];
+  try { mcpHooks = parseSkillMcpHooks(header.hooks); if (mcpHooks?.length) warnings.push("Plugin MCP pre-tool hooks require explicit invocation and per-call approval; they apply only to this Nova run."); } catch { unsupported.push("This skill requests unsupported hook events or options."); }
+  if (mcpHooks?.length && forkAgent) unsupported.push("Plugin MCP hooks on forked skills are not yet supported.");
   let skillDisallowedTools: string[] | undefined;
   try { skillDisallowedTools = parseSkillDisallowedTools(header["disallowed-tools"]); if (skillDisallowedTools) warnings.push("Skill tool restrictions require explicit Claude invocation."); } catch { unsupported.push("This skill requests unsupported tool restrictions."); }
   let namedArguments: string[] | undefined;
@@ -73,9 +76,9 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (requiresShell) warnings.push("Shell-generated context requires explicit invocation and command approval.");
   if (/\$\{user_config\./.test(body)) unsupported.push("This skill requires plugin settings.");
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
-  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent || !!skillModel || !!skillDisallowedTools, userInvocable = flag("user-invocable", true);
+  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent || !!skillModel || !!skillDisallowedTools || !!mcpHooks?.length, userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(skillModel ? { skillModel } : {}), ...(skillDisallowedTools ? { skillDisallowedTools } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(skillModel ? { skillModel } : {}), ...(skillDisallowedTools ? { skillDisallowedTools } : {}), ...(mcpHooks?.length ? { mcpHooks } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */

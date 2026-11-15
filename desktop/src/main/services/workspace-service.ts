@@ -83,6 +83,7 @@ import { PluginPackageStore } from "./plugin-packages";
 import { startPluginMcp, type PluginApproval } from "./plugin-mcp";
 import { findPluginCommand, looksLikePluginCommand, pluginCommandPrompt } from "./plugin-commands";
 import { renderSkillWithShell } from "./skill-shell";
+import { prepareSkillMcpHooks, skillMcpHookRunner } from "./skill-mcp-hooks";
 import { renderExplicitSkill } from "./skill-selection";
 import { McpProcessError } from "./mcp-stdio";
 import {
@@ -1511,6 +1512,7 @@ export class WorkspaceService {
       preview.characters = preview.prompt.length; preview.estimatedTokens = Math.ceil(preview.characters / 4);
       preview.warnings.push("The expanded skill requires approval before sharing. Paths shown here differ from disposable run copies.");
       if (skill.descriptor.requiresShell) preview.warnings.push("Skill shell commands are not run in preview; command execution and resulting output require separate approvals.");
+      if (skill.descriptor.mcpHooks?.length) preview.warnings.push("Plugin MCP pre-tool hooks require approval for each matching call and apply only during this Nova run.");
     }
     const previewMcpDenied = invoked.some((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillDisallowedTools?.includes("mcp__*"));
     if (previewMcpDenied && (request.usePlugins || request.desktopControl)) preview.warnings.push("The selected skill disables MCP tools for this run.");
@@ -2244,6 +2246,9 @@ export class WorkspaceService {
             };
             const explicitSkills: Array<Awaited<ReturnType<typeof renderExplicitSkill>>> = [];
             await Promise.all(invoked.map((skill) => renderExplicitSkill(skill, cwd, request.provider)));
+            const hookPlans = prepareSkillMcpHooks(invoked, cwd);
+            if (hookPlans.length && invoked.some((skill) => skill.descriptor.forkAgent)) throw new Error("Plugin MCP hooks cannot be combined with forked skills yet.");
+            for (const plan of hookPlans) if (parentDenied.includes(plan.shell === "powershell" ? "PowerShell" : "Bash")) throw new Error("A selected skill forbids the shell needed for its hook.");
             for (const skill of invoked) {
               if (skill.descriptor.requiresShell) {
                 const shell = skill.descriptor.shell ?? (process.platform === "win32" ? "powershell" : "bash");
@@ -2269,7 +2274,7 @@ export class WorkspaceService {
                 if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
                 const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, ...(skill.agentPrompt ? { agentInstructions: skill.agentPrompt } : {}), ...(forkTools(skill) ? { effectiveTools: forkTools(skill), disallowedTools: [...new Set([...parentDenied, ...(skill.descriptor.forkAgentDisallowedTools ?? []), ...(skill.descriptor.skillDisallowedTools ?? [])])] } : {}), mode: (skill.agentPrompt ? skill.descriptor.forkAgentReadOnly : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan") ? "plan" : request.mode, model: skill.descriptor.skillModel ?? skill.descriptor.forkAgentModel ?? selectedProvider.model }));
-                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(parentDenied.length ? { skillToolRestrictions: { denied: parentDenied, effectiveTools: parentTools, mcpDisabled: parentMcpDenied } } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Requested skill models apply to the listed sessions and can change usage or cost. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(hookPlans.length ? { skillMcpHooks: hookPlans } : {}), ...(parentDenied.length ? { skillToolRestrictions: { denied: parentDenied, effectiveTools: parentTools, mcpDisabled: parentMcpDenied } } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Requested skill models apply to the listed sessions and can change usage or cost. Plugin MCP pre-tool hooks run only for this Nova run, require a separate per-call approval, and receive the reviewed tool input. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
                 if (detail.length > 64_000) throw new Error("The plugin instructions are too large to review. Disable a package or shorten the command and retry.");
                 if (!await this.approvePlugin!({ action: skillReview.length ? "skills" : "commands", title: `Share these instructions with ${selectedProvider.name}?`, detail })) throw new Error("Skill or command sharing was declined.");
                 controller.signal.throwIfAborted();
@@ -2278,11 +2283,12 @@ export class WorkspaceService {
             await preparedSkills.verify();
             await pluginCopies?.verifyProviders();
             for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after skill sharing was reviewed.`);
+            const hookRunner = hookPlans.length && this.approvePlugin ? skillMcpHookRunner(hookPlans, cwd, run.id, this.approvePlugin, verifySkillSources, () => controller.abort()) : undefined;
             if (pluginCopies) {
               if (!parentMcpDenied && pluginCopies.packages.some((entry) => entry.servers.length)) {
                 if (request.provider === "claude" && !providerStatus?.supportsDesktopMcp) throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for plugin tools.");
                 if (request.provider === "claude" && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? "")) throw new Error("Claude Code safe mode is enforced by the current environment and disables selected MCP tools.");
-                plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd, this.pluginCredential, this.pluginOAuth, this.bundleSettings);
+                plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd, this.pluginCredential, this.pluginOAuth, this.bundleSettings, hookRunner);
               }
               for (const entry of pluginCopies.packages) {
                 if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after skill sharing was reviewed.`);
@@ -2343,6 +2349,7 @@ export class WorkspaceService {
                   if (command) run.contextSummary.warnings.push("The selected plugin command instructions were approved for sharing with the provider.");
                   if (plugins) run.contextSummary.warnings.push("Plugin programs run under your user account; each tool call requires approval and may share data with the selected provider.");
                   if (parentMcpDenied) run.contextSummary.warnings.push("The selected skill disabled MCP tools for this run.");
+                  if (hookPlans.length) run.contextSummary.warnings.push("Matching plugin MCP calls require additional skill-hook approval during this run.");
                 }
                 await this.persist();
               });

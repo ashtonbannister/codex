@@ -16,6 +16,7 @@ export interface SkillDescriptor {
   forkModelInherit?: boolean;
   skillModel?: string;
   skillDisallowedTools?: string[];
+  mcpHooks?: Array<{ server: string; tool: string; command: string; timeoutMs: number }>;
   allowedProviders?: Array<"codex" | "claude" | "ollama">;
   unsupported?: string[];
   warnings?: string[];
