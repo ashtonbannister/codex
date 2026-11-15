@@ -594,6 +594,41 @@ test("declined or modified plugin skills never reach the provider or start a ser
   await assert.rejects(readFile(markerPath), { code: "ENOENT" }); assert.deepEqual(actions, ["skills", "skills"]);
 });
 
+test("explicit plugin commands preview and require provider approval before sending", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; let mode: "deny" | "allow" | "change" = "deny";
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => {
+    reviews.push(request);
+    if (request.action === "commands" && mode === "change") { const detail = JSON.parse(request.detail) as { command: { path: string } }; await writeFile(detail.command.path, "changed after review"); }
+    return mode !== "deny";
+  });
+  const source = path.join(root, "commands"); await mkdir(path.join(source, "commands"), { recursive: true });
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" }));
+  await writeFile(path.join(source, "commands", "review.md"), "---\ndescription: Review a file\n---\nReview $0. Arguments: $ARGUMENTS\n");
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: '/fixture:review "two words" ECHO_PROMPT', usePlugins: true };
+  await assert.rejects(service.startRun({ ...request, usePlugins: false }), /Enable Plugins/);
+  const context = await service.previewContext(request); assert.match(context.prompt, /Review two words/); assert.match(context.prompt, /USER-INVOKED PLUGIN COMMAND/);
+  const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /sharing was declined/); assert.ok(!denied.events.some((event) => event.kind === "message"));
+  const reviewed = JSON.parse(reviews[0]!.detail) as { provider: { name: string }; command: { content: string } }; assert.equal(reviews[0]!.action, "commands"); assert.equal(reviewed.provider.name, "Codex"); assert.match(reviewed.command.content, /Review two words/);
+  mode = "change"; const changed = await finishRun(service, (await service.startRun(request)).id); assert.equal(changed.status, "failed"); assert.match(changed.error ?? "", /changed after .*review/i); assert.ok(!changed.events.some((event) => event.kind === "message"));
+  mode = "allow"; const run = await finishRun(service, (await service.startRun(request)).id); assert.equal(run.status, "completed", run.error);
+  const sent = run.events.find((event) => event.kind === "message")!.text; assert.match(sent, /Review two words/); assert.ok(run.contextSummary?.warnings.some((warning) => warning.includes("command instructions")));
+  assert.deepEqual(reviews.map((review) => review.action), ["commands", "commands", "commands"]);
+});
+
+test("plugin command and skill content share one explicit review", async (t) => {
+  const reviews: Array<{ action: string; detail: string }> = []; const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return true; });
+  const source = path.join(root, "mixed-command"); await mkdir(path.join(source, "skills", "demo"), { recursive: true }); await mkdir(path.join(source, "commands"));
+  await writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "fixture" }));
+  await writeFile(path.join(source, "skills", "demo", "SKILL.md"), "---\nname: fixture-skill\ndescription: Fixture\n---\nSynthetic\n");
+  await writeFile(path.join(source, "commands", "review.md"), "Review $ARGUMENTS.");
+  const store = new PluginPackageStore(dataDir); const preview = await store.preview(source); const pkg = await store.install(source, preview.fingerprint); await store.setEnabled(pkg.id, true);
+  const run = await finishRun(service, (await service.startRun({ projectId: project.id, provider: "codex", mode: "plan", prompt: "/fixture:review ECHO_PROMPT", usePlugins: true })).id);
+  assert.equal(run.status, "completed", run.error); assert.deepEqual(reviews.map((entry) => entry.action), ["skills"]);
+  const review = JSON.parse(reviews[0]!.detail) as { skills: Array<{ name: string }>; command: { content: string } }; assert.equal(review.skills[0]!.name, "fixture-skill"); assert.equal(review.command.content, "Review ECHO_PROMPT.");
+  const sent = run.events.find((event) => event.kind === "message")!.text; assert.match(sent, /fixture-skill/); assert.match(sent, /Review ECHO_PROMPT/);
+});
+
 test("first Build previews warn that ignored local source files are absent from the future worktree", async (t) => {
   const { service, project, repo } = await fixture(t);
   await writeFile(path.join(repo, ".gitignore"), "local-source.txt\n");

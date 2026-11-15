@@ -5,6 +5,7 @@ import path from "node:path";
 import { removeOwnedTree } from "./owned-tree";
 import { withBundleArchive } from "./bundle-archive";
 import { parseBundleFields, publicBundleFields, type BundleDefinition } from "./bundle-config";
+import { commandSummaries, findPluginCommand, looksLikePluginCommand, parsePluginCommands, type CommandDefinition } from "./plugin-commands";
 import type { PluginPackage } from "../../shared/plugins";
 import { parsePluginMcp, pluginServerSummary, prepareRemotePluginHeaders, type PluginServerConfig } from "./plugin-config";
 import { snapshotSkillPackage, type PackageSnapshot } from "./skill-packages";
@@ -32,7 +33,7 @@ function manifestPath(value: string): string {
   return result;
 }
 
-function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
+function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; commands: CommandDefinition[]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
   const manifest = object(readJson(snapshot, "manifest.json"));
   const version = manifest.manifest_version ?? manifest.dxt_version;
   if (typeof version !== "string" || !["0.1", "0.2", "0.3"].includes(version)) throw new Error("This MCP bundle manifest version is not supported.");
@@ -70,10 +71,10 @@ function parseMcpBundle(snapshot: PackageSnapshot, fallbackName: string): { name
   if (manifest._meta !== undefined) warnings.push("Bundle host-specific integrations are not loaded by Nova.");
   const name = typeof manifest.display_name === "string" ? manifest.display_name : typeof manifest.name === "string" ? manifest.name : fallbackName;
   if (!name.trim() || name.length > 128 || /[\0\r\n]/.test(name)) throw new Error("Invalid bundle name.");
-  return { name, servers: [parsed!], skills: snapshot.skills, warnings, ...(bundleFields.length ? { bundleFields: publicBundleFields(bundleFields) } : {}) };
+  return { name, servers: [parsed!], skills: snapshot.skills, commands: [], warnings, ...(bundleFields.length ? { bundleFields: publicBundleFields(bundleFields) } : {}) };
 }
 
-export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
+export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: string): { name: string; servers: PluginServerConfig[]; skills: PluginPackage["skills"]; commands: CommandDefinition[]; warnings: string[]; bundleFields?: PluginPackage["bundleFields"] } {
   if (snapshot.files.some((file) => file.path.toLowerCase() === "manifest.json") && !snapshot.files.some((file) => ["plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json", ".mcp.json", "mcp.json"].includes(file.path.toLowerCase()))) return parseMcpBundle(snapshot, fallbackName);
   const allManifests = snapshot.files.filter((file) => [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"].includes(file.path.toLowerCase()));
   const hasRootManifest = snapshot.files.some((file) => file.path.toLowerCase() === "plugin.json");
@@ -86,6 +87,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   const defaultFile = portable ? "mcp.json" : ".mcp.json";
   const defaultConfig = snapshot.files.some((file) => file.path.toLowerCase() === defaultFile) ? parsePluginMcp(readJson(snapshot, defaultFile), { allowEmpty: true }) : [];
   const variants: Array<Map<string, PluginServerConfig>> = [];
+  const commandVariants: CommandDefinition[][] = [];
   const warnings = new Set<string>();
   if (portable && snapshot.files.some((file) => file.path.toLowerCase() === ".mcp.json")) warnings.add("The portable mcp.json is used; a legacy .mcp.json is loaded only if explicitly declared by the selected overlay.");
   const skillRoots = new Set<string>(["skills"]);
@@ -112,9 +114,12 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
         else skillRoots.add(manifestPath(entry.replace(/\/$/, "")));
       }
     }
-    for (const field of ["hooks", "commands", "agents", "lspServers", "workflows", "outputStyles", "experimental", "apps"]) {
+    for (const field of ["hooks", "agents", "lspServers", "workflows", "outputStyles", "experimental", "apps"]) {
       if (manifest[field] !== undefined) warnings.add(`Plugin ${field} are not loaded by Nova.`);
     }
+    const commands = parsePluginCommands(snapshot, manifest.commands);
+    if (manifest.commands !== undefined && snapshot.files.some((entry) => /^commands\/[^/]+\.md$/i.test(entry.path) && !commands.some((command) => command.path?.toLowerCase() === entry.path.toLowerCase()))) warnings.add("Some default commands are excluded by the manifest's command selection.");
+    commandVariants.push(commands);
     const servers = new Map(defaultConfig.map((server) => [server.name, server]));
     const declared = manifest.mcpServers === undefined ? [] : Array.isArray(manifest.mcpServers) ? manifest.mcpServers : [manifest.mcpServers];
     if (declared.length > 32) throw new Error("Too many plugin MCP manifest entries.");
@@ -143,18 +148,21 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
     }
     variants.push(servers);
   }
-  if (!manifests.length) variants.push(new Map(defaultConfig.map((server) => [server.name, server])));
+  if (!manifests.length) { variants.push(new Map(defaultConfig.map((server) => [server.name, server]))); commandVariants.push(parsePluginCommands(snapshot, undefined)); }
   if (snapshot.files.some((file) => /^hooks\/hooks\.json$/i.test(file.path))) warnings.add("Plugin hooks are not loaded by Nova.");
-  if (snapshot.files.some((file) => /^(?:commands|agents|workflows)\//i.test(file.path))) warnings.add("Plugin commands, agents, and workflows are not loaded by Nova.");
+  if (snapshot.files.some((file) => /^(?:agents|workflows)\//i.test(file.path))) warnings.add("Plugin agents and workflows are not loaded by Nova.");
   const signature = (servers: Map<string, PluginServerConfig>) => JSON.stringify([...servers.entries()].sort(([a], [b]) => a.localeCompare(b)));
   if (variants.some((servers) => signature(servers) !== signature(variants[0]!))) throw new Error("Codex and Claude plugin manifests define different servers. Import a provider-specific package instead.");
+  if (commandVariants.some((commands) => JSON.stringify(commands) !== JSON.stringify(commandVariants[0]))) throw new Error("Codex and Claude plugin manifests define different commands. Import a provider-specific package instead.");
+  const commands = commandVariants[0] ?? [];
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) for (const command of commands) command.unsupported.push("The plugin name cannot be used as a command namespace.");
   const servers = [...(variants[0]?.values() ?? [])];
   if (servers.length > 100) throw new Error("A plugin package cannot contain more than 100 MCP servers.");
   const skillKey = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
   const skills = snapshot.skills.filter((skill) => [...skillRoots].some((root) => root === "." || skillKey(skill.path) === skillKey(root) || skillKey(skill.path).startsWith(`${skillKey(root)}/`)));
   if (skills.length !== snapshot.skills.length) warnings.add(`${snapshot.skills.length - skills.length} skill definition(s) outside declared plugin skill paths were excluded.`);
-  if (!servers.length && !skills.length) throw new Error("This package does not contain supported skills or MCP servers.");
-  return { name, servers, skills, warnings: [...warnings] };
+  if (!servers.length && !skills.length && !commands.length) throw new Error("This package does not contain supported skills, commands or MCP servers.");
+  return { name, servers, skills, commands, warnings: [...warnings] };
 }
 
 /** Independent, fingerprinted copies of explicitly selected plugin packages. */
@@ -206,7 +214,7 @@ export class PluginPackageStore {
     if (inside(source, this.root) || inside(this.root, source)) throw new Error("Choose a source separate from Nova's plugin storage.");
     const snapshot = await snapshotSkillPackage(selected, { allowNoSkills: true });
     const parsed = await this.resolvePackage(snapshot, selected, path.basename(source));
-    return { name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint: snapshot.fingerprint, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
+    return { name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, fingerprint: snapshot.fingerprint, skills: parsed.skills, commands: commandSummaries(parsed.commands), servers: parsed.servers.map(pluginServerSummary), warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
   }
   async install(selected: string, fingerprint: string): Promise<PluginPackage> {
     await this.ensureRoot();
@@ -246,6 +254,7 @@ export class PluginPackageStore {
     if (pkg.id !== id || typeof pkg.name !== "string" || pkg.name.length > 128 || typeof pkg.enabled !== "boolean" ||
         !Number.isSafeInteger(pkg.files) || !Number.isSafeInteger(pkg.bytes) || !Array.isArray(pkg.servers) || pkg.servers.length > 100 ||
         !pkg.servers.every((server) => server && typeof server.name === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(server.name) && typeof server.transport === "string" && typeof server.enabled === "boolean" && Array.isArray(server.environmentNames) && server.environmentNames.every((name) => typeof name === "string") && Array.isArray(server.unsupported) && server.unsupported.every((reason) => typeof reason === "string")) ||
+        (pkg.commands !== undefined && (!Array.isArray(pkg.commands) || pkg.commands.length > 100 || pkg.commands.some((command) => !command || typeof command.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(command.name) || typeof command.description !== "string" || command.description.length > 800 || (command.path !== undefined && (typeof command.path !== "string" || command.path.length > 1024)) || (command.argumentHint !== undefined && (typeof command.argumentHint !== "string" || command.argumentHint.length > 300)) || !Array.isArray(command.unsupported) || command.unsupported.some((reason) => typeof reason !== "string" || reason.length > 1000) || !Array.isArray(command.warnings) || command.warnings.some((warning) => typeof warning !== "string" || warning.length > 1000)))) ||
         !Array.isArray(pkg.skills) || pkg.skills.length > 200 || !pkg.skills.every((skill) => skill && typeof skill.path === "string" && typeof skill.name === "string" && typeof skill.description === "string") ||
         (pkg.bundleFields !== undefined && (!Array.isArray(pkg.bundleFields) || pkg.bundleFields.length > 200 || pkg.bundleFields.some((field) => !field || typeof field.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(field.key) || !["string", "number", "boolean", "file", "directory"].includes(field.type) || typeof field.title !== "string" || typeof field.description !== "string" || typeof field.required !== "boolean" || typeof field.sensitive !== "boolean" || typeof field.multiple !== "boolean" || (field.server !== undefined && (typeof field.server !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(field.server))) || (field.sensitive && field.value !== undefined)))) ||
         !Array.isArray(pkg.disabledServers) || pkg.disabledServers.some((name) => typeof name !== "string" || !pkg.servers.some((server) => server.name === name)) ||
@@ -257,7 +266,7 @@ export class PluginPackageStore {
       const known = new Set(pkg.servers.map((server) => server.name));
       const disabled = new Set(pkg.disabledServers.filter((name) => parsed.servers.some((server) => server.name === name)));
       for (const server of parsed.servers) if (!known.has(server.name) || !server.enabled || server.unsupported.length) disabled.add(server.name);
-      return { ...pkg, name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, skills: parsed.skills, servers: parsed.servers.map(pluginServerSummary), disabledServers: [...disabled], warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
+      return { ...pkg, name: parsed.name, files: snapshot.files.length, bytes: snapshot.bytes, skills: parsed.skills, commands: commandSummaries(parsed.commands), servers: parsed.servers.map(pluginServerSummary), disabledServers: [...disabled], warnings: parsed.warnings, ...(parsed.bundleFields ? { bundleFields: parsed.bundleFields } : {}) };
     }
     return pkg;
   }
@@ -288,8 +297,22 @@ export class PluginPackageStore {
     return this.catalog(verified.map((pkg) => ({ pkg, root: path.join(this.root, pkg.id, "files") })));
   }
 
+  async previewCommand(input: string, project: string): Promise<ReturnType<typeof findPluginCommand>> {
+    if (!looksLikePluginCommand(input)) return undefined;
+    const enabled = (await this.list()).filter((pkg) => pkg.enabled);
+    const packages = [];
+    for (const entry of enabled) {
+      const pkg = await this.readPackage(entry.id, true); const root = path.join(this.root, pkg.id, "files");
+      const snapshot = await snapshotSkillPackage(root, { allowNoSkills: true });
+      if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before preview.`);
+      const parsed = await this.resolvePackage(snapshot, root, pkg.name);
+      packages.push({ pkg, root, dataDir: path.join(this.dataDir, "plugin-data", pkg.id), commands: parsed.commands });
+    }
+    return findPluginCommand(input, packages, project);
+  }
+
   /** Materialize verified per-run copies; this does not start plugin code. */
-  async prepareRun(): Promise<{ packages: Array<{ pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[] }>; directory: string; prompt: string; dispose(): Promise<void> }> {
+  async prepareRun(): Promise<{ packages: Array<{ pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[] }>; directory: string; prompt: string; dispose(): Promise<void> }> {
     const enabled = (await this.list()).filter((pkg) => pkg.enabled);
     if (!enabled.length) throw new Error("No plugin packages are enabled. Import and enable one in Settings → Plugins.");
     const verified = await Promise.all(enabled.map((pkg) => this.readPackage(pkg.id, true)));
@@ -305,12 +328,13 @@ export class PluginPackageStore {
       await mkdir(dataRoot, { recursive: true, mode: 0o700 });
       const dataRootInfo = await lstat(dataRoot);
       if (!dataRootInfo.isDirectory() || dataRootInfo.isSymbolicLink() || normalize(await realpath(dataRoot)) !== normalize(dataRoot)) throw new Error("Plugin data storage is unavailable or redirected.");
-      const packages: Array<{ pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[] }> = [];
+      const packages: Array<{ pkg: PluginPackage; root: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[] }> = [];
       for (const pkg of verified) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"), { allowNoSkills: true });
         if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before launch.`);
         const sourceRoot = path.join(this.root, pkg.id, "files");
-        const servers = (await this.resolvePackage(snapshot, sourceRoot, pkg.name)).servers.filter((server) => server.enabled && !pkg.disabledServers.includes(server.name));
+        const resolved = await this.resolvePackage(snapshot, sourceRoot, pkg.name);
+        const servers = resolved.servers.filter((server) => server.enabled && !pkg.disabledServers.includes(server.name));
         if (servers.some((server) => server.unsupported.length)) throw new Error(`Plugin ${pkg.name} contains an enabled server with unsupported settings. Review it in Settings → Plugins.`);
         totalBytes += snapshot.bytes; totalServers += servers.length;
         if (totalBytes > 128 * 1024 * 1024 || totalServers > 20) throw new Error("Enabled plugin packages exceed the per-run limit.");
@@ -346,9 +370,9 @@ export class PluginPackageStore {
           if (!child.isDirectory() || child.isSymbolicLink() || normalize(await realpath(bundleDataDir)) !== normalize(bundleDataDir)) throw new Error("Embedded bundle data storage is unavailable or redirected.");
           server.bundleRoot = bundleRoot; server.bundleDataDir = bundleDataDir;
         }
-        packages.push({ pkg, root, dataDir, servers });
+        packages.push({ pkg, root, dataDir, servers, commands: resolved.commands });
       }
-      if (!totalServers && !packages.some(({ pkg }) => pkg.skills.length)) throw new Error("No enabled plugin skills or servers are available.");
+      if (!totalServers && !packages.some(({ pkg, commands }) => pkg.skills.length || commands.some((command) => !command.unsupported.length))) throw new Error("No enabled plugin skills, commands or servers are available.");
       return { packages, directory, prompt: this.catalog(packages), dispose: async () => {
         await removeOwnedTree(copies, directory);
       } };
@@ -395,7 +419,7 @@ export class PluginPackageStore {
     if (!server) throw new Error("Plugin server not found.");
     if (enabled && (!server.enabled || server.unsupported.length)) throw new Error("This server is disabled in its source or has unsupported settings.");
     const disabledServers = enabled ? pkg.disabledServers.filter((entry) => entry !== name) : [...new Set([...pkg.disabledServers, name])];
-    if (pkg.enabled && !pkg.skills.length && !pkg.servers.some((entry) => entry.enabled && !entry.unsupported.length && !disabledServers.includes(entry.name))) throw new Error("Disable the plugin before deselecting its last supported server.");
+    if (pkg.enabled && !pkg.skills.length && !(pkg.commands ?? []).some((command) => !command.unsupported.length) && !pkg.servers.some((entry) => entry.enabled && !entry.unsupported.length && !disabledServers.includes(entry.name))) throw new Error("Disable the plugin before deselecting its last supported server.");
     await this.writePackage({ ...pkg, disabledServers });
   }
   private async writePackage(pkg: PluginPackage): Promise<void> {
@@ -408,7 +432,7 @@ export class PluginPackageStore {
     if (typeof enabled !== "boolean") throw new Error("Invalid plugin enabled setting.");
     await this.ensureRoot();
     const pkg = await this.readPackage(id, enabled);
-    if (enabled && !pkg.skills.length && !pkg.servers.some((server) => server.enabled && !server.unsupported.length && !pkg.disabledServers.includes(server.name))) throw new Error("This plugin has no supported skills or selected server. Review its details before enabling it.");
+    if (enabled && !pkg.skills.length && !(pkg.commands ?? []).some((command) => !command.unsupported.length) && !pkg.servers.some((server) => server.enabled && !server.unsupported.length && !pkg.disabledServers.includes(server.name))) throw new Error("This plugin has no supported skills, commands or selected server. Review its details before enabling it.");
     await this.writePackage({ ...pkg, enabled });
   }
 }

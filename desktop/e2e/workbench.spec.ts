@@ -181,8 +181,22 @@ test("skill-only plugin details can be reviewed and enabled", async ({ page }) =
   await expect(dialog.getByText("0 servers · 1 skill", { exact: false })).toBeVisible();
   await dialog.getByText("Plugin skills", { exact: true }).click(); await expect(dialog.getByText("demo-skill — Synthetic instructions")).toBeVisible();
   await dialog.getByRole("checkbox", { name: "Fixture plugin" }).check(); await expect(dialog.getByRole("checkbox", { name: "Fixture plugin" })).toBeChecked();
-  await expect(dialog.getByText(/review which plugin skills may be shared/i)).toBeVisible();
+  await expect(dialog.getByText(/review which plugin skills and explicitly invoked commands may be shared/i)).toBeVisible();
   await page.screenshot({ path: "test-results/skill-only-plugin.png" });
+});
+
+test("command-only plugins display invocation and can be selected for a run", async ({ page }) => {
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  await installFakeDesktopBridge(page, { noProjects: true, complete: true, commandOnlyPlugin: true }); await page.goto("/");
+  await page.getByRole("button", { name: /^Settings/ }).click(); const dialog = page.getByRole("dialog", { name: "Workbench settings" });
+  await dialog.getByRole("tab", { name: "Plugins" }).click(); await dialog.getByRole("button", { name: "Import plugin package…" }).click();
+  await dialog.getByText("Plugin commands", { exact: true }).click(); await expect(dialog.getByText("/fixture:review", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/Nova asks before sharing its instructions/)).toBeVisible(); await dialog.getByRole("checkbox", { name: "fixture", exact: true }).check();
+  await page.screenshot({ path: "test-results/plugin-command.png" }); await dialog.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("checkbox", { name: "Plugins" }).check(); await page.getByRole("textbox", { name: "Message your coding agent" }).fill("/fixture:review file.txt");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const requests = await page.evaluate(() => (window as unknown as { __workbenchTest: { requests: RunRequest[] } }).__workbenchTest.requests);
+  expect(requests[0]?.prompt).toBe("/fixture:review file.txt"); expect(requests[0]?.usePlugins).toBe(true); expect(errors).toEqual([]);
 });
 
 test("remote plugin credentials can be saved and removed without displaying them", async ({ page }) => {

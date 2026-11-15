@@ -1,6 +1,6 @@
 {
   "name": "nova-workbench",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "private": true,
   "description": "An independent, Windows-first desktop workbench for Codex, Claude Code, and local coding agents.",
   "author": "Inkform Labs",
@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.4.0",
+    "js-yaml": "4.3.2",
     "lucide-react": "1.72.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
@@ -36,6 +37,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",
+    "@types/js-yaml": "4.0.9",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

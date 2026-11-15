@@ -1,3 +1,12 @@
+export interface PluginCommand {
+  name: string;
+  description: string;
+  path?: string;
+  argumentHint?: string;
+  unsupported: string[];
+  warnings: string[];
+}
+
 export interface BundleField {
   key: string;
   server?: string;
@@ -33,6 +42,7 @@ export interface PluginPackage {
   bytes: number;
   fingerprint: string;
   skills: Array<{ path: string; name: string; description: string }>;
+  commands?: PluginCommand[];
   servers: PluginServerSummary[];
   disabledServers: string[];
   bundleFields?: BundleField[];
