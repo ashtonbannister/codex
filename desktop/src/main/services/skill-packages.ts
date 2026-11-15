@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defaultAgentPaths, resolveCustomAgents, unresolvedCustomAgent, verifiedAgentPrompt } from "./skill-agents";
+import { parseSkillDisallowedTools } from "./skill-restrictions";
 import { parseNamedArguments } from "./skill-arguments";
 import { removeOwnedTree } from "./owned-tree";
 import { withBundleArchive } from "./bundle-archive";
@@ -61,7 +62,8 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
     else unsupported.push("This skill requests an invalid model override.");
   }
   if (header.hooks !== undefined) unsupported.push("Skill hooks are not supported.");
-  if (header["disallowed-tools"] !== undefined) unsupported.push("Skill-specific tool restrictions are not supported.");
+  let skillDisallowedTools: string[] | undefined;
+  try { skillDisallowedTools = parseSkillDisallowedTools(header["disallowed-tools"]); if (skillDisallowedTools) warnings.push("Skill tool restrictions require explicit Claude invocation."); } catch { unsupported.push("This skill requests unsupported tool restrictions."); }
   let namedArguments: string[] | undefined;
   try { namedArguments = parseNamedArguments(header.arguments); } catch { unsupported.push("Invalid named skill arguments."); }
   if (header["allowed-tools"] !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
@@ -71,9 +73,9 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (requiresShell) warnings.push("Shell-generated context requires explicit invocation and command approval.");
   if (/\$\{user_config\./.test(body)) unsupported.push("This skill requires plugin settings.");
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
-  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent || !!skillModel, userInvocable = flag("user-invocable", true);
+  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell || !!forkAgent || !!skillModel || !!skillDisallowedTools, userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(skillModel ? { skillModel } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(forkAgent ? { forkAgent } : {}), ...(skillModel ? { skillModel } : {}), ...(skillDisallowedTools ? { skillDisallowedTools } : {}), ...(header.model === "inherit" ? { forkModelInherit: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */

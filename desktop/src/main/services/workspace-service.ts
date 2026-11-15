@@ -1482,20 +1482,22 @@ export class WorkspaceService {
     let previewCommand: Awaited<ReturnType<PluginPackageStore["previewCommand"]>>;
     if (request.usePlugins) {
       const pluginStore = new PluginPackageStore(this.dataDir);
-      preview.prompt += await pluginStore.prompt(request.prompt, request.provider);
       invoked.push(...await pluginStore.previewInvoked(request.prompt, this.bundleSettings));
+      const deniedMcp = invoked.some((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillDisallowedTools?.includes("mcp__*"));
+      preview.prompt += await pluginStore.prompt(request.prompt, request.provider, !deniedMcp);
       previewCommand = await pluginStore.previewCommand(request.prompt, cwd, this.bundleSettings);
       if (previewCommand && invoked.some((skill) => skill.reference?.token.toLowerCase() === `/${previewCommand!.name}`.toLowerCase())) throw new Error("A plugin command and skill share that name. Rename one before invoking it.");
       if (looksLikePluginCommand(request.prompt) && !previewCommand && !invoked.some((skill) => skill.source === "plugin")) throw new Error("No enabled plugin provides that command or skill. Check Settings → Plugins.");
       if (previewCommand) { preview.prompt += pluginCommandPrompt(previewCommand); preview.warnings.push("The expanded plugin command requires approval before sharing. Paths shown here differ from disposable run copies."); }
       preview.characters = preview.prompt.length;
       preview.estimatedTokens = Math.ceil(preview.characters / 4);
-      preview.warnings.push("Plugin skills require approval before sharing with the selected provider. Selected servers require startup and per-tool approval. Skill paths in this preview differ from the disposable run copies.");
+      preview.warnings.push(deniedMcp ? "Plugin skills require approval before sharing. MCP tools are disabled by the selected skill. Skill paths in this preview differ from the disposable run copies." : "Plugin skills require approval before sharing with the selected provider. Selected servers require startup and per-tool approval. Skill paths in this preview differ from the disposable run copies.");
     }
     const previewModels = [...new Set(invoked.filter((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillModel).map((skill) => skill.descriptor.skillModel!))];
     if (previewModels.length > 1) throw new Error("Selected skills request conflicting parent models.");
     if (previewModels.length) preview.warnings.push(`This skill requests Claude model ${previewModels[0]}; it will be reviewed before the run.`);
     for (const skill of invoked) {
+      if (skill.descriptor.skillDisallowedTools) preview.warnings.push(`This skill restricts tools: ${skill.descriptor.skillDisallowedTools.join(", ")}; restrictions apply after review.`);
       if (skill.descriptor.skillModel && skill.descriptor.forkAgent) preview.warnings.push(`This isolated skill requests Claude model ${skill.descriptor.skillModel}; it will be reviewed before the run.`);
       if (invoked.filter((other) => other.reference?.token.toLowerCase() === skill.reference?.token.toLowerCase()).length > 1) throw new Error(`More than one enabled package has the skill ${skill.name}.`);
       const rendered = await renderExplicitSkill(skill, cwd, request.provider);
@@ -1510,7 +1512,9 @@ export class WorkspaceService {
       preview.warnings.push("The expanded skill requires approval before sharing. Paths shown here differ from disposable run copies.");
       if (skill.descriptor.requiresShell) preview.warnings.push("Skill shell commands are not run in preview; command execution and resulting output require separate approvals.");
     }
-    if (request.desktopControl) {
+    const previewMcpDenied = invoked.some((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillDisallowedTools?.includes("mcp__*"));
+    if (previewMcpDenied && (request.usePlugins || request.desktopControl)) preview.warnings.push("The selected skill disables MCP tools for this run.");
+    if (request.desktopControl && !previewMcpDenied) {
       preview.prompt += NOVA_DESKTOP_SKILL;
       preview.characters = preview.prompt.length;
       preview.estimatedTokens = Math.ceil(preview.characters / 4);
@@ -2229,13 +2233,21 @@ export class WorkspaceService {
             const parentOverrides = [...new Set(invoked.filter((skill) => !skill.descriptor.forkAgent && skill.descriptor.skillModel).map((skill) => skill.descriptor.skillModel!))];
             if (parentOverrides.length > 1) throw new Error("Selected skills request conflicting parent models.");
             const effectiveParentModel = parentOverrides[0] ?? model;
+            const parentDenied = [...new Set(invoked.filter((skill) => !skill.descriptor.forkAgent).flatMap((skill) => skill.descriptor.skillDisallowedTools ?? []))];
+            const parentMcpDenied = parentDenied.includes("mcp__*");
+            const parentBaseline = request.mode === "plan" ? ["Read", "Grep", "Glob"] : ["Read", "Grep", "Glob", "Edit", "Write"];
+            const parentTools = parentDenied.length ? parentBaseline.filter((name) => !parentDenied.includes(name)) : undefined;
+            if (parentTools && !parentTools.length) throw new Error("Selected skills leave no permitted tools for this run.");
             const verifySkillSources = async () => {
               await preparedSkills.verify(); await pluginCopies?.verifyProviders();
               for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after review.`);
             };
             const explicitSkills: Array<Awaited<ReturnType<typeof renderExplicitSkill>>> = [];
+            await Promise.all(invoked.map((skill) => renderExplicitSkill(skill, cwd, request.provider)));
             for (const skill of invoked) {
               if (skill.descriptor.requiresShell) {
+                const shell = skill.descriptor.shell ?? (process.platform === "win32" ? "powershell" : "bash");
+                if ([...parentDenied, ...(skill.descriptor.skillDisallowedTools ?? [])].includes(shell === "powershell" ? "PowerShell" : "Bash")) throw new Error("A selected skill forbids the shell needed for its generated context.");
                 if (!this.approvePlugin) throw new Error("Skill command approval is unavailable in this environment.");
                 explicitSkills.push(await renderSkillWithShell(skill, cwd, request.provider, this.approvePlugin, controller.signal, verifySkillSources));
               } else explicitSkills.push(await renderExplicitSkill(skill, cwd, request.provider));
@@ -2244,10 +2256,11 @@ export class WorkspaceService {
             const pluginSkillReview = pluginCopies?.packages.flatMap(({ pkg, providerRoot, skills }) => skills.map((skill) => ({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot!, ...skill.path.split("/")) }))) ?? [];
             const skillReview = [...preparedSkills.review, ...pluginSkillReview];
             const forkTools = (skill: typeof invoked[number]): string[] | undefined => {
-              const tools = skill.descriptor.forkAgentTools, denied = skill.descriptor.forkAgentDisallowedTools;
-              if (!tools && !denied) return undefined;
-              const base = request.mode === "plan" ? ["Read", "Grep", "Glob"] : ["Read", "Grep", "Glob", "Edit", "Write"];
-              const effective = base.filter((name) => (!tools || tools.includes(name)) && !denied?.includes(name));
+              const tools = skill.descriptor.forkAgentTools; const denied = [...new Set([...parentDenied, ...(skill.descriptor.forkAgentDisallowedTools ?? []), ...(skill.descriptor.skillDisallowedTools ?? [])])];
+              if (!tools && !denied.length) return undefined;
+              const readOnly = skill.agentPrompt ? skill.descriptor.forkAgentReadOnly === true : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan";
+              const base = request.mode === "plan" || readOnly ? ["Read", "Grep", "Glob"] : ["Read", "Grep", "Glob", "Edit", "Write"];
+              const effective = base.filter((name) => (!tools || tools.includes(name)) && !denied.includes(name));
               if (!effective.length) throw new Error(`Custom agent ${skill.descriptor.forkAgent} has no permitted tools for this run.`);
               return effective;
             };
@@ -2255,8 +2268,8 @@ export class WorkspaceService {
             if (skillReview.length || command || explicitSkills.length) {
                 if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
-                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, ...(skill.agentPrompt ? { agentInstructions: skill.agentPrompt } : {}), ...(forkTools(skill) ? { effectiveTools: forkTools(skill), disallowedTools: skill.descriptor.forkAgentDisallowedTools ?? [] } : {}), mode: (skill.agentPrompt ? skill.descriptor.forkAgentReadOnly : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan") ? "plan" : request.mode, model: skill.descriptor.skillModel ?? skill.descriptor.forkAgentModel ?? selectedProvider.model }));
-                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Requested skill models apply to the listed sessions and can change usage or cost. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+                const forkReview = invoked.filter((skill) => skill.descriptor.forkAgent).map((skill) => ({ name: skill.name, agent: skill.descriptor.forkAgent, ...(skill.agentPrompt ? { agentInstructions: skill.agentPrompt } : {}), ...(forkTools(skill) ? { effectiveTools: forkTools(skill), disallowedTools: [...new Set([...parentDenied, ...(skill.descriptor.forkAgentDisallowedTools ?? []), ...(skill.descriptor.skillDisallowedTools ?? [])])] } : {}), mode: (skill.agentPrompt ? skill.descriptor.forkAgentReadOnly : skill.descriptor.forkAgent === "Explore" || skill.descriptor.forkAgent === "Plan") ? "plan" : request.mode, model: skill.descriptor.skillModel ?? skill.descriptor.forkAgentModel ?? selectedProvider.model }));
+                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(forkReview.length ? { isolatedSkills: forkReview } : {}), ...(command ? { command } : {}), ...(parentDenied.length ? { skillToolRestrictions: { denied: parentDenied, effectiveTools: parentTools, mcpDisabled: parentMcpDenied } } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings and local paths, with the selected provider. Requested skill models apply to the listed sessions and can change usage or cost. Forked skills start a separate provider session with the listed skill instructions and can incur model usage; their results require another approval before joining this chat. Plugin data paths can give the provider access to persistent plugin data. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
                 if (detail.length > 64_000) throw new Error("The plugin instructions are too large to review. Disable a package or shorten the command and retry.");
                 if (!await this.approvePlugin!({ action: skillReview.length ? "skills" : "commands", title: `Share these instructions with ${selectedProvider.name}?`, detail })) throw new Error("Skill or command sharing was declined.");
                 controller.signal.throwIfAborted();
@@ -2266,7 +2279,7 @@ export class WorkspaceService {
             await pluginCopies?.verifyProviders();
             for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after skill sharing was reviewed.`);
             if (pluginCopies) {
-              if (pluginCopies.packages.some((entry) => entry.servers.length)) {
+              if (!parentMcpDenied && pluginCopies.packages.some((entry) => entry.servers.length)) {
                 if (request.provider === "claude" && !providerStatus?.supportsDesktopMcp) throw new Error("Update Claude Code: this version does not provide the restricted MCP flags required for plugin tools.");
                 if (request.provider === "claude" && /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? "")) throw new Error("Claude Code safe mode is enforced by the current environment and disables selected MCP tools.");
                 plugins = await startPluginMcp(pluginCopies.packages, this.approvePlugin!, controller.signal, cwd, this.pluginCredential, this.pluginOAuth, this.bundleSettings);
@@ -2276,13 +2289,13 @@ export class WorkspaceService {
               }
               await pluginCopies.verifyProviders();
               controller.signal.throwIfAborted();
-              context.prompt += pluginCopies.prompt;
+              context.prompt += parentMcpDenied ? pluginCopies.promptWithoutTools : pluginCopies.prompt;
               if (command) context.prompt += pluginCommandPrompt(command);
             }
             await preparedSkills.verify();
             context.prompt += preparedSkills.prompt;
             for (let index = 0; index < explicitSkills.length; index++) if (!invoked[index]!.descriptor.forkAgent) { const skill = explicitSkills[index]!; context.prompt += `\n\nUSER-INVOKED SKILL ${JSON.stringify(skill.name)} (user-selected instructions; obey higher-priority boundaries):\n${skill.content}`; }
-            if (request.desktopControl) {
+            if (request.desktopControl && !parentMcpDenied) {
               desktop = await startDesktopMcp(await this.createDesktopSession!(), controller.signal);
               context.prompt += NOVA_DESKTOP_SKILL;
             }
@@ -2296,7 +2309,7 @@ export class WorkspaceService {
               if (!["general-purpose", "Explore", "Plan"].includes(agent) && !selected.agentPrompt) throw new Error("The selected custom agent instructions are unavailable.");
               const forkMode = readOnlyAgent ? "plan" : request.mode;
               const forkModel = selected.descriptor.skillModel ?? selected.descriptor.forkAgentModel ?? effectiveParentModel;
-              const allowExternalTools = !readOnlyAgent && !selected.descriptor.forkAgentTools && !selected.descriptor.forkAgentDisallowedTools?.includes("mcp__*");
+              const allowExternalTools = !readOnlyAgent && !parentMcpDenied && !selected.descriptor.forkAgentTools && !selected.descriptor.forkAgentDisallowedTools?.includes("mcp__*") && !selected.descriptor.skillDisallowedTools?.includes("mcp__*");
               const restrictedTools = forkTools(selected);
               let answer = "";
               receiveEvent({ events: [{ kind: "status", text: `Running isolated skill ${skill.name} (${agent}).` }] });
@@ -2329,6 +2342,7 @@ export class WorkspaceService {
                   if (pluginCopies?.packages.some((entry) => entry.skills.length)) run.contextSummary.warnings.push("Plugin skill names, descriptions, and paths were approved for sharing with the selected provider.");
                   if (command) run.contextSummary.warnings.push("The selected plugin command instructions were approved for sharing with the provider.");
                   if (plugins) run.contextSummary.warnings.push("Plugin programs run under your user account; each tool call requires approval and may share data with the selected provider.");
+                  if (parentMcpDenied) run.contextSummary.warnings.push("The selected skill disabled MCP tools for this run.");
                 }
                 await this.persist();
               });
@@ -2353,6 +2367,7 @@ export class WorkspaceService {
                           project.kind === "folder" && request.mode === "plan",
                         localConfigArgs: local?.configArgs,
                         claudePartialMessages: providerStatus?.supportsPartialMessages,
+                        claudeTools: parentTools,
                         skillDirectory: preparedSkills.directory,
                         reasoningEffort: request.reasoningEffort,
                         desktopMcpUrl: desktop?.url,

@@ -112,3 +112,14 @@ test("skill model overrides require explicit Claude invocation", async (t) => {
   const unsupported = await store.prepareRun("/modelled", "codex"); await assert.rejects(renderExplicitSkill(unsupported.invoked[0]!, root, "codex"), /requires Claude/); await unsupported.dispose();
   const supported = await store.prepareRun("/modelled", "claude"); assert.match((await renderExplicitSkill(supported.invoked[0]!, root, "claude")).content, /Synthetic/); await supported.dispose();
 });
+
+
+test("skill tool denylists require explicit Claude invocation", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "nova-skill-deny-")); t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const source = path.join(root, "source"); await mkdir(source); await skill(source, "restricted", "disallowed-tools: [Grep, mcp__*]\n"); await skill(source, "unsupported-deny", "disallowed-tools: Bash(git*)\n");
+  const store = new SkillPackageStore(path.join(root, "data")); const preview = await store.preview(source);
+  assert.deepEqual(preview.skills.find((item) => item.name === "restricted")!.skillDisallowedTools, ["Grep", "mcp__*"]); assert.match(preview.skills.find((item) => item.name === "unsupported-deny")!.unsupported!.join(" "), /unsupported tool restrictions/);
+  await store.install(source, preview.fingerprint); const automatic = await store.prepareRun("ordinary", "claude"); assert.deepEqual(automatic.review, []); await automatic.dispose();
+  const codex = await store.prepareRun("/restricted", "codex"); await assert.rejects(renderExplicitSkill(codex.invoked[0]!, root, "codex"), /requires Claude/); await codex.dispose();
+  const claude = await store.prepareRun("/restricted", "claude"); assert.match((await renderExplicitSkill(claude.invoked[0]!, root, "claude")).content, /Synthetic/); await claude.dispose();
+});
