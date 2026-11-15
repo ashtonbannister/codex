@@ -43,3 +43,19 @@ export function expandBundleDefault(value: BundleValue, paths: Record<string, st
 export function publicBundleFields(fields: BundleDefinition[]): BundleField[] {
   return fields.map(({ defaultValue, ...field }) => ({ ...field, ...(!field.sensitive && defaultValue !== undefined ? { value: defaultValue } : {}) }));
 }
+
+/** Resolve only referenced values for provider-visible instructions. Sensitive settings are never inserted. */
+export function instructionSettings(text: string, fields: BundleDefinition[], saved: Record<string, BundleValue>, paths: Record<string, string>): { config: Record<string, string>; review: Array<{ name: string; value: string }> } {
+  const keys = [...new Set([...text.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((match) => match[1]!))];
+  const config: Record<string, string> = Object.create(null); const review: Array<{ name: string; value: string }> = [];
+  for (const key of keys) {
+    const field = fields.find((item) => item.key === key);
+    if (!field) throw new Error(`Instructions refer to an unknown plugin setting: ${key}.`);
+    if (field.sensitive) { config[key] = "[sensitive setting withheld]"; review.push({ name: key, value: config[key]! }); continue; }
+    let value = saved[key] ?? field.defaultValue;
+    if (value === undefined) { if (field.required) throw new Error(`Configure ${field.title} in Settings → Plugins before sharing these instructions.`); value = field.multiple ? [] : ""; }
+    else { if (saved[key] === undefined) value = expandBundleDefault(value, paths); value = validateBundleValue(field, value); }
+    config[key] = Array.isArray(value) ? value.join(", ") : String(value); review.push({ name: key, value: config[key]! });
+  }
+  return { config, review };
+}

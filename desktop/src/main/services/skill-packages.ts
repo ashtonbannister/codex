@@ -53,7 +53,8 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   if (header["allowed-tools"] !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
   const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
   if (/!`/.test(body)) unsupported.push("Automatic shell interpolation in skills is not supported.");
-  if (/\$\{(?:user_config\.|CLAUDE_SESSION_ID)/.test(body)) unsupported.push("This skill uses unsupported context variables.");
+  if (/\$\{user_config\./.test(body)) unsupported.push("This skill requires plugin settings.");
+  if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
   const disableModelInvocation = flag("disable-model-invocation", false), userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
   return { path: relative, name, description, disableModelInvocation, userInvocable, ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };

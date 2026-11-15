@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from
 import path from "node:path";
 import { removeOwnedTree } from "./owned-tree";
 import { withBundleArchive } from "./bundle-archive";
-import { parseBundleFields, publicBundleFields, type BundleDefinition } from "./bundle-config";
+import { parseBundleFields, publicBundleFields, instructionSettings, type BundleDefinition } from "./bundle-config";
 import { commandSummaries, findPluginCommand, looksLikePluginCommand, parsePluginCommands, type CommandDefinition } from "./plugin-commands";
 import type { PluginPackage } from "../../shared/plugins";
 import { matchingSkillReference, skillReferences, visibleSkill, type SelectedSkill } from "./skill-selection";
@@ -159,7 +159,7 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   if (commandVariants.some((commands) => JSON.stringify(commands) !== JSON.stringify(commandVariants[0]))) throw new Error("Codex and Claude plugin manifests define different commands. Import a provider-specific package instead.");
   if (configVariants.some((fields) => JSON.stringify(fields) !== JSON.stringify(configVariants[0]))) throw new Error("Plugin manifests define different settings. Import a provider-specific package instead.");
   const pluginFields = configVariants[0] ?? [];
-  if (pluginFields.length) warnings.add("Plugin settings are available to local servers. Settings in skill content and remote server configuration are not supported. Sensitive values are withheld from commands.");
+  if (pluginFields.length) warnings.add("Plugin settings are available to local servers and reviewed instructions. Remote server configuration settings are not supported. Sensitive values are withheld from instructions.");
   const commands = commandVariants[0] ?? [];
   for (const command of commands) {
     const references = [...command.body.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)];
@@ -173,14 +173,32 @@ export function parsePluginPackage(snapshot: PackageSnapshot, fallbackName: stri
   }
   if (servers.length > 100) throw new Error("A plugin package cannot contain more than 100 MCP servers.");
   const skillKey = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
-  const skills = snapshot.skills.filter((skill) => [...skillRoots].some((root) => root === "." || skillKey(skill.path) === skillKey(root) || skillKey(skill.path).startsWith(`${skillKey(root)}/`)));
+  const skills = snapshot.skills.filter((skill) => [...skillRoots].some((root) => root === "." || skillKey(skill.path) === skillKey(root) || skillKey(skill.path).startsWith(`${skillKey(root)}/`))).map((skill) => {
+    if (!skill.unsupported?.includes("This skill requires plugin settings.")) return skill;
+    const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("Plugin skill is missing.");
+    const body = skillBody(new TextDecoder("utf-8", { fatal: true }).decode(file.data));
+    const references = [...body.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)];
+    const invalid = body.replace(/\$\{user_config\.[A-Za-z_][A-Za-z0-9_]*\}/g, "").includes("${user_config.") || references.some((reference) => !pluginFields.some((field) => field.key === reference[1]));
+    const unsupported = skill.unsupported.filter((reason) => reason !== "This skill requires plugin settings.");
+    if (invalid) unsupported.push("This skill refers to an undeclared or invalid plugin setting.");
+    return { ...skill, unsupported };
+  });
   if (skills.length !== snapshot.skills.length) warnings.add(`${snapshot.skills.length - skills.length} skill definition(s) outside declared plugin skill paths were excluded.`);
   if (!servers.length && !skills.length && !commands.length) throw new Error("This package does not contain supported skills, commands or MCP servers.");
   return { name, servers, skills, commands, warnings: [...warnings], ...(pluginFields.length ? { pluginFields, bundleFields: publicBundleFields(pluginFields) } : {}) };
 }
 
+function skillBody(content: string): string { return content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, ""); }
+function expandSkillSettings(content: string, config: Record<string, string>): string {
+  const body = skillBody(content); const header = content.slice(0, content.length - body.length);
+  return header + body.replace(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, key: string) => {
+    if (!Object.hasOwn(config, key)) throw new Error(`Plugin skill setting ${key} is unavailable.`);
+    return config[key]!;
+  });
+}
+
 /** Keep uninvoked command instructions out of provider-visible copies. */
-function providerSnapshot(snapshot: PackageSnapshot, skills: PluginPackage["skills"], commands: CommandDefinition[], selected?: CommandDefinition): PackageSnapshot {
+function providerSnapshot(snapshot: PackageSnapshot, skills: PluginPackage["skills"], commands: CommandDefinition[], selected?: CommandDefinition, configs: Map<string, Record<string, string>> = new Map()): PackageSnapshot {
   const filtered = filterSkillSnapshot(snapshot, skills);
   const selectedPath = selected?.path?.toLowerCase();
   const hiddenPaths = new Set(commands.filter((command) => command !== selected && command.path).map((command) => command.path!.toLowerCase()));
@@ -192,6 +210,11 @@ function providerSnapshot(snapshot: PackageSnapshot, skills: PluginPackage["skil
     if (/^commands\/[^/]+\.md$/i.test(name) && name !== selectedPath) return false;
     if (hideManifests && ["plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json"].includes(name)) return false;
     return true;
+  }).map((file) => {
+    const config = configs.get(file.path); if (!config) return file;
+    const data = Buffer.from(expandSkillSettings(new TextDecoder("utf-8", { fatal: true }).decode(file.data), config), "utf8");
+    if (data.length > 128 * 1024) throw new Error("Expanded plugin skill is too large.");
+    return { ...file, data, digest: createHash("sha256").update(data).digest("hex") };
   });
   const fingerprint = createHash("sha256").update(JSON.stringify(files.map(({ path: file, digest, data }) => [file, data.length, digest]))).digest("hex");
   return { ...filtered, files, bytes: files.reduce((total, file) => total + file.data.length, 0), fingerprint };
@@ -330,15 +353,18 @@ export class PluginPackageStore {
     return this.catalog(verified.map((pkg) => ({ pkg, root: path.join(this.root, pkg.id, "files"), skills: pkg.skills.filter((skill) => visibleSkill(skill, matchingSkillReference(skill, pkg.name, "plugin", references), provider)) })));
   }
 
-  async previewInvoked(input: string): Promise<SelectedSkill[]> {
+  async previewInvoked(input: string, settings?: Parameters<typeof findPluginCommand>[4]): Promise<SelectedSkill[]> {
     const references = skillReferences(input); const enabled = (await this.list()).filter((pkg) => pkg.enabled); const result: SelectedSkill[] = [];
     for (const entry of enabled) {
       const pkg = await this.readPackage(entry.id, true); const matched = pkg.skills.filter((skill) => !!matchingSkillReference(skill, pkg.name, "plugin", references)); if (!matched.length) continue;
       const root = path.join(this.root, pkg.id, "files"); const snapshot = await snapshotSkillPackage(root, { allowNoSkills: true });
       if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before skill preview.`);
+      const parsed = await this.resolvePackage(snapshot, root, pkg.name);
       for (const skill of matched) {
         const file = snapshot.files.find((item) => item.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
-        result.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: path.join(this.dataDir, "plugin-data", pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data) });
+        const verifiedContent = new TextDecoder("utf-8", { fatal: true }).decode(file.data);
+        const config = skill.unsupported?.length ? undefined : instructionSettings(skillBody(verifiedContent), parsed.pluginFields ?? [], settings?.values({ id: pkg.id, fingerprint: pkg.fingerprint }) ?? {}, settings?.paths ?? {}).config;
+        result.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(root, ...skill.path.split("/")), root, data: path.join(this.dataDir, "plugin-data", pkg.id), descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent, config });
       }
     }
     return result;
@@ -359,7 +385,7 @@ export class PluginPackageStore {
   }
 
   /** Materialize verified per-run copies; this does not start plugin code. */
-  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama"): Promise<{ packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }>; directory: string; providerDirectory?: string; prompt: string; invoked: SelectedSkill[]; verifyProviders(): Promise<void>; dispose(): Promise<void> }> {
+  async prepareRun(input = "", provider?: "codex" | "claude" | "ollama", settings?: Parameters<typeof findPluginCommand>[4]): Promise<{ skillSettings: Array<{ package: string; skill: string; settings: Array<{ name: string; value: string }> }>; packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }>; directory: string; providerDirectory?: string; prompt: string; invoked: SelectedSkill[]; verifyProviders(): Promise<void>; dispose(): Promise<void> }> {
     const references = skillReferences(input);
     const enabled = (await this.list()).filter((pkg) => pkg.enabled);
     if (!enabled.length) throw new Error("No plugin packages are enabled. Import and enable one in Settings → Plugins.");
@@ -377,7 +403,7 @@ export class PluginPackageStore {
       const dataRootInfo = await lstat(dataRoot);
       if (!dataRootInfo.isDirectory() || dataRootInfo.isSymbolicLink() || normalize(await realpath(dataRoot)) !== normalize(dataRoot)) throw new Error("Plugin data storage is unavailable or redirected.");
       const packages: Array<{ pkg: PluginPackage; root: string; providerRoot?: string; dataDir: string; servers: PluginServerConfig[]; commands: CommandDefinition[]; skills: PluginPackage["skills"]; pluginFields?: BundleDefinition[] }> = [];
-      const providerDirectory = path.join(directory, "provider"); const providerFingerprints = new Map<string, string>(); const invoked: SelectedSkill[] = [];
+      const providerDirectory = path.join(directory, "provider"); const providerFingerprints = new Map<string, string>(); const invoked: SelectedSkill[] = []; const skillSettings: Array<{ package: string; skill: string; settings: Array<{ name: string; value: string }> }> = [];
       for (const pkg of verified) {
         const snapshot = await snapshotSkillPackage(path.join(this.root, pkg.id, "files"), { allowNoSkills: true });
         if (snapshot.fingerprint !== pkg.fingerprint) throw new Error(`Plugin package ${pkg.name} changed before launch.`);
@@ -424,20 +450,27 @@ export class PluginPackageStore {
         const commandReference = looksLikePluginCommand(input) ? references.find((reference) => reference.namespace?.toLowerCase() === pkg.name.toLowerCase()) : undefined;
         const selectedCommand = commandReference ? resolved.commands.find((command) => command.name.toLowerCase() === commandReference.name.toLowerCase()) : undefined;
         const providerRoot = path.join(providerDirectory, pkg.id);
+        const configs = new Map<string, Record<string, string>>();
+        for (const skill of selected) {
+          const file = snapshot.files.find((item) => item.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
+          const body = skillBody(new TextDecoder("utf-8", { fatal: true }).decode(file.data));
+          const resolvedSettings = instructionSettings(body, resolved.pluginFields ?? [], settings?.values({ id: pkg.id, fingerprint: pkg.fingerprint }) ?? {}, settings?.paths ?? {});
+          if (resolvedSettings.review.length) { configs.set(skill.path, resolvedSettings.config); skillSettings.push({ package: pkg.name, skill: skill.name, settings: resolvedSettings.review }); }
+        }
         if (selected.length || selectedCommand) {
-          const filtered = providerSnapshot(snapshot, selected, resolved.commands, selectedCommand); providerFingerprints.set(pkg.id, filtered.fingerprint);
+          const filtered = providerSnapshot(snapshot, selected, resolved.commands, selectedCommand, configs); providerFingerprints.set(pkg.id, filtered.fingerprint);
           for (const file of filtered.files) {
             const target = path.join(providerRoot, ...file.path.split("/")); await mkdir(path.dirname(target), { recursive: true, mode: 0o700 }); await writeFile(target, file.data, { flag: "wx", mode: 0o700 });
           }
         }
         for (const skill of matched) {
           const file = snapshot.files.find((entry) => entry.path === skill.path); if (!file) throw new Error("The selected plugin skill is unavailable.");
-          invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data) });
+          invoked.push({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot, ...skill.path.split("/")), root: providerRoot, data: dataDir, descriptor: skill, reference: matchingSkillReference(skill, pkg.name, "plugin", references), verifiedContent: new TextDecoder("utf-8", { fatal: true }).decode(file.data), config: configs.get(skill.path) });
         }
         packages.push({ pkg, root, ...(providerFingerprints.has(pkg.id) ? { providerRoot } : {}), dataDir, servers, commands: resolved.commands, skills: selected, pluginFields: resolved.pluginFields });
       }
       if (!totalServers && !packages.some(({ pkg, commands }) => pkg.skills.length || commands.some((command) => !command.unsupported.length))) throw new Error("No enabled plugin skills, commands or servers are available.");
-      return { packages, directory, ...(providerFingerprints.size ? { providerDirectory } : {}), invoked,
+      return { skillSettings, packages, directory, ...(providerFingerprints.size ? { providerDirectory } : {}), invoked,
         prompt: this.catalog(packages.map((entry) => ({ pkg: entry.pkg, root: entry.providerRoot ?? entry.root, skills: entry.skills }))),
         verifyProviders: async () => {
           for (const entry of packages) { const fingerprint = providerFingerprints.get(entry.pkg.id); if (fingerprint && (await snapshotSkillPackage(entry.providerRoot!, { allowNoSkills: true })).fingerprint !== fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after sharing was reviewed.`); }

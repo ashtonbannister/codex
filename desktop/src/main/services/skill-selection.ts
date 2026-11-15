@@ -3,7 +3,7 @@ import type { SkillDescriptor } from "../../shared/skills";
 import { renderPluginCommand } from "./plugin-commands";
 
 export interface SkillReference { namespace?: string; name: string; args: string; token: string }
-export interface SelectedSkill { source: "imported skill" | "plugin"; package: string; name: string; description: string; path: string; root: string; data: string; descriptor: SkillDescriptor; reference?: SkillReference; verifiedContent?: string }
+export interface SelectedSkill { source: "imported skill" | "plugin"; package: string; name: string; description: string; path: string; root: string; data: string; descriptor: SkillDescriptor; reference?: SkillReference; verifiedContent?: string; config?: Record<string, string> }
 
 /** Only slash commands at the start or explicit $skill mentions select manual-only skills. */
 export function skillReferences(input: string): SkillReference[] {
@@ -32,6 +32,6 @@ export async function renderExplicitSkill(selected: SelectedSkill, project: stri
   if (selected.verifiedContent === undefined) throw new Error("The selected skill has not been verified.");
   const raw = selected.verifiedContent;
   const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
-  const content = renderPluginCommand({ name: selected.name, description: selected.description, unsupported: [], warnings: selected.descriptor.warnings ?? [], body }, selected.reference.args, { root: selected.root, data: selected.data, project, skillDir: path.dirname(selected.path) });
+  const content = renderPluginCommand({ name: selected.name, description: selected.description, unsupported: [], warnings: selected.descriptor.warnings ?? [], body }, selected.reference.args, { root: selected.root, data: selected.data, project, skillDir: path.dirname(selected.path), config: selected.config });
   return { name: selected.source === "plugin" ? `${selected.package}:${selected.name}` : selected.name, path: selected.path, warnings: selected.descriptor.warnings ?? [], content };
 }

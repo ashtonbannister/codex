@@ -2,7 +2,7 @@ import path from "node:path";
 import { JSON_SCHEMA, load } from "js-yaml";
 import type { PluginCommand, PluginPackage } from "../../shared/plugins";
 import type { PackageSnapshot } from "./skill-packages";
-import { expandBundleDefault, validateBundleValue, type BundleDefinition, type BundleValue } from "./bundle-config";
+import { instructionSettings, type BundleDefinition, type BundleValue } from "./bundle-config";
 
 export interface CommandDefinition extends PluginCommand { body: string }
 const namePattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -120,19 +120,8 @@ export function findPluginCommand(input: string, packages: Array<{ pkg: PluginPa
   if (matches.length !== 1) throw new Error(matches.length ? "More than one enabled plugin has that command name." : "No enabled plugin provides that command. Check Settings → Plugins.");
   const { entry, command } = matches[0]!; const root = entry.providerRoot ?? entry.root;
   if (command.unsupported.length) throw new Error(`This plugin command is unavailable: ${command.unsupported.join(" ")}`);
-  const keys = [...new Set([...command.body.matchAll(/\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((item) => item[1]!))];
-  const saved = keys.length ? settings?.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint }) ?? {} : {};
-  const config: Record<string, string> = Object.create(null); const review: Array<{ name: string; value: string }> = [];
-  for (const key of keys) {
-    const field = entry.pluginFields?.find((item) => item.key === key);
-    if (!field) throw new Error(`Plugin command refers to an unknown setting: ${key}.`);
-    if (field.sensitive) { config[key] = "[sensitive setting withheld]"; review.push({ name: key, value: config[key]! }); continue; }
-    let value = saved[key] ?? field.defaultValue;
-    if (value === undefined) { if (field.required) throw new Error(`Configure ${field.title} in Settings → Plugins before invoking this command.`); value = field.multiple ? [] : ""; }
-    else { if (saved[key] === undefined) value = expandBundleDefault(value, settings?.paths ?? {}); value = validateBundleValue(field, value); }
-    config[key] = Array.isArray(value) ? value.join(", ") : String(value);
-    review.push({ name: key, value: config[key]! });
-  }
+  const saved = settings?.values({ id: entry.pkg.id, fingerprint: entry.pkg.fingerprint }) ?? {};
+  const { config, review } = instructionSettings(command.body, entry.pluginFields ?? [], saved, settings?.paths ?? {});
   const content = renderPluginCommand(command, match[3] ?? "", { root, data: entry.dataDir, project, config });
   return { ...(review.length ? { settings: review } : {}), name: `${entry.pkg.name}:${command.name}`, ...(command.path ? { path: path.join(root, ...command.path.split("/")) } : {}), warnings: command.warnings, content };
 }

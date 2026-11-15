@@ -1482,7 +1482,7 @@ export class WorkspaceService {
     if (request.usePlugins) {
       const pluginStore = new PluginPackageStore(this.dataDir);
       preview.prompt += await pluginStore.prompt(request.prompt, request.provider);
-      invoked.push(...await pluginStore.previewInvoked(request.prompt));
+      invoked.push(...await pluginStore.previewInvoked(request.prompt, this.bundleSettings));
       previewCommand = await pluginStore.previewCommand(request.prompt, cwd, this.bundleSettings);
       if (previewCommand && invoked.some((skill) => skill.reference?.token.toLowerCase() === `/${previewCommand!.name}`.toLowerCase())) throw new Error("A plugin command and skill share that name. Rename one before invoking it.");
       if (looksLikePluginCommand(request.prompt) && !previewCommand && !invoked.some((skill) => skill.source === "plugin")) throw new Error("No enabled plugin provides that command or skill. Check Settings → Plugins.");
@@ -2208,7 +2208,7 @@ export class WorkspaceService {
           let result: Awaited<ReturnType<typeof runProvider>> | undefined;
           let uncertainCleanup = false;
           try {
-            if (request.usePlugins) pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun(request.prompt, request.provider);
+            if (request.usePlugins) pluginCopies = await new PluginPackageStore(this.dataDir).prepareRun(request.prompt, request.provider, this.bundleSettings);
             const command = pluginCopies ? findPluginCommand(request.prompt, pluginCopies.packages, cwd, true, this.bundleSettings) : undefined;
             const invoked = [...preparedSkills.invoked, ...(pluginCopies?.invoked ?? [])];
             for (const skill of invoked) if (invoked.filter((other) => other.reference?.token.toLowerCase() === skill.reference?.token.toLowerCase()).length > 1) throw new Error(`More than one enabled package has the skill ${skill.name}.`);
@@ -2222,7 +2222,7 @@ export class WorkspaceService {
                 if (!this.approvePlugin) throw new Error("Skill-sharing approval is unavailable in this environment.");
                 controller.signal.throwIfAborted();
                 const selectedProvider = request.provider === "ollama" ? { name: `Local model (${settings.localProvider ?? "ollama"})`, endpoint: new URL(connectionFromSettings(settings).baseUrl).origin, model: model || "Provider default" } : { name: request.provider === "claude" ? "Claude Code" : "Codex", model: model || "Provider default" };
-                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(command ? { command } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings, with the selected provider. Sensitive command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+                const detail = JSON.stringify({ provider: selectedProvider, skills: skillReview, ...(command ? { command } : {}), ...(pluginCopies?.skillSettings.length ? { pluginSkillSettings: pluginCopies.skillSettings } : {}), ...(explicitSkills.length ? { invokedSkills: explicitSkills } : {}), note: "Approving shares the listed skill metadata and any expanded skill or command instructions, including the displayed non-sensitive plugin settings, with the selected provider. Sensitive skill and command settings are withheld. The provider can read and potentially transmit the skill files and other files in the copied packages. Review each item and trust its source before allowing." }, null, 2).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
                 if (detail.length > 64_000) throw new Error("The plugin instructions are too large to review. Disable a package or shorten the command and retry.");
                 if (!await this.approvePlugin!({ action: skillReview.length ? "skills" : "commands", title: `Share these instructions with ${selectedProvider.name}?`, detail })) throw new Error("Skill or command sharing was declined.");
                 controller.signal.throwIfAborted();
