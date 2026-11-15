@@ -54,12 +54,14 @@ function metadata(content: string, relative: string): SkillPackage["skills"][num
   try { namedArguments = parseNamedArguments(header.arguments); } catch { unsupported.push("Invalid named skill arguments."); }
   if (header["allowed-tools"] !== undefined) warnings.push("Requested tool preapprovals are not granted; Nova's normal permissions still apply.");
   const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
-  if (/!`/.test(body)) unsupported.push("Automatic shell interpolation in skills is not supported.");
+  const requiresShell = /(?:^|\s)!`[^`\r\n]+`|^```![ \t]*\r?\n[\s\S]*?^```[ \t]*(?=\r?$)/m.test(body);
+  if (header.shell !== undefined && header.shell !== "bash" && header.shell !== "powershell") unsupported.push("This skill requests an unsupported shell.");
+  if (requiresShell) warnings.push("Shell-generated context requires explicit invocation and command approval.");
   if (/\$\{user_config\./.test(body)) unsupported.push("This skill requires plugin settings.");
   if (/\$\{CLAUDE_SESSION_ID/.test(body)) unsupported.push("This skill uses unsupported context variables.");
-  const disableModelInvocation = flag("disable-model-invocation", false), userInvocable = flag("user-invocable", true);
+  const disableModelInvocation = flag("disable-model-invocation", false) || requiresShell, userInvocable = flag("user-invocable", true);
   if (disableModelInvocation && !userInvocable) unsupported.push("Both user and model invocation are disabled.");
-  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
+  return { path: relative, name, description, disableModelInvocation, userInvocable, ...(namedArguments ? { namedArguments } : {}), ...(requiresShell ? { requiresShell: true } : {}), ...(header.shell === "bash" || header.shell === "powershell" ? { shell: header.shell } : {}), ...(unsupported.length ? { unsupported } : {}), ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Produce a deterministic copy excluding unselected manual-only skill files. */

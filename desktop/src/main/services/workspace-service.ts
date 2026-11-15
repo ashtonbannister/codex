@@ -82,6 +82,7 @@ import { NOVA_DESKTOP_SKILL } from "./desktop-skill";
 import { PluginPackageStore } from "./plugin-packages";
 import { startPluginMcp, type PluginApproval } from "./plugin-mcp";
 import { findPluginCommand, looksLikePluginCommand, pluginCommandPrompt } from "./plugin-commands";
+import { renderSkillWithShell } from "./skill-shell";
 import { renderExplicitSkill } from "./skill-selection";
 import { McpProcessError } from "./mcp-stdio";
 import {
@@ -1497,6 +1498,7 @@ export class WorkspaceService {
       preview.prompt += `\n\nUSER-INVOKED SKILL ${JSON.stringify(rendered.name)} (user-selected instructions; obey higher-priority boundaries):\n${rendered.content}`;
       preview.characters = preview.prompt.length; preview.estimatedTokens = Math.ceil(preview.characters / 4);
       preview.warnings.push("The expanded skill requires approval before sharing. Paths shown here differ from disposable run copies.");
+      if (skill.descriptor.requiresShell) preview.warnings.push("Skill shell commands are not run in preview; command execution and resulting output require separate approvals.");
     }
     if (request.desktopControl) {
       preview.prompt += NOVA_DESKTOP_SKILL;
@@ -2214,7 +2216,17 @@ export class WorkspaceService {
             for (const skill of invoked) if (invoked.filter((other) => other.reference?.token.toLowerCase() === skill.reference?.token.toLowerCase()).length > 1) throw new Error(`More than one enabled package has the skill ${skill.name}.`);
             if (command && invoked.some((skill) => skill.reference?.token.toLowerCase() === `/${command.name}`.toLowerCase())) throw new Error("A plugin command and skill share that name. Rename one before invoking it.");
             if (pluginCopies && looksLikePluginCommand(request.prompt) && !command && !invoked.some((skill) => skill.source === "plugin")) throw new Error("No enabled plugin provides that command or skill. Check Settings → Plugins.");
-            const explicitSkills = await Promise.all(invoked.map((skill) => renderExplicitSkill(skill, cwd, request.provider)));
+            const verifySkillSources = async () => {
+              await preparedSkills.verify(); await pluginCopies?.verifyProviders();
+              for (const entry of pluginCopies?.packages ?? []) if ((await snapshotSkillPackage(entry.root, { allowNoSkills: true })).fingerprint !== entry.pkg.fingerprint) throw new Error(`Plugin ${entry.pkg.name} changed after review.`);
+            };
+            const explicitSkills: Array<Awaited<ReturnType<typeof renderExplicitSkill>>> = [];
+            for (const skill of invoked) {
+              if (skill.descriptor.requiresShell) {
+                if (!this.approvePlugin) throw new Error("Skill command approval is unavailable in this environment.");
+                explicitSkills.push(await renderSkillWithShell(skill, cwd, request.provider, this.approvePlugin, controller.signal, verifySkillSources));
+              } else explicitSkills.push(await renderExplicitSkill(skill, cwd, request.provider));
+            }
             if (pluginCopies && !command && !explicitSkills.length && !pluginCopies.packages.some((entry) => entry.skills.length || entry.servers.length)) throw new Error("No automatically available plugin skill or server is selected. Invoke a manual-only skill or command from Settings → Plugins.");
             const pluginSkillReview = pluginCopies?.packages.flatMap(({ pkg, providerRoot, skills }) => skills.map((skill) => ({ source: "plugin", package: pkg.name, name: skill.name, description: skill.description, path: path.join(providerRoot!, ...skill.path.split("/")) }))) ?? [];
             const skillReview = [...preparedSkills.review, ...pluginSkillReview];

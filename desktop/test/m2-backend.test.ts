@@ -648,6 +648,21 @@ test("plugin skill settings are reviewed before provider access and secrets stay
   const sent = run.events.find((event) => event.kind === "message")!.text; assert.match(sent, /For reviewers; \[sensitive setting withheld\]/); assert.doesNotMatch(sent, /synthetic-secret/);
 });
 
+test("skill shell output is approved separately before provider sharing", async (t) => {
+  const actions: string[] = []; const reviews: string[] = []; let mode: "deny-shell" | "deny-share" | "allow" = "deny-shell";
+  const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { actions.push(request.action); reviews.push(request.detail); return mode === "allow" || (mode === "deny-share" && request.action === "skill-shell"); });
+  const source = path.join(root, "shell-skill"); await mkdir(source); const shell = process.platform === "win32" ? "powershell" : "bash";
+  const command = shell === "powershell" ? "Write-Output 'synthetic-context'" : "printf synthetic-context";
+  await writeFile(path.join(source, "SKILL.md"), `---\nname: shell-skill\ndescription: Fixture\nshell: ${shell}\n---\nContext: !\`${command}\`\n$ARGUMENTS\n`);
+  const store = new SkillPackageStore(dataDir); const preview = await store.preview(source); await store.install(source, preview.fingerprint);
+  const request = { projectId: project.id, provider: "codex" as const, mode: "plan" as const, prompt: "/shell-skill ECHO_PROMPT" };
+  const context = await service.previewContext(request); assert.ok(context.warnings.some((warning) => warning.includes("not run in preview"))); assert.deepEqual(actions, []);
+  const denied = await finishRun(service, (await service.startRun(request)).id); assert.equal(denied.status, "failed"); assert.match(denied.error ?? "", /execution was declined/); assert.deepEqual(actions, ["skill-shell"]);
+  mode = "deny-share"; const unshared = await finishRun(service, (await service.startRun(request)).id); assert.equal(unshared.status, "failed"); assert.match(unshared.error ?? "", /sharing was declined/); assert.ok(!unshared.events.some((event) => event.kind === "message")); assert.match(reviews.at(-1)!, /synthetic-context/);
+  mode = "allow"; const run = await finishRun(service, (await service.startRun(request)).id); assert.equal(run.status, "completed", run.error); assert.match(run.events.find((event) => event.kind === "message")!.text, /synthetic-context/);
+  assert.deepEqual(actions, ["skill-shell", "skill-shell", "skills", "skill-shell", "skills"]);
+});
+
 test("manual-only imported and plugin skills require explicit invocation and content approval", async (t) => {
   const reviews: Array<{ action: string; detail: string }> = []; let allow = true;
   const { service, project, root, dataDir } = await fixture(t, undefined, async (request) => { reviews.push(request); return allow; });

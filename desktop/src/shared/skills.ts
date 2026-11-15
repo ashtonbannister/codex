@@ -5,6 +5,8 @@ export interface SkillDescriptor {
   disableModelInvocation?: boolean;
   userInvocable?: boolean;
   namedArguments?: string[];
+  shell?: "bash" | "powershell";
+  requiresShell?: boolean;
   allowedProviders?: Array<"codex" | "claude" | "ollama">;
   unsupported?: string[];
   warnings?: string[];

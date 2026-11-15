@@ -93,7 +93,7 @@ function splitArguments(input: string): string[] {
   if (quote) throw new Error("The plugin command has an unterminated quoted argument.");
   if (started) items.push(current); return items;
 }
-export function renderPluginCommand(command: CommandDefinition, input: string, locations: { root: string; data: string; project: string; skillDir?: string; config?: Record<string, string> }): string {
+export function renderPluginCommand(command: CommandDefinition, input: string, locations: { root: string; data: string; project: string; skillDir?: string; config?: Record<string, string>; appendUnused?: boolean }): string {
   if (command.unsupported.length) throw new Error(`This plugin command is unavailable: ${command.unsupported.join(" ")}`);
   const args = splitArguments(input); let replaced = false;
   const roots: Record<string, string> = { CLAUDE_PLUGIN_ROOT: locations.root, CODEX_PLUGIN_ROOT: locations.root, PLUGIN_ROOT: locations.root, CLAUDE_PLUGIN_DATA: locations.data, CODEX_PLUGIN_DATA: locations.data, PLUGIN_DATA: locations.data, CLAUDE_PROJECT_DIR: locations.project, ...(locations.skillDir ? { CLAUDE_SKILL_DIR: locations.skillDir } : {}) };
@@ -115,7 +115,7 @@ export function renderPluginCommand(command: CommandDefinition, input: string, l
     if (namedIndex >= 0) { replaced = true; return prefix + (args[namedIndex] ?? ""); }
     const index = Number(indexed?.[1] ?? token); if (index >= args.length) return whole; replaced = true; return prefix + args[index]!;
   });
-  if (input && !replaced) output += `\n\nARGUMENTS: ${input}`;
+  if (input && !replaced && locations.appendUnused !== false) output += `\n\nARGUMENTS: ${input}`;
   if (output.length > 60_000 || output.includes("\0")) throw new Error("The expanded plugin command is too large to review.");
   return output;
 }
