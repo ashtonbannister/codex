@@ -36,7 +36,7 @@ export type ProviderId = "codex" | "claude" | "ollama";
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 export interface CodexModel { id: string; name: string; reasoningEfforts?: ReasoningEffort[]; isDefault?: boolean }
-export const APP_VERSION = "0.5.33";
+export const APP_VERSION = "0.6.0";
 export type RunMode = "plan" | "build";
 export type RunStatus =
   | "queued"
@@ -120,6 +120,7 @@ export interface Run {
     estimatedTokens: number;
     omittedMemoryIds: string[];
     warnings: string[];
+    memoryFabric?: import("./memory-fabric").FabricRunSummary;
   };
 }
 
@@ -252,6 +253,7 @@ export interface ContextPreview {
   omittedMemoryIds: string[];
   historyRunIds: string[];
   warnings: string[];
+  memoryFabric?: import("./memory-fabric").FabricRunSummary;
 }
 
 export interface VerificationProfileInput {
@@ -334,6 +336,12 @@ export interface DiffSnapshot {
 
 /** Narrow, validated bridge. The renderer never receives Node, IPC, or credentials. */
 export interface WorkbenchAPI {
+  memoryFabricSearch(query: import("./memory-fabric").FabricSearchQuery): Promise<import("./memory-fabric").FabricSearchResult>;
+  memoryFabricRead(request: import("./memory-fabric").FabricReadRequest): Promise<import("./memory-fabric").FabricReadResult>;
+  memoryFabricStats(projectId: string): Promise<import("./memory-fabric").FabricStats>;
+  memoryFabricCorrect(request: import("./memory-fabric").FabricCorrectionRequest): Promise<import("./memory-fabric").FabricSource>;
+  /** Null means the user cancelled the native forget confirmation. */
+  memoryFabricForget(request: import("./memory-fabric").FabricForgetRequest): Promise<import("./memory-fabric").FabricForgetResult | null>;
   listPluginPackages(): Promise<import("./plugins").PluginPackage[]>;
   importPluginPackage(): Promise<import("./plugins").PluginPackage | null>;
   importPluginBundle(): Promise<import("./plugins").PluginPackage | null>;

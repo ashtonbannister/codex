@@ -61,6 +61,13 @@ import type { SharedMemoryPreview, SharedMemoryRequest, SharedMemoryResult } fro
 import type { CodexHandoffReceipt, CodexHandoffResult } from "../../shared/native-handoff";
 import { APP_VERSION, emptyWorkspace } from "../../shared/types";
 import { buildRunContext } from "./context";
+import { WorkspaceMemory } from "./memory-fabric/capture";
+import { startMemoryMcp } from "./memory-fabric/mcp";
+import type {
+  FabricCorrectionRequest, FabricForgetRequest, FabricForgetResult, FabricPacket,
+  FabricReadRequest, FabricReadResult, FabricRunSummary, FabricSearchQuery,
+  FabricSearchResult, FabricSource, FabricStats,
+} from "../../shared/memory-fabric";
 import { captureMemoryFingerprint } from "./memory-source";
 import { captureRevisionSnapshot } from "./revision";
 import { runVerificationCommand } from "./verification";
@@ -289,7 +296,25 @@ function contextSummary(value: unknown): Run["contextSummary"] {
     warnings: input.warnings.map((warning) =>
       text(warning, "Context warning", 2_000),
     ),
+    memoryFabric: fabricRunSummary(input.memoryFabric),
   };
+}
+
+function fabricRunSummary(value: unknown): FabricRunSummary | undefined {
+  if (value === undefined) return undefined;
+  const item = record(value, "Memory receipt");
+  const bounded = (name: string, maximum = 2_000_000) => {
+    const value = item[name];
+    if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > maximum)
+      throw new Error("Invalid saved memory receipt.");
+    return Number(value);
+  };
+  if (!Array.isArray(item.sourceIds) || item.sourceIds.length > 64 || !Array.isArray(item.warnings) || item.warnings.length > 100)
+    throw new Error("Invalid saved memory receipt.");
+  return { packetId: identifier(item.packetId), watermark: bounded("watermark", Number.MAX_SAFE_INTEGER),
+    sourceIds: item.sourceIds.map((id) => identifier(id)), characters: bounded("characters"),
+    estimatedTokens: bounded("estimatedTokens"), expandedSources: bounded("expandedSources", 64),
+    warnings: item.warnings.map((warning) => text(warning, "Memory warning", 2_000)) };
 }
 
 /** A broken state file is reported and preserved, never silently replaced by empty state. */
@@ -681,6 +706,10 @@ export class WorkspaceService {
   private initialized = false;
   private closing = false;
   private readonly statePath: string;
+  private readonly memory: WorkspaceMemory;
+  private memoryEpoch = 0;
+  private memoryMutating = 0;
+  private memoryConsistencyError?: string;
 
   private async addSkills(context: ContextPreview, input = "", provider?: "codex" | "claude" | "ollama"): Promise<void> {
     const skills = await new SkillPackageStore(this.dataDir).prompt(input, provider);
@@ -702,6 +731,7 @@ export class WorkspaceService {
     private readonly bundleSettings?: Parameters<typeof startPluginMcp>[6],
   ) {
     this.statePath = path.join(dataDir, "workspace.json");
+    this.memory = new WorkspaceMemory(dataDir);
   }
 
   private exclusive<T>(action: () => Promise<T>): Promise<T> {
@@ -814,6 +844,9 @@ export class WorkspaceService {
       await this.refreshProviders(false);
       await this.persist();
     });
+    // Only Nova-owned retained data is migrated. No OEM source is reopened.
+    // The worker owns indexing/compression; migration never holds the mutation queue.
+    this.memory.initialize(this.state);
   }
 
   private async refreshProviders(probe = true): Promise<void> {
@@ -1110,6 +1143,8 @@ export class WorkspaceService {
           this.state.projects = previousProjects;
           throw error;
         }
+        this.memory.captureImport(thread);
+        this.memoryEpoch++;
         return clone(thread);
       }, expectedConnection),
     );
@@ -1190,6 +1225,8 @@ export class WorkspaceService {
         thread.updatedAt = now();
         try { await this.persist(); }
         catch (error) { Object.assign(thread, before); throw error; }
+        this.memory.captureImport(thread);
+        this.memoryEpoch++;
         return clone(thread);
       }, expectedConnection);
     });
@@ -1292,6 +1329,8 @@ export class WorkspaceService {
           );
         throw error;
       }
+      this.memory.captureNote(memory);
+      this.memoryEpoch++;
       return clone(memory);
     });
   }
@@ -1435,7 +1474,7 @@ export class WorkspaceService {
 
   async deleteThread(id: string): Promise<void> {
     this.ready();
-    return this.exclusive(async () => {
+    const validateDeletion = () => {
       this.ready();
       const thread = this.getThread(id);
       const runs = this.state.runs.filter((run) => run.threadId === thread.id);
@@ -1445,18 +1484,137 @@ export class WorkspaceService {
       if (runs.some((run) => run.terminationUnconfirmed && !run.recoveryAcknowledgedAt) ||
           checks.some((check) => check.terminationUnconfirmed && !check.recoveryAcknowledgedAt))
         throw new Error("Resolve this thread's worker cleanup in Recovery before deleting it.");
-      const before = { threads: this.state.threads, runs: this.state.runs, verifications: this.state.verifications };
-      this.state.threads = before.threads.filter((entry) => entry.id !== thread.id);
-      this.state.runs = before.runs.filter((entry) => entry.threadId !== thread.id);
-      this.state.verifications = before.verifications.filter((entry) => entry.threadId !== thread.id);
-      try { await this.persist(); }
-      catch (error) { Object.assign(this.state, before); throw error; }
-    });
+      return { projectId: thread.projectId, threadId: thread.id };
+    };
+    validateDeletion();
+    this.memoryMutating++;
+    let purgeStarted = false;
+    try {
+      await this.memory.idle();
+      const removed = await this.exclusive(async () => validateDeletion());
+      // Purge the archive before removing its legacy origins. If interrupted,
+      // tombstones prevent resurrection and the conversation remains visible
+      // for retry. Never strand invisible evidence after deleting its thread.
+      // Keep the potentially large purge outside the UI mutation queue.
+      for (;;) {
+        const page = await this.memory.service.search({ ...removed, includeSuperseded: true, limit: 32 });
+        if (!page.items.length) break;
+        const origins = new Set<string>();
+        for (const item of page.items) {
+          if (origins.has(item.source.key)) continue;
+          origins.add(item.source.key);
+          purgeStarted = true;
+          await this.memory.service.forget({ projectId: removed.projectId, id: item.source.id });
+        }
+      }
+      await this.exclusive(async () => {
+        validateDeletion();
+        const before = { threads: this.state.threads, runs: this.state.runs, verifications: this.state.verifications };
+        this.state.threads = before.threads.filter((entry) => entry.id !== removed.threadId);
+        this.state.runs = before.runs.filter((entry) => entry.threadId !== removed.threadId);
+        this.state.verifications = before.verifications.filter((entry) => entry.threadId !== removed.threadId);
+        try { await this.persist(); }
+        catch (error) { Object.assign(this.state, before); throw error; }
+        this.memoryEpoch++;
+      });
+    } catch (error) {
+      if (purgeStarted)
+        this.memoryConsistencyError = "Conversation deletion did not finish across all retained evidence. Inspect the archive before launching with memory.";
+      throw error;
+    } finally { this.memoryMutating--; }
+  }
+
+  async memoryFabricSearch(value: FabricSearchQuery): Promise<FabricSearchResult> {
+    this.ready();
+    this.getProject(identifier(value.projectId));
+    return this.memory.service.search(value);
+  }
+
+  async memoryFabricRead(value: FabricReadRequest): Promise<FabricReadResult> {
+    this.ready();
+    this.getProject(identifier(value.projectId));
+    return this.memory.service.read(value);
+  }
+
+  async memoryFabricStats(projectId: string): Promise<FabricStats> {
+    this.ready();
+    this.getProject(identifier(projectId));
+    return { ...await this.memory.service.stats(projectId),
+      migrationPending: this.memory.migrationPending,
+      captureWarning: this.memoryConsistencyError || this.memory.captureWarning };
+  }
+
+  async memoryFabricCorrect(value: FabricCorrectionRequest): Promise<FabricSource> {
+    this.ready();
+    const projectId = identifier(value.projectId);
+    this.getProject(projectId);
+    this.assertActionsIdle(projectId);
+    const request = { projectId, id: identifier(value.id), text: text(value.text, "Correction", 32_768),
+      reason: optionalText(value.reason, "Correction reason", 2_048) };
+    this.memoryMutating++;
+    try {
+      await this.memory.idle();
+      const original = await this.memory.service.read({ projectId, id: request.id, limit: 1 });
+      // Curated notes have a second, explicit context/export path. Retire that
+      // projection before promoting the user's correction in the source ledger.
+      const note = this.state.memories.find((entry) => entry.projectId === projectId && `note:${entry.id}` === original.source.key);
+      if (note?.status === "active") await this.archiveMemory(note.id);
+      const revised = await this.memory.service.correct(request);
+      this.memoryEpoch++;
+      return revised;
+    } catch (error) {
+      this.memoryConsistencyError = "A memory revision was not completed. Inspect Memory Fabric and restart Nova before launching with memory.";
+      throw error;
+    } finally { this.memoryMutating--; }
+  }
+
+  async memoryFabricForget(value: FabricForgetRequest): Promise<FabricForgetResult> {
+    this.ready();
+    const projectId = identifier(value.projectId);
+    this.getProject(projectId);
+    this.assertActionsIdle(projectId);
+    const request = { projectId, id: identifier(value.id) };
+    this.memoryMutating++;
+    try {
+      await this.memory.idle();
+      const original = await this.memory.service.read({ ...request, limit: 1 });
+      const note = this.state.memories.find((entry) => entry.projectId === projectId && `note:${entry.id}` === original.source.key);
+      if (note?.status === "active") await this.archiveMemory(note.id);
+      const result = await this.memory.service.forget(request);
+      this.memoryEpoch++;
+      return result;
+    } catch (error) {
+      this.memoryConsistencyError = "A memory deletion was not completed. Inspect Memory Fabric and restart Nova before launching with memory.";
+      throw error;
+    } finally { this.memoryMutating--; }
+  }
+
+  private async prepareFabric(request: RunRequest): Promise<{ packet: FabricPacket; epoch: number }> {
+    this.ready();
+    // Snapshot after outstanding state changes, then do retrieval on the worker
+    // outside the global mutation queue. Corrections/deletions revoke the snapshot.
+    await this.queue;
+    this.getProject(request.projectId);
+    if (request.threadId && this.getThread(request.threadId).projectId !== request.projectId)
+      throw new Error("Thread does not belong to this project.");
+    if (this.memoryMutating || this.memoryConsistencyError)
+      throw new Error(this.memoryConsistencyError || "Wait for the memory revision to finish before preparing context.");
+    const epoch = this.memoryEpoch;
+    const excludedKeys = this.state.memories.filter((entry) => entry.projectId === request.projectId)
+      .map((entry) => `note:${entry.id}`);
+    await this.memory.idle();
+    const packet = await this.memory.service.prepare({ projectId: request.projectId, threadId: request.threadId,
+      prompt: request.prompt, maxCharacters: 16_000, excludedKeys });
+    this.ready();
+    if (epoch !== this.memoryEpoch || this.memoryMutating)
+      throw new Error("Memory changed while preparing context. Preview or launch again to use the new revision.");
+    return { packet, epoch };
   }
 
   async previewContext(value: RunRequest): Promise<ContextPreview> {
     this.ready();
     const request = validateRunRequest(value, true);
+    const fabric = await this.prepareFabric(request);
     const project = clone(this.getProject(request.projectId));
     const thread = request.threadId
       ? clone(this.getThread(request.threadId))
@@ -1477,6 +1635,7 @@ export class WorkspaceService {
       // Linked memory paths belong to the checkout, not a native thread's
       // possibly nested execution directory. Keep those two roots separate.
       usesOriginalCheckout ? project.path : cwd,
+      fabric.packet,
     );
     await this.addSkills(preview, request.prompt, request.provider);
     if (!request.usePlugins && looksLikePluginCommand(request.prompt)) throw new Error("Enable Plugins for this run to use a plugin command or skill.");
@@ -1985,8 +2144,11 @@ export class WorkspaceService {
     if (!request.usePlugins && looksLikePluginCommand(request.prompt)) throw new Error("Enable Plugins for this run to use a plugin command.");
     if (request.desktopControl && !this.createDesktopSession) throw new Error("Desktop control is unavailable in this environment.");
     if (request.usePlugins && !this.approvePlugin) throw new Error("Plugin execution is unavailable in this environment.");
+    const fabric = await this.prepareFabric(request);
     return this.exclusive(async () => {
       this.ready();
+      if (fabric.epoch !== this.memoryEpoch || this.memoryMutating || this.memoryConsistencyError)
+        throw new Error("Memory changed before launch. Retry to prepare the current evidence revision.");
       if (this.state.accountRecovery || this.state.accountOperation)
         throw new Error("Resolve provider account cleanup in Settings → Recovery before starting agents.");
       const project = this.getProject(request.projectId);
@@ -2112,6 +2274,7 @@ export class WorkspaceService {
         thread,
         request.prompt,
         thread.worktreePath ? cwd : project.path,
+        fabric.packet,
       );
       this.ready();
       const run: Run = {
@@ -2136,6 +2299,7 @@ export class WorkspaceService {
           estimatedTokens: context.estimatedTokens,
           omittedMemoryIds: context.omittedMemoryIds,
           warnings: context.warnings,
+          memoryFabric: context.memoryFabric,
         },
         events: [],
         verification: "not-run",
@@ -2165,6 +2329,7 @@ export class WorkspaceService {
         );
       }
       const settings = clone(this.state.settings);
+      this.memory.captureRunPrompt(run);
       let persistenceFailure: string | undefined;
       const pendingEvents: NormalizedEvent[] = [];
       let flushQueued = false;
@@ -2224,6 +2389,7 @@ export class WorkspaceService {
           let pluginCopies: Awaited<ReturnType<PluginPackageStore["prepareRun"]>> | undefined;
           let plugins: Awaited<ReturnType<typeof startPluginMcp>> | undefined;
           let local: Awaited<ReturnType<typeof prepareLocalProvider>> | undefined;
+          let memoryMcp: Awaited<ReturnType<typeof startMemoryMcp>> | undefined;
           let result: Awaited<ReturnType<typeof runProvider>> | undefined;
           let uncertainCleanup = false;
           try {
@@ -2309,6 +2475,31 @@ export class WorkspaceService {
               desktop = await startDesktopMcp(await this.createDesktopSession!(permissionContext), controller.signal);
               context.prompt += NOVA_DESKTOP_SKILL;
             }
+            const memoryToolsAllowed = !parentDenied.some((name) => name === "mcp__*" || name.startsWith("mcp__nova_memory")) &&
+              (request.provider !== "claude" || (!!providerStatus?.supportsDesktopMcp && !/^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? "")));
+            if (memoryToolsAllowed) {
+              const excludedKeys = new Set(this.state.memories.filter((entry) => entry.projectId === project.id).map((entry) => `note:${entry.id}`));
+              memoryMcp = await startMemoryMcp({
+                projectId: project.id,
+                initialSourceIds: fabric.packet.items.map((item) => item.sourceId),
+                assertAvailable: () => {
+                  controller.signal.throwIfAborted();
+                  if (this.closing || this.memoryMutating || this.memoryEpoch !== fabric.epoch)
+                    throw new Error("Memory access was revoked because its scope or revision changed.");
+                },
+                search: async (query, signal) => {
+                  const page = await this.memory.service.search({ ...query, projectId: project.id }, signal);
+                  // Curated notes use the independently fingerprinted context path.
+                  // Memory tools must not bypass its source-freshness checks.
+                  return { ...page, items: page.items.filter((item) => item.source.kind === "correction" || !excludedKeys.has(item.source.key)) };
+                },
+                read: async (query, signal) => {
+                  const page = await this.memory.service.read({ ...query, projectId: project.id }, signal);
+                  if (page.source.kind !== "correction" && excludedKeys.has(page.source.key)) throw new Error("Use the reviewed curated-note context for this source.");
+                  return page;
+                },
+              }, controller.signal);
+            }
             local = request.provider === "ollama"
               ? await prepareLocalProvider(settings, model, controller.signal, this.localKey(connectionFromSettings(settings)), receiveThinking, request.reasoningEffort)
               : undefined;
@@ -2359,6 +2550,10 @@ export class WorkspaceService {
                 await this.persist();
               });
             }
+            if (fabric.epoch !== this.memoryEpoch || this.memoryMutating)
+              throw new Error("Memory changed after preparation. Retry the run with current evidence.");
+            await this.memory.service.recordPacket({ projectId: project.id, runId: run.id, packet: fabric.packet,
+              compiledPromptSha256: createHash("sha256").update(context.prompt).digest("hex") });
             result = await runProvider({
                   command: {
                     ...executable,
@@ -2367,6 +2562,7 @@ export class WorkspaceService {
                       ...local?.env,
                       ...(desktop ? { NOVA_DESKTOP_TOKEN: desktop.token } : {}),
                       ...(plugins ? { NOVA_PLUGIN_TOKEN: plugins.token } : {}),
+                      ...(memoryMcp ? { NOVA_MEMORY_TOKEN: memoryMcp.token } : {}),
                       CODEX_HOME: workerHome,
                     },
                     args: providerArguments(
@@ -2384,6 +2580,7 @@ export class WorkspaceService {
                         reasoningEffort: request.reasoningEffort,
                         desktopMcpUrl: desktop?.url,
                         pluginMcpUrl: plugins?.url,
+                        memoryMcpUrl: memoryMcp?.url,
                         pluginDirectory: pluginCopies?.providerDirectory,
                       },
                     ),
@@ -2412,6 +2609,7 @@ export class WorkspaceService {
             throw error;
           } finally {
             let cleanupError: unknown;
+            try { await memoryMcp?.dispose(); } catch (error) { cleanupError ??= error; }
             try { await desktop?.dispose(); } catch (error) { cleanupError ??= error; }
             try { await plugins?.dispose(); } catch (error) {
               if (error instanceof McpProcessError && error.terminationUnconfirmed) { uncertainCleanup = true; cleanupError = error; }
@@ -2457,6 +2655,7 @@ export class WorkspaceService {
             await this.persist();
             this.active.delete(run.id);
           });
+          this.memory.captureOutcome(run);
         })
         .catch(async (error) => {
           await this.exclusive(async () => {
@@ -2484,13 +2683,14 @@ export class WorkspaceService {
             }
             this.active.delete(run.id);
           });
+          this.memory.captureOutcome(run);
         });
       return clone(run);
     });
   }
 
   private addEvent(run: Run, event: Pick<RunEvent, "kind" | "text">): void {
-    if (!event.text.trim() || run.events.length >= 4_000) return;
+    if (!event.text.trim()) return;
     // Claude sends its final visible text in both assistant and result events.
     if (
       event.kind === "message" &&
@@ -2498,12 +2698,9 @@ export class WorkspaceService {
         event.text
     )
       return;
-    run.events.push({
-      id: randomUUID(),
-      at: now(),
-      kind: event.kind,
-      text: event.text.slice(0, 262_144),
-    });
+    const captured = { id: randomUUID(), at: now(), kind: event.kind, text: event.text };
+    this.memory.captureEvent(run, captured);
+    if (run.events.length < 4_000) run.events.push({ ...captured, text: event.text.slice(0, 262_144) });
   }
 
   private applyProviderEvent(run: Run, event: NormalizedEvent): void {
@@ -2594,27 +2791,47 @@ export class WorkspaceService {
           );
         throw error;
       }
+      this.memory.captureNote(memory);
+      this.memoryEpoch++;
       return clone(memory);
     });
   }
 
   async archiveMemory(id: string): Promise<void> {
     this.ready();
-    return this.exclusive(async () => {
+    const note = this.state.memories.find((entry) => entry.id === identifier(id, "Memory"));
+    if (!note) throw new Error("Memory not found.");
+    this.assertActionsIdle(note.projectId);
+    this.memoryMutating++;
+    try {
+      await this.memory.idle();
+      await this.exclusive(async () => {
       const memory = this.state.memories.find(
         (entry) => entry.id === identifier(id, "Memory"),
       );
       if (!memory) throw new Error("Memory not found.");
       const before = { status: memory.status, updatedAt: memory.updatedAt };
+      const previousSharedProjects = this.state.sharedMemoryProjects;
       memory.status = "archived";
       memory.updatedAt = now();
+      // A previously published file may still contain the retired statement.
+      // Stop Nova's automatic injection without modifying external exports or
+      // native CLI instructions; the user can preview and republish explicitly.
+      this.state.sharedMemoryProjects = previousSharedProjects?.filter((projectId) => projectId !== memory.projectId);
       try {
         await this.persist();
       } catch (error) {
         Object.assign(memory, before);
+        this.state.sharedMemoryProjects = previousSharedProjects;
         throw error;
       }
-    });
+      this.memoryEpoch++;
+      });
+      await this.memory.service.retire({ projectId: note.projectId, key: `note:${note.id}` });
+    } catch (error) {
+      this.memoryConsistencyError = "Archiving a memory did not finish. Restart Nova to reconcile retained note revisions before launching.";
+      throw error;
+    } finally { this.memoryMutating--; }
   }
 
   async saveVerificationProfile(
@@ -2892,6 +3109,7 @@ export class WorkspaceService {
             await this.persist();
             this.activeVerifications.delete(check.id);
           });
+          this.memory.captureVerification(check);
         })
         .catch(async (error) => {
           await this.exclusive(async () => {
@@ -2919,6 +3137,7 @@ export class WorkspaceService {
             }
             this.activeVerifications.delete(check.id);
           });
+          this.memory.captureVerification(check);
         });
       return clone(check);
     });
@@ -2969,5 +3188,6 @@ export class WorkspaceService {
       ),
     );
     await this.queue;
+    await this.memory.dispose();
   }
 }

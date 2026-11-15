@@ -59,6 +59,7 @@ import type {
   RecoveryRequest,
 } from "../shared/workspace-actions";
 import type { SharedMemoryRequest } from "../shared/sharing";
+import type { FabricCorrectionRequest, FabricReadRequest, FabricSearchQuery } from "../shared/memory-fabric";
 import {
   APP_URL,
   assetPath,
@@ -167,6 +168,9 @@ const PASSIVE_DURING_AUTH = new Set([
   "codex:resources",
   "codex:preview-resource",
   "codex:publish-handoff",
+  "memory:fabric-search",
+  "memory:fabric-read",
+  "memory:fabric-stats",
 ]);
 const ACCOUNT_OPERATIONS = new Set([
   "provider:account-status",
@@ -822,6 +826,29 @@ function registerHandlers(service: WorkspaceService) {
   handle("memory:save", (payload) =>
     service.saveMemory(objectPayload(payload) as unknown as MemoryInput),
   );
+  handle("memory:fabric-search", (payload) =>
+    service.memoryFabricSearch(objectPayload(payload) as unknown as FabricSearchQuery),
+  );
+  handle("memory:fabric-read", (payload) =>
+    service.memoryFabricRead(objectPayload(payload) as unknown as FabricReadRequest),
+  );
+  handle("memory:fabric-stats", (payload) => service.memoryFabricStats(identifier(payload)));
+  handle("memory:fabric-correct", (payload) =>
+    service.memoryFabricCorrect(objectPayload(payload) as unknown as FabricCorrectionRequest),
+  );
+  handle("memory:fabric-forget", async (payload) => {
+    const input = objectPayload(payload);
+    const request = { projectId: identifier(input.projectId), id: identifier(input.id) };
+    const { source } = await service.memoryFabricRead({ ...request, limit: 1 });
+    const confirmation = await dialog.showMessageBox(window!, {
+      type: "warning", buttons: ["Cancel", "Forget memory source"], defaultId: 0, cancelId: 0,
+      title: "Forget this memory source?",
+      message: `Forget ${confirmationValue(source.title)}?`,
+      detail: "This removes this source lineage from Nova's memory archive and invalidates context packets derived from it. A tombstone prevents automatic migration or reimport from restoring the same source. This does not erase original conversations, manually exported project files, provider records, or backups outside the memory archive. Previously sent context cannot be recalled. Review and remove those copies separately if needed.",
+    });
+    if (confirmation.response !== 1) return null;
+    return service.memoryFabricForget(request);
+  });
   handle("memory:archive", (value) => service.archiveMemory(identifier(value)));
   handle("verification:save-profile", (payload) =>
     service.saveVerificationProfile(

@@ -51,6 +51,7 @@ import { ThreadMenu } from "./components/ThreadMenu";
 import { ImportedHistory, RunCard } from "./components/Transcript";
 import { WorktreeActions } from "./components/WorktreeActions";
 import { SharedMemory } from "./components/SharedMemory";
+import { MemoryFabric } from "./components/MemoryFabric";
 import {
   EmptyPanel,
   errorText,
@@ -1366,6 +1367,7 @@ export function App() {
                 )}
                 {tab === "memory" && (
                   <>
+                    {project && <MemoryFabric key={project.id} projectId={project.id} refreshKey={`${memoryVersion}:${runs.filter((run) => !isActive(run)).length}`} busy={workActive || sharing} onChanged={() => setContextRefresh((value) => value + 1)} />}
                     <div className="inspector-section-top">
                       <h3>Shared project memory</h3>
                       <div className="inline-actions">

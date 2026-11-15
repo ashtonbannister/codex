@@ -93,7 +93,7 @@ test("packaged main and sandboxed preload agree with bundler output before a bui
   assert.ok(configuration.build.files.includes("dist/**/*"));
   assert.match(
     buildScript,
-    /entryPoints:\s*\{\s*main:\s*["']src\/main\/main\.ts["'],\s*preload:\s*["']src\/main\/preload\.ts["'],?\s*\}/,
+    /entryPoints:\s*\{\s*main:\s*["']src\/main\/main\.ts["'],\s*preload:\s*["']src\/main\/preload\.ts["'],\s*["']memory-worker["']:\s*["']src\/main\/services\/memory-fabric\/worker\.ts["'],?\s*\}/,
   );
   assert.match(buildScript, /outdir:\s*["']dist\/main["']/);
   assert.match(

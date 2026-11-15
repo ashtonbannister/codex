@@ -1,5 +1,13 @@
 # Nova Workbench: product and implementation plan
 
+## Version 0.6.0 Memory Fabric implementation
+
+The provider-independent memory path now has a Nova-owned SQLite evidence ledger, Brotli payloads, independent raw FTS5 search, a dedicated worker, source-spanned extractive capsules, bounded query-specific packets, source/history inspection, revision correction, retirement, and forgetting with origin tombstones. Supported runs expose authenticated project-scoped read-only memory tools; model-facing context is reference data, never permission or verified truth. Active manual notes retain their existing source-freshness path, while Fabric replaces the older automatic recent-history injection so corrected/forgotten sources cannot reappear through that path.
+
+This is the implemented text/evidence foundation, **not** a completed trained frontier-memory research program. Dense embeddings, learned semantic extraction, sufficiency-policy training, temporal graphs, global personal-profile inference, and model-specific latent/soft-token codecs remain unimplemented. The compact views are lossy; retained sources are recoverable, but legacy omissions cannot be reconstructed. Local storage is not an encrypted vault, and deletion does not recall exports, original conversations, backups, or prior provider requests. Character-based token estimates and compressed payload counts must not be presented as measured billing or whole-system savings.
+
+See [Memory Fabric architecture and limits](docs/memory-fabric.md) for implemented module boundaries, budget/accounting rules, paper links, and a finite evaluation plan. Source tests/builds and Windows packaged/live-provider acceptance are separate results. The private-runtime/read-only-OEM boundary below remains unchanged.
+
 **v0.5.4 boundary update:** the historical v0.3/v0.5 shared OEM-home, native
 resume/fork, and native handoff-publication design below is superseded. Current
 Nova workers/sign-in use a private runtime; OEM folders are explicit read-only

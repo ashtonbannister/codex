@@ -179,6 +179,15 @@ export function createPreviewAPI(seedDemo: boolean): WorkbenchAPI {
   }
 
   return {
+    async memoryFabricSearch(query) {
+      return { items: [], total: 0, offset: query.offset ?? 0, limit: query.limit ?? 12, watermark: 0 };
+    },
+    async memoryFabricRead() { throw new Error("UI preview has no retained evidence archive. Open the desktop app to inspect real memory sources."); },
+    async memoryFabricStats() {
+      return { sources: 0, activeSources: 0, supersededSources: 0, sourceCharacters: 0, compressedBytes: 0, packets: 0, watermark: 0 };
+    },
+    async memoryFabricCorrect() { throw new Error("UI preview cannot correct or write a real memory source."); },
+    async memoryFabricForget() { throw new Error("UI preview cannot forget or delete a real memory source."); },
     async listPluginPackages() { return []; },
     async importPluginPackage() { return null; },
     async importPluginBundle() { return null; },

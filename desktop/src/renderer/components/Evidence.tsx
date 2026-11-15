@@ -99,6 +99,11 @@ export function ContextPanel({
             Token estimate uses characters ÷ 4. It is not the model’s tokenizer
             or a billing estimate.
           </p>
+          {preview.memoryFabric && <div className="context-warning">
+            <strong>Memory Fabric</strong>
+            <p>{preview.memoryFabric.sourceIds.length} source{preview.memoryFabric.sourceIds.length === 1 ? "" : "s"} · {preview.memoryFabric.expandedSources} expanded from original evidence · {preview.memoryFabric.characters.toLocaleString()} characters · archive revision {preview.memoryFabric.watermark}</p>
+            <p>Packet <code>{preview.memoryFabric.packetId}</code>. Source evidence is available in the Memory panel; the exact compiled data is included below.</p>
+          </div>}
           {!hasPrompt && (
             <p className="context-warning">
               No task text yet. This preview shows the shared context only; add

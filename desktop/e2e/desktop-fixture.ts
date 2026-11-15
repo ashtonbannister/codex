@@ -357,6 +357,15 @@ export async function installFakeDesktopBridge(
       const skillPackages: import("../src/shared/skills").SkillPackage[] = [];
       const pluginPackages: import("../src/shared/plugins").PluginPackage[] = [];
       const bridge: WorkbenchAPI = {
+        async memoryFabricSearch(query) {
+          return { items: [], total: 0, offset: query.offset ?? 0, limit: query.limit ?? 12, watermark: 0 };
+        },
+        async memoryFabricRead() { throw new Error("Synthetic desktop fixture has no retained memory archive."); },
+        async memoryFabricStats() {
+          return { sources: 0, activeSources: 0, supersededSources: 0, sourceCharacters: 0, compressedBytes: 0, packets: 0, watermark: 0 };
+        },
+        async memoryFabricCorrect() { throw new Error("Synthetic desktop fixture cannot correct real memory sources."); },
+        async memoryFabricForget() { throw new Error("Synthetic desktop fixture cannot forget real memory sources."); },
         async getAccountStatus(provider) {
           calls.accountChecks.push(provider);
           return { provider, state: signedIn.has(provider) ? "signed-in" : "signed-out", checkedAt: new Date().toISOString(), label: signedIn.has(provider) ? "fixture-account@example.invalid" : undefined, method: signedIn.has(provider) ? "official-cli-fixture" : undefined, message: "Synthetic account response. No real sign-in state was read." };

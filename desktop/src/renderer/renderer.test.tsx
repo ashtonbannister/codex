@@ -73,6 +73,18 @@ test("browser preview never advertises a runtime or executes a model/check", asy
   );
 });
 
+test("memory fabric preview is bounded and never claims real capture or destructive operations", async () => {
+  const api = createPreviewAPI(true);
+  const result = await api.memoryFabricSearch({ projectId: "preview-project", query: "driving", limit: 12 });
+  assert.deepEqual(result.items, []);
+  assert.equal(result.total, 0);
+  assert.equal(result.limit, 12);
+  assert.equal((await api.memoryFabricStats("preview-project")).sourceCharacters, 0);
+  await assert.rejects(api.memoryFabricRead({ projectId: "preview-project", id: "sample" }), /UI preview/);
+  await assert.rejects(api.memoryFabricCorrect({ projectId: "preview-project", id: "sample", text: "Changed" }), /UI preview/);
+  await assert.rejects(api.memoryFabricForget({ projectId: "preview-project", id: "sample" }), /UI preview/);
+});
+
 test("preview provider accounts never imply a real login or share credentials", async () => {
   const api = createPreviewAPI(true);
   assert.equal((await api.getAccountStatus("codex")).state, "unknown");

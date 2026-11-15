@@ -11,6 +11,11 @@ import type {
 } from "../shared/types";
 
 const bridge: WorkbenchAPI = {
+  memoryFabricSearch: (query) => ipcRenderer.invoke("memory:fabric-search", query),
+  memoryFabricRead: (request) => ipcRenderer.invoke("memory:fabric-read", request),
+  memoryFabricStats: (projectId) => ipcRenderer.invoke("memory:fabric-stats", projectId),
+  memoryFabricCorrect: (request) => ipcRenderer.invoke("memory:fabric-correct", request),
+  memoryFabricForget: (request) => ipcRenderer.invoke("memory:fabric-forget", request),
   listPluginPackages: () => ipcRenderer.invoke("plugins:list"),
   importPluginPackage: () => ipcRenderer.invoke("plugins:import"),
   importPluginBundle: () => ipcRenderer.invoke("plugins:import-bundle"),

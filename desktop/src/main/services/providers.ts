@@ -718,18 +718,21 @@ export function providerArguments(
   cwd: string,
   mode: RunMode,
   model: string,
-  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string; pluginMcpUrl?: string; pluginDirectory?: string; claudeTools?: string[] } = {},
+  options: { allowNonGit?: boolean; localConfigArgs?: string[]; claudePartialMessages?: boolean; skillDirectory?: string; reasoningEffort?: import("../../shared/types").ReasoningEffort; desktopMcpUrl?: string; pluginMcpUrl?: string; memoryMcpUrl?: string; pluginDirectory?: string; claudeTools?: string[] } = {},
 ): string[] {
   if (provider === "claude") {
-    const hasMcp = !!(options.desktopMcpUrl || options.pluginMcpUrl);
+    // An enforced safe-mode policy is not an invitation to disable it for memory.
+    const memoryMcpUrl = /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SAFE_MODE ?? "") ? undefined : options.memoryMcpUrl;
+    const hasMcp = !!(options.desktopMcpUrl || options.pluginMcpUrl || memoryMcpUrl);
     const baselineTools = mode === "plan" ? ["Read", "Grep", "Glob"] : ["Read", "Grep", "Glob", "Edit", "Write"];
     const claudeTools = options.claudeTools ?? baselineTools;
     if (!claudeTools.length || claudeTools.some((name) => !baselineTools.includes(name))) throw new Error("The custom agent has no permitted tools for this run.");
     const servers = {
       ...(options.desktopMcpUrl ? { nova_desktop: { type: "http", url: options.desktopMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_DESKTOP_TOKEN}" } } } : {}),
       ...(options.pluginMcpUrl ? { nova_plugins: { type: "http", url: options.pluginMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_PLUGIN_TOKEN}" } } } : {}),
+      ...(memoryMcpUrl ? { nova_memory: { type: "http", url: memoryMcpUrl, alwaysLoad: true, headers: { Authorization: "Bearer ${NOVA_MEMORY_TOKEN}" } } } : {}),
     };
-    const allowedTools = [options.desktopMcpUrl ? "mcp__nova_desktop__desktop" : "", options.pluginMcpUrl ? "mcp__nova_plugins__*" : ""].filter(Boolean);
+    const allowedTools = [options.desktopMcpUrl ? "mcp__nova_desktop__desktop" : "", options.pluginMcpUrl ? "mcp__nova_plugins__*" : "", ...(memoryMcpUrl ? ["mcp__nova_memory__memory_search", "mcp__nova_memory__memory_read"] : [])].filter(Boolean);
     return [
       "-p",
       "--output-format",
@@ -791,6 +794,11 @@ export function providerArguments(
       "--config", `mcp_servers.nova_plugins.url=${JSON.stringify(options.pluginMcpUrl)}`,
       "--config", 'mcp_servers.nova_plugins.bearer_token_env_var="NOVA_PLUGIN_TOKEN"',
       "--config", 'mcp_servers.nova_plugins.default_tools_approval_mode="approve"',
+    ] : []),
+    ...(options.memoryMcpUrl ? [
+      "--config", `mcp_servers.nova_memory.url=${JSON.stringify(options.memoryMcpUrl)}`,
+      "--config", 'mcp_servers.nova_memory.bearer_token_env_var="NOVA_MEMORY_TOKEN"',
+      "--config", 'mcp_servers.nova_memory.default_tools_approval_mode="approve"',
     ] : []),
     "--config",
     'web_search="disabled"',
